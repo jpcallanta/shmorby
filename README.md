@@ -4,6 +4,10 @@ Shmorby is an AI sysadmin agent that operates infrastructure via shell,
 SSH, sudo, and AWS CLI commands. It handles deployment, configuration,
 monitoring, and diagnostics — like a senior SRE you can talk to.
 
+> **⚠️ Read [WARNING.md](WARNING.md) before use.** Shmorby can execute arbitrary
+> commands on your systems. The author(s) are not liable for damage, data loss,
+> or security breaches.
+
 ## Requirements
 
 | Requirement | Notes |
@@ -31,6 +35,10 @@ go build -o shmorby ./cmd/shmorby
 # 3. Type a task
 # ❯ check disk usage on this host
 ```
+
+> **Note:** Quantized local models (e.g. `llama3.2`) may lack the
+> accuracy and reasoning ability needed for reliable sysadmin tasks.
+> For best results, use a flagship LLM via OpenAI or Opencode Zen.
 
 ### With OpenAI
 
