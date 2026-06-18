@@ -1,0 +1,13 @@
+## ssh
+
+Executes a command on a remote host via SSH with key-based
+authentication (BatchMode=yes).
+
+Parameters:
+- `host` (required, string): remote hostname or IP
+- `command` (required, string): command to execute on the remote host
+- `user` (optional, string): SSH user (default: current user)
+- `port` (optional, integer): SSH port (default: 22)
+- `timeout_seconds` (optional, integer): timeout in seconds (default: 120)
+
+Output is truncated at 64 KiB.

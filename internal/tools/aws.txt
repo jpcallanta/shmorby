@@ -1,0 +1,9 @@
+## aws
+
+Executes the AWS CLI with the given arguments.
+
+Parameters:
+- `args` (required, array of strings): AWS CLI arguments
+- `timeout_seconds` (optional, integer): timeout in seconds (default: 120)
+
+Output is truncated at 64 KiB.

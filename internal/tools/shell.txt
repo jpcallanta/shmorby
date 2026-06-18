@@ -1,0 +1,10 @@
+## shell
+
+Executes a shell command on the local system.
+
+Parameters:
+- `command` (required, string): shell command to execute
+- `cwd` (optional, string): working directory (default: scope workdir or process cwd)
+- `timeout_seconds` (optional, integer): timeout in seconds (default: 120)
+
+Output is truncated at 64 KiB.

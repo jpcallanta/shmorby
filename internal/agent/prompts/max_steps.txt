@@ -1,0 +1,5 @@
+Tool iteration limit reached. Provide a concise summary covering:
+- What was accomplished so far
+- Key findings or results from tool outputs
+- Any remaining steps or recommendations
+- Final state of the work

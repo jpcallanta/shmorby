@@ -1,0 +1,9 @@
+## sudo
+
+Executes a command with sudo -n (non-interactive).
+
+Parameters:
+- `command` (required, string): command to execute with sudo
+- `timeout_seconds` (optional, integer): timeout in seconds (default: 120)
+
+Output is truncated at 64 KiB.
