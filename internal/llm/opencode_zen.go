@@ -153,7 +153,7 @@ var zenModelContextWindows = map[string]int{
 	"glm-5":   128000,
 
 	// MiniMax
-	"minimax-m3":  1000000,
+	"minimax-m3":   1000000,
 	"minimax-m2.7": 1000000,
 	"minimax-m2.5": 1000000,
 
@@ -169,7 +169,7 @@ var zenModelContextWindows = map[string]int{
 	"big-pickle": 1000000,
 
 	// MiMo
-	"mimo-v2.5":    128000,
+	"mimo-v2.5":     128000,
 	"mimo-v2.5-pro": 1000000,
 
 	// Free tier models

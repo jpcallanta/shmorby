@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"strings"
 
 	ctxcomp "shmorby/internal/context"
 	"shmorby/internal/llm"
@@ -24,6 +25,19 @@ type AgentEvent struct {
 
 // AgentEventFunc receives events during agent execution.
 type AgentEventFunc func(AgentEvent)
+
+// ToolPermissionResponse is returned by the permission callback.
+type ToolPermissionResponse int
+
+const (
+	PermDeny ToolPermissionResponse = iota
+	PermAllow
+	PermAllowAll
+)
+
+// ToolPermissionFunc is called when permission evaluates to "ask".
+// Return PermAllow, PermDeny, or PermAllowAll.
+type ToolPermissionFunc func(toolName, command, reason string) ToolPermissionResponse
 
 // Runs a single chat turn: builds system prompt, retrieves relevant memory,
 // sends user text to LLM with session history, and on success stores both
@@ -100,6 +114,8 @@ func RunTurn(
 // avoiding partial state on mid-loop LLM failure.
 // Returns final assistant text or iteration-limit message.
 // onEvent receives tool status updates; may be nil.
+// permFunc is called when a tool's permission evaluates to "ask"
+// (nil = always allow). toolRules are per-tool RuleSets from config.
 func RunTurnWithTools(
 	ctx context.Context,
 	p llm.Provider,
@@ -113,6 +129,8 @@ func RunTurnWithTools(
 	compressor *ctxcomp.Compressor,
 	modelInfo llm.ModelInfo,
 	onEvent AgentEventFunc,
+	permFunc ToolPermissionFunc,
+	toolRules map[string]*tools.RuleSet,
 ) (string, error) {
 	// Ensure at least one iteration runs.
 	if maxIterations < 1 {
@@ -163,6 +181,9 @@ func RunTurnWithTools(
 			memoryCtx = memory.FormatMemoryContext(result.Entries)
 		}
 	}
+
+	// Session-level overrides persist across iterations within one turn.
+	toolOverrides := make(map[string]bool)
 
 	for i := 0; i < maxIterations; i++ {
 		// Compress session before LLM call if configured.
@@ -234,18 +255,10 @@ func RunTurnWithTools(
 				"call_id", tc.ID,
 			)
 
+			cmd := extractCommand(tc.Name, tc.Args)
+
 			// Emit tool-start event.
 			if onEvent != nil {
-				cmd := tc.Name
-				if tc.Name == "shell" {
-					var sa struct {
-						Command string `json:"command"`
-					}
-					if json.Unmarshal([]byte(tc.Args), &sa) == nil &&
-						sa.Command != "" {
-						cmd = sa.Command
-					}
-				}
 				onEvent(AgentEvent{
 					Type: "tool-start",
 					Name: tc.Name,
@@ -256,36 +269,75 @@ func RunTurnWithTools(
 			var result string
 			var runErr error
 
-			// Reject shell tool when not enabled; other tools
-			// (ssh/sudo/aws) still work.
-			if tc.Name == "shell" && !shellEnabled {
-				result = "error: shell tool disabled " +
-					"(shell_enabled=false)"
-			} else if mode == "diagnose" && tc.Name == "shell" {
-				var sa struct {
-					Command string `json:"command"`
+			// Permission evaluation (phase 26): check tool-level
+			// perm + rule set before execution.
+			tool, ok := registry.Lookup(tc.Name)
+			if !ok {
+				result = "error: tool not found"
+			} else if !toolOverrides[tc.Name] {
+				action, reason, pErr := tools.EvaluateToolPermission(
+					tool.PermLevel(), cmd, toolRules[tc.Name],
+				)
+				if pErr != nil && action != "ask" {
+					result = "error: " + pErr.Error()
 				}
-				if uErr := json.Unmarshal(
-					[]byte(tc.Args), &sa,
-				); uErr == nil && sa.Command != "" {
-					if mErr := tools.CheckMutating(
-						sa.Command,
-					); mErr != nil {
-						result = "error: " + mErr.Error()
-					} else {
-						result, runErr = registry.Run(
-							ctx, tc.Name,
-							json.RawMessage(tc.Args),
+				if action == "ask" {
+					// Default allow preserves v1 behavior
+					// when no interactive func is wired.
+					resp := PermAllow
+					if permFunc != nil {
+						resp = permFunc(tc.Name, cmd, reason)
+					}
+					switch resp {
+					case PermDeny:
+						result = fmt.Sprintf(
+							"error: permission denied for %s: %s",
+							tc.Name, cmd,
 						)
+					case PermAllowAll:
+						toolOverrides[tc.Name] = true
+					case PermAllow:
+						// fall through to execute
+					}
+				}
+			}
+
+			// Execute tool if no permission error.
+			if result == "" {
+				// Reject shell tool when not enabled; other
+				// tools (ssh/sudo/aws) still work.
+				if tc.Name == "shell" && !shellEnabled {
+					result = "error: shell tool disabled " +
+						"(shell_enabled=false)"
+				} else if mode == "diagnose" &&
+					tc.Name == "shell" {
+					var sa struct {
+						Command string `json:"command"`
+					}
+					if uErr := json.Unmarshal(
+						[]byte(tc.Args), &sa,
+					); uErr == nil && sa.Command != "" {
+						if mErr := tools.CheckMutating(
+							sa.Command,
+						); mErr != nil {
+							result = "error: " + mErr.Error()
+						} else {
+							result, runErr = registry.Run(
+								ctx, tc.Name,
+								json.RawMessage(tc.Args),
+							)
+						}
+					} else {
+						result = "error: diagnose mode " +
+							"rejected shell call with " +
+							"invalid or empty command"
 					}
 				} else {
-					result = "error: diagnose mode rejected " +
-						"shell call with invalid or empty command"
+					result, runErr = registry.Run(
+						ctx, tc.Name,
+						json.RawMessage(tc.Args),
+					)
 				}
-			} else {
-				result, runErr = registry.Run(
-					ctx, tc.Name, json.RawMessage(tc.Args),
-				)
 			}
 
 			// Capture to memory store after successful execution.
@@ -421,4 +473,33 @@ func filterDiagnoseSchemas(schemas []tools.ToolSchema) []tools.ToolSchema {
 	}
 
 	return filtered
+}
+
+// ExtractCommand returns a human-readable command string from a
+// tool call's arguments. Used for permission prompts and events.
+func extractCommand(toolName, argsJSON string) string {
+	switch toolName {
+	case "shell", "sudo":
+		var sa struct {
+			Command string `json:"command"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &sa) == nil {
+			return sa.Command
+		}
+	case "ssh":
+		var sa struct {
+			Command string `json:"command"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &sa) == nil {
+			return sa.Command
+		}
+	case "aws":
+		var sa struct {
+			Args []string `json:"args"`
+		}
+		if json.Unmarshal([]byte(argsJSON), &sa) == nil && len(sa.Args) > 0 {
+			return "aws " + strings.Join(sa.Args, " ")
+		}
+	}
+	return toolName
 }

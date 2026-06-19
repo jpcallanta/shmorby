@@ -76,16 +76,20 @@ func TestSudoTool_Run_MissingCommand_ReturnsError(t *testing.T) {
 	}
 }
 
-// TestSudoTool_Run_Deny_ReturnsError checks deny blocks.
-func TestSudoTool_Run_Deny_ReturnsError(t *testing.T) {
-	mock := &mockExecutor{Out: []byte("should-not-run")}
+// TestSudoTool_Run_Deny_NowExecutes checks Run() no longer checks
+// permission (enforced at agent loop level).
+func TestSudoTool_Run_Deny_NowExecutes(t *testing.T) {
+	mock := &mockExecutor{Out: []byte("whoami output")}
 	tool := NewSudoTool("deny", mock)
-	_, err := tool.Run(
+	result, err := tool.Run(
 		context.Background(),
 		[]byte(`{"command":"whoami"}`),
 	)
-	if err == nil {
-		t.Fatal("want error for deny, got nil")
+	if err != nil {
+		t.Fatalf("want no error (permission checked by agent loop), got %v", err)
+	}
+	if !strings.Contains(result, "whoami") {
+		t.Errorf("want tool output, got %q", result)
 	}
 }
 

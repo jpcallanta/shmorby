@@ -146,19 +146,20 @@ func TestSSHTool_Run_MissingCommand_ReturnsError(t *testing.T) {
 	}
 }
 
-// TestSSHTool_Run_Deny_ReturnsError checks deny blocks execution.
-func TestSSHTool_Run_Deny_ReturnsError(t *testing.T) {
-	mock := &mockExecutor{Out: []byte("should-not-run")}
+// TestSSHTool_Run_Deny_NowExecutes checks Run() no longer checks
+// permission (enforced at agent loop level).
+func TestSSHTool_Run_Deny_NowExecutes(t *testing.T) {
+	mock := &mockExecutor{Out: []byte("uptime output")}
 	tool := NewSSHTool("deny", mock)
-	_, err := tool.Run(
+	result, err := tool.Run(
 		context.Background(),
 		[]byte(`{"host":"x.com","command":"uptime"}`),
 	)
-	if err == nil {
-		t.Fatal("want error for deny, got nil")
+	if err != nil {
+		t.Fatalf("want no error (permission checked by agent loop), got %v", err)
 	}
-	if !strings.Contains(err.Error(), "denied") {
-		t.Errorf("want 'denied' in error, got %v", err)
+	if !strings.Contains(result, "uptime") {
+		t.Errorf("want tool output, got %q", result)
 	}
 }
 

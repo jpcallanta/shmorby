@@ -84,16 +84,20 @@ func TestAWSTool_Run_EmptyArgs_ReturnsError(t *testing.T) {
 	}
 }
 
-// TestAWSTool_Run_Deny_ReturnsError checks deny blocks.
-func TestAWSTool_Run_Deny_ReturnsError(t *testing.T) {
-	mock := &mockExecutor{Out: []byte("should-not-run")}
+// TestAWSTool_Run_Deny_NowExecutes checks Run() no longer checks
+// permission (enforced at agent loop level).
+func TestAWSTool_Run_Deny_NowExecutes(t *testing.T) {
+	mock := &mockExecutor{Out: []byte("s3 ls output")}
 	tool := NewAWSTool("deny", mock)
-	_, err := tool.Run(
+	result, err := tool.Run(
 		context.Background(),
 		[]byte(`{"args":["s3","ls"]}`),
 	)
-	if err == nil {
-		t.Fatal("want error for deny, got nil")
+	if err != nil {
+		t.Fatalf("want no error (permission checked by agent loop), got %v", err)
+	}
+	if !strings.Contains(result, "s3 ls") {
+		t.Errorf("want tool output, got %q", result)
 	}
 }
 

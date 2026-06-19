@@ -203,3 +203,31 @@ func TestEvaluateToolPermission_NoRuleFallback(t *testing.T) {
 		t.Errorf("want allow, got %q", action)
 	}
 }
+
+// TestRules verifies the core permission rule system is functional.
+// Matches the "go test -run TestRules" pattern from the phase spec.
+func TestRules(t *testing.T) {
+	rs := RuleSet{Rules: []PermissionRule{
+		{Match: "rm -rf *", Action: "deny"},
+	}}
+	action, _ := rs.Evaluate("rm -rf /")
+	if action != "deny" {
+		t.Errorf("RuleSet.Evaluate: want deny, got %q", action)
+	}
+
+	_, _, err := EvaluateToolPermission("deny", "anything", nil)
+	if err == nil {
+		t.Error("EvaluateToolPermission: want error for tool-level deny")
+	}
+
+	merged := MergeRules([]string{"destructive"}, []PermissionRule{
+		{Match: "custom-rule", Action: "allow"},
+	})
+	if len(merged.Rules) == 0 {
+		t.Fatal("MergeRules: returned empty set")
+	}
+	if merged.Rules[0].Match != "custom-rule" {
+		t.Errorf("MergeRules first rule: want 'custom-rule', got %q",
+			merged.Rules[0].Match)
+	}
+}

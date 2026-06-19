@@ -72,8 +72,11 @@ func (s *SudoTool) Description() string { return sudoDescription }
 // Returns the JSON schema for sudo parameters.
 func (s *SudoTool) Parameters() json.RawMessage { return sudoParams }
 
-// Parses args, checks permission, executes sudo -n with timeout,
-// truncates output, and logs audit info.
+// PermLevel returns the configured permission level.
+func (s *SudoTool) PermLevel() string { return s.perm }
+
+// Parses args, executes sudo -n with timeout, truncates output, and
+// logs audit info. Permission is enforced by the agent loop.
 func (s *SudoTool) Run(
 	ctx context.Context, args json.RawMessage,
 ) (string, error) {
@@ -85,10 +88,6 @@ func (s *SudoTool) Run(
 		return "", fmt.Errorf(
 			`sudo: missing required field "command"`,
 		)
-	}
-
-	if err := CheckPermission(s.perm); err != nil {
-		return "", err
 	}
 
 	timeout := s.defaultTimeout

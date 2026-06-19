@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -562,6 +563,7 @@ type fakeTool struct {
 	name   string
 	result string
 	err    error
+	perm   string
 }
 
 // Returns the tool name.
@@ -573,6 +575,14 @@ func (f *fakeTool) Description() string { return "fake tool for testing" }
 // Returns an empty object schema.
 func (f *fakeTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{"type":"object"}`)
+}
+
+// PermLevel returns the configured permission level.
+func (f *fakeTool) PermLevel() string {
+	if f.perm != "" {
+		return f.perm
+	}
+	return "allow"
 }
 
 // Returns the canned result or error.
@@ -607,6 +617,8 @@ func TestRunTurnWithTools_ToolCallThenResult(t *testing.T) {
 		"operate", "", "", "m", "list files",
 		reg, 5, true,
 		nil, nil, nil, llm.ModelInfo{},
+		nil,
+		nil,
 		nil,
 	)
 	if err != nil {
@@ -673,6 +685,8 @@ func TestRunTurnWithTools_MaxIterations(t *testing.T) {
 		"operate", "", "", "m", "do it",
 		reg, 2, true,
 		nil, nil, nil, llm.ModelInfo{},
+		nil,
+		nil,
 		nil,
 	)
 	if err != nil {
@@ -764,6 +778,8 @@ func TestRunTurnWithTools_UnknownToolError(t *testing.T) {
 		reg, 5, true,
 		nil, nil, nil, llm.ModelInfo{},
 		nil,
+		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -780,8 +796,8 @@ func TestRunTurnWithTools_UnknownToolError(t *testing.T) {
 	if msgs[2].Role != "tool" {
 		t.Errorf("msg[2]: want tool role, got %s", msgs[2].Role)
 	}
-	if !strings.Contains(msgs[2].Content, "unknown tool") {
-		t.Errorf("msg[2]: want error about unknown tool, got %q",
+	if !strings.Contains(msgs[2].Content, "tool not found") {
+		t.Errorf("msg[2]: want error about tool not found, got %q",
 			msgs[2].Content)
 	}
 	if msgs[2].ToolName != "nonexistent" {
@@ -816,6 +832,8 @@ func TestRunTurnWithTools_SecondChat_IncludesAssistantToolCalls(t *testing.T) {
 		"operate", "", "", "m", "test",
 		reg, 5, true,
 		nil, nil, nil, llm.ModelInfo{},
+		nil,
+		nil,
 		nil,
 	)
 	if err != nil {
@@ -883,6 +901,8 @@ func TestRunTurnWithTools_PartialOutputOnError(t *testing.T) {
 		reg, 5, true,
 		nil, nil, nil, llm.ModelInfo{},
 		nil,
+		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -926,6 +946,8 @@ func TestRunTurnWithTools_ShellDisabled(t *testing.T) {
 		"operate", "", "", "m", "hi",
 		reg, 5, false,
 		nil, nil, nil, llm.ModelInfo{},
+		nil,
+		nil,
 		nil,
 	)
 	if err != nil {
@@ -993,6 +1015,51 @@ func TestREPL_ChatTurn_WithToolsPath(t *testing.T) {
 	}
 }
 
+// TestREPL_PermissionPrompt_Allow checks toolPermissionFunc returns
+// PermAllow for "y" input.
+func TestREPL_PermissionPrompt_Allow(t *testing.T) {
+	r := &REPL{
+		In:      strings.NewReader("y\n"),
+		Out:     &strings.Builder{},
+		scanner: bufio.NewScanner(strings.NewReader("y\n")),
+	}
+
+	result := r.toolPermissionFunc("shell", "reboot", "restart")
+	if result != PermAllow {
+		t.Errorf("want PermAllow, got %v", result)
+	}
+}
+
+// TestREPL_PermissionPrompt_Deny checks toolPermissionFunc returns
+// PermDeny for "n" input.
+func TestREPL_PermissionPrompt_Deny(t *testing.T) {
+	r := &REPL{
+		In:      strings.NewReader("n\n"),
+		Out:     &strings.Builder{},
+		scanner: bufio.NewScanner(strings.NewReader("n\n")),
+	}
+
+	result := r.toolPermissionFunc("shell", "reboot", "restart")
+	if result != PermDeny {
+		t.Errorf("want PermDeny, got %v", result)
+	}
+}
+
+// TestREPL_PermissionPrompt_AllowAll checks toolPermissionFunc returns
+// PermAllowAll for "a" input.
+func TestREPL_PermissionPrompt_AllowAll(t *testing.T) {
+	r := &REPL{
+		In:      strings.NewReader("a\n"),
+		Out:     &strings.Builder{},
+		scanner: bufio.NewScanner(strings.NewReader("a\n")),
+	}
+
+	result := r.toolPermissionFunc("shell", "reboot", "restart")
+	if result != PermAllowAll {
+		t.Errorf("want PermAllowAll, got %v", result)
+	}
+}
+
 // TestRunTurnWithTools_DiagnoseBlocksMutatingShell checks that
 // diagnose mode blocks a mutating shell command.
 func TestRunTurnWithTools_DiagnoseBlocksMutatingShell(t *testing.T) {
@@ -1020,6 +1087,8 @@ func TestRunTurnWithTools_DiagnoseBlocksMutatingShell(t *testing.T) {
 		"diagnose", "", "", "m", "delete files",
 		reg, 5, true,
 		nil, nil, nil, llm.ModelInfo{},
+		nil,
+		nil,
 		nil,
 	)
 	if err != nil {
@@ -1072,6 +1141,8 @@ func TestRunTurnWithTools_OperateAllowsMutatingShell(t *testing.T) {
 		reg, 5, true,
 		nil, nil, nil, llm.ModelInfo{},
 		nil,
+		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -1112,6 +1183,8 @@ func TestRunTurnWithTools_ShellDisabledStillAdvertisesNonShell(t *testing.T) {
 		"operate", "", "", "m", "hi",
 		reg, 5, false,
 		nil, nil, nil, llm.ModelInfo{},
+		nil,
+		nil,
 		nil,
 	)
 	if err != nil {
@@ -1168,6 +1241,8 @@ func TestRunTurnWithTools_DiagnoseBadArgs_Blocked(t *testing.T) {
 		"diagnose", "", "", "m", "bad args",
 		reg, 5, true,
 		nil, nil, nil, llm.ModelInfo{},
+		nil,
+		nil,
 		nil,
 	)
 	if err != nil {
@@ -1245,6 +1320,8 @@ func TestRunTurnWithTools_ClampMaxIterations(t *testing.T) {
 		reg, 0, true,
 		nil, nil, nil, llm.ModelInfo{},
 		nil,
+		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -1283,6 +1360,8 @@ func TestRunTurnWithTools_MaxIterationsSummaryFailure(t *testing.T) {
 		reg, 2, true,
 		nil, nil, nil, llm.ModelInfo{},
 		nil,
+		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -1303,5 +1382,237 @@ func TestRunTurnWithTools_MaxIterationsSummaryFailure(t *testing.T) {
 	if !strings.Contains(msgs[6].Content, "iteration limit") {
 		t.Errorf("msg[6]: want iteration limit content, got %q",
 			msgs[6].Content)
+	}
+}
+
+// TestRunTurnWithTools_PermissionDenyBlocks checks tool-level "deny"
+// blocks execution even with nil permFunc.
+func TestRunTurnWithTools_PermissionDenyBlocks(t *testing.T) {
+	toolResp := llm.ChatResponse{
+		Message: llm.Message{Role: "assistant", Content: "Running..."},
+		ToolCalls: []llm.ToolCall{
+			{ID: "call_1", Name: "shell", Args: `{"command":"rm -rf /"}`},
+		},
+	}
+	textResp := llm.ChatResponse{
+		Message: llm.Message{Role: "assistant", Content: "Blocked"},
+	}
+	p := &fakeStepProvider{
+		name:  "fake",
+		steps: []llm.ChatResponse{toolResp, textResp},
+	}
+	s := session.New()
+
+	reg := tools.NewRegistry()
+	reg.Register(&fakeTool{
+		name: "shell", result: "should-not-run", perm: "deny",
+	})
+
+	reply, err := RunTurnWithTools(
+		context.Background(), p, s,
+		"operate", "", "", "m", "delete files",
+		reg, 5, true,
+		nil, nil, nil, llm.ModelInfo{},
+		nil,
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("RunTurnWithTools: %v", err)
+	}
+	if reply != "Blocked" {
+		t.Errorf("want reply %q, got %q", "Blocked", reply)
+	}
+
+	msgs := s.Messages()
+	if len(msgs) != 4 {
+		t.Fatalf("want 4 messages, got %d", len(msgs))
+	}
+	toolMsg := msgs[2]
+	if !strings.Contains(toolMsg.Content, "permission denied") {
+		t.Errorf("want 'permission denied' in tool result, got %q",
+			toolMsg.Content)
+	}
+	if toolMsg.Content == "should-not-run" {
+		t.Errorf("tool executed despite deny perm level")
+	}
+}
+
+// TestRunTurnWithTools_PermissionAsk_DefaultAllow checks "ask" with
+// nil permFunc defaults to allow (v1 backward compatibility).
+func TestRunTurnWithTools_PermissionAsk_DefaultAllow(t *testing.T) {
+	toolResp := llm.ChatResponse{
+		Message: llm.Message{Role: "assistant", Content: "Running..."},
+		ToolCalls: []llm.ToolCall{
+			{ID: "call_1", Name: "shell", Args: `{"command":"echo hi"}`},
+		},
+	}
+	textResp := llm.ChatResponse{
+		Message: llm.Message{Role: "assistant", Content: "Output: hi"},
+	}
+	p := &fakeStepProvider{
+		name:  "fake",
+		steps: []llm.ChatResponse{toolResp, textResp},
+	}
+	s := session.New()
+
+	reg := tools.NewRegistry()
+	reg.Register(&fakeTool{
+		name: "shell", result: "echo hi", perm: "ask",
+	})
+
+	reply, err := RunTurnWithTools(
+		context.Background(), p, s,
+		"operate", "", "", "m", "say hi",
+		reg, 5, true,
+		nil, nil, nil, llm.ModelInfo{},
+		nil,
+		nil,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("RunTurnWithTools: %v", err)
+	}
+	if reply != "Output: hi" {
+		t.Errorf("want reply %q, got %q", "Output: hi", reply)
+	}
+
+	msgs := s.Messages()
+	if len(msgs) != 4 {
+		t.Fatalf("want 4 messages, got %d", len(msgs))
+	}
+	if !strings.Contains(msgs[2].Content, "echo hi") {
+		t.Errorf("want tool to have executed, got %q", msgs[2].Content)
+	}
+}
+
+// TestRunTurnWithTools_PermissionAsk_DeniedByPermFunc checks permFunc
+// returning PermDeny blocks execution for "ask" tools.
+func TestRunTurnWithTools_PermissionAsk_DeniedByPermFunc(t *testing.T) {
+	toolResp := llm.ChatResponse{
+		Message: llm.Message{Role: "assistant", Content: "Running..."},
+		ToolCalls: []llm.ToolCall{
+			{ID: "call_1", Name: "shell", Args: `{"command":"reboot"}`},
+		},
+	}
+	textResp := llm.ChatResponse{
+		Message: llm.Message{Role: "assistant", Content: "Denied"},
+	}
+	p := &fakeStepProvider{
+		name:  "fake",
+		steps: []llm.ChatResponse{toolResp, textResp},
+	}
+	s := session.New()
+
+	reg := tools.NewRegistry()
+	reg.Register(&fakeTool{
+		name: "shell", result: "should-not-run", perm: "ask",
+	})
+
+	permFunc := func(toolName, command, reason string) ToolPermissionResponse {
+		return PermDeny
+	}
+
+	reply, err := RunTurnWithTools(
+		context.Background(), p, s,
+		"operate", "", "", "m", "reboot",
+		reg, 5, true,
+		nil, nil, nil, llm.ModelInfo{},
+		nil,
+		permFunc,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("RunTurnWithTools: %v", err)
+	}
+	if reply != "Denied" {
+		t.Errorf("want reply %q, got %q", "Denied", reply)
+	}
+
+	msgs := s.Messages()
+	if len(msgs) != 4 {
+		t.Fatalf("want 4 messages, got %d", len(msgs))
+	}
+	toolMsg := msgs[2]
+	if !strings.Contains(toolMsg.Content, "permission denied") {
+		t.Errorf("want 'permission denied' in tool result, got %q",
+			toolMsg.Content)
+	}
+	if toolMsg.Content == "should-not-run" {
+		t.Errorf("tool executed despite permFunc deny")
+	}
+}
+
+// TestRunTurnWithTools_PermissionAllowAll_SkipsSubsequent checks
+// PermAllowAll adds tool to overrides so subsequent same-tool calls
+// skip permission check.
+func TestRunTurnWithTools_PermissionAllowAll_SkipsSubsequent(t *testing.T) {
+	// LLM returns two tool calls for the same tool in one response,
+	// then a final text response.
+	toolResp := llm.ChatResponse{
+		Message: llm.Message{Role: "assistant", Content: "Running..."},
+		ToolCalls: []llm.ToolCall{
+			{ID: "call_1", Name: "shell", Args: `{"command":"cmd1"}`},
+			{ID: "call_2", Name: "shell", Args: `{"command":"cmd2"}`},
+		},
+	}
+	textResp := llm.ChatResponse{
+		Message: llm.Message{Role: "assistant", Content: "Both ran"},
+	}
+	p := &fakeStepProvider{
+		name:  "fake",
+		steps: []llm.ChatResponse{toolResp, textResp},
+	}
+	s := session.New()
+
+	reg := tools.NewRegistry()
+	reg.Register(&fakeTool{
+		name: "shell", result: "executed", perm: "ask",
+	})
+
+	var permFuncCalls []string
+	permFunc := func(toolName, command, reason string) ToolPermissionResponse {
+		permFuncCalls = append(permFuncCalls, command)
+		return PermAllowAll
+	}
+
+	reply, err := RunTurnWithTools(
+		context.Background(), p, s,
+		"operate", "", "", "m", "run two commands",
+		reg, 5, true,
+		nil, nil, nil, llm.ModelInfo{},
+		nil,
+		permFunc,
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("RunTurnWithTools: %v", err)
+	}
+	if reply != "Both ran" {
+		t.Errorf("want reply %q, got %q", "Both ran", reply)
+	}
+
+	// PermFunc should have been called only once (for cmd1 cmd2
+	// should be allowed via override).
+	if len(permFuncCalls) != 1 {
+		t.Errorf("want 1 permFunc call, got %d: %v",
+			len(permFuncCalls), permFuncCalls)
+	}
+	if len(permFuncCalls) > 0 && permFuncCalls[0] != "cmd1" {
+		t.Errorf("first permFunc call: want 'cmd1', got %q",
+			permFuncCalls[0])
+	}
+
+	msgs := s.Messages()
+	if len(msgs) != 5 {
+		t.Fatalf("want 5 messages (user + assistant + 2 tools + assistant), got %d",
+			len(msgs))
+	}
+	// Both tools should have executed.
+	if msgs[2].Content != "executed" {
+		t.Errorf("tool 1: want 'executed', got %q", msgs[2].Content)
+	}
+	if msgs[3].Content != "executed" {
+		t.Errorf("tool 2: want 'executed', got %q", msgs[3].Content)
 	}
 }

@@ -55,6 +55,9 @@ type streamDoneMsg struct{}
 type permissionResultMsg struct {
 	choice PermissionChoice
 }
+type permissionReqMsg struct {
+	prompt PermissionPrompt
+}
 
 // settleMsg signals that the stream settle timer has expired.
 type settleMsg struct{}
@@ -210,6 +213,10 @@ type Model struct {
 
 	// Phase 21: help overlay
 	showHelp *HelpModel
+
+	// Phase 26: interactive permission prompts
+	permissionReqChan chan PermissionPrompt
+	toolRules         map[string]*tools.RuleSet
 }
 
 // CtxStats holds compression and token usage statistics for display.
@@ -1477,6 +1484,9 @@ type Config struct {
 	LogCollapseThreshold int
 	LogChan              chan LogEntry
 	LogHandler           *TUILogHandler
+
+	// Phase 26: per-tool permission rule sets
+	ToolRules map[string]*tools.RuleSet
 }
 
 // NewModel creates a Bubbletea model ready to run.
@@ -1633,6 +1643,8 @@ func NewModel(cfg Config) Model {
 		logCollapseThreshold: logThreshold,
 		logHandler:           cfg.LogHandler,
 		agentEventChan:       make(chan agent.AgentEvent, 20),
+		permissionReqChan:    make(chan PermissionPrompt),
+		toolRules:            cfg.ToolRules,
 		showHelp:             NewHelpModel(),
 	}
 }
@@ -1646,6 +1658,7 @@ func (m Model) Init() tea.Cmd {
 		cmds = append(cmds, m.listenLogChan())
 	}
 	cmds = append(cmds, m.listenAgentEvents())
+	cmds = append(cmds, m.listenPermissionReqs())
 	return tea.Batch(cmds...)
 }
 
@@ -1670,6 +1683,18 @@ func (m Model) listenAgentEvents() tea.Cmd {
 			return nil
 		}
 		return agentEventMsg{event: ev}
+	}
+}
+
+// listenPermissionReqs reads from the permission request channel and
+// returns prompts as bubbletea messages. Returns a follow-up command.
+func (m Model) listenPermissionReqs() tea.Cmd {
+	return func() tea.Msg {
+		prompt, ok := <-m.permissionReqChan
+		if !ok {
+			return nil
+		}
+		return permissionReqMsg{prompt: prompt}
 	}
 }
 
@@ -1815,6 +1840,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		})
 		m.syncViewport()
 		return m, nil
+
+	case permissionReqMsg:
+		m.permission = &msg.prompt
+		return m, m.listenPermissionReqs()
 
 	case agentEventMsg:
 		switch msg.event.Type {
@@ -2626,6 +2655,12 @@ func (m Model) runAgentTurn(
 		var reply string
 		var err error
 		if m.registry != nil {
+			// Only wire permission func when interactive rules
+			// are configured (permission.interactive: true).
+			var permFunc agent.ToolPermissionFunc
+			if m.toolRules != nil {
+				permFunc = m.toolPermissionFunc
+			}
 			reply, err = agent.RunTurnWithTools(
 				ctx, m.provider, m.session,
 				m.mode, m.scope, m.override, m.model, input,
@@ -2638,6 +2673,8 @@ func (m Model) runAgentTurn(
 					default:
 					}
 				},
+				permFunc,
+				m.toolRules,
 			)
 		} else {
 			reply, err = agent.RunTurn(
@@ -2700,6 +2737,25 @@ func (m Model) consumeStream(
 			}
 		}
 		return streamDoneMsg{}
+	}
+}
+
+// toolPermissionFunc implements agent.ToolPermissionFunc for the TUI.
+// Sends a permission prompt to the TUI update loop and blocks until
+// the user responds.
+func (m *Model) toolPermissionFunc(toolName, command, reason string) agent.ToolPermissionResponse {
+	prompt := NewPermissionPrompt(toolName, command, reason, "tool permission")
+	m.permissionReqChan <- prompt
+
+	choice := <-prompt.Choice
+
+	switch choice {
+	case PermissionAllowAll:
+		return agent.PermAllowAll
+	case PermissionAllow:
+		return agent.PermAllow
+	default:
+		return agent.PermDeny
 	}
 }
 

@@ -1,30 +1,6 @@
 package tools
 
-import (
-	"fmt"
-	"log/slog"
-)
-
-// Returns an error if the permission level denies execution.
-// "ask" logs a warning and allows (v1 behavior).
-func CheckPermission(level string) error {
-	switch level {
-	case "deny":
-		return fmt.Errorf("tool: permission denied")
-	case "ask":
-		slog.Warn("tool: ask permission, allowing in v1",
-			"level", level,
-		)
-
-		return nil
-	case "allow":
-
-		return nil
-	default:
-
-		return fmt.Errorf("tool: unknown permission level %q", level)
-	}
-}
+import "fmt"
 
 // MergeRules merges custom rules followed by preset rules into a single
 // RuleSet. Custom rules are placed first so they take precedence via

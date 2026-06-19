@@ -75,8 +75,11 @@ func (a *AWSTool) Description() string { return awsDescription }
 // Returns the JSON schema for AWS parameters.
 func (a *AWSTool) Parameters() json.RawMessage { return awsParams }
 
-// Parses args, checks permission, executes aws CLI with timeout,
-// truncates output, and logs audit info.
+// PermLevel returns the configured permission level.
+func (a *AWSTool) PermLevel() string { return a.perm }
+
+// Parses args, executes aws CLI with timeout, truncates output, and
+// logs audit info. Permission is enforced by the agent loop.
 func (a *AWSTool) Run(
 	ctx context.Context, args json.RawMessage,
 ) (string, error) {
@@ -88,10 +91,6 @@ func (a *AWSTool) Run(
 		return "", fmt.Errorf(
 			`aws: missing required field "args"`,
 		)
-	}
-
-	if err := CheckPermission(a.perm); err != nil {
-		return "", err
 	}
 
 	timeout := a.defaultTimeout

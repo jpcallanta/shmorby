@@ -87,8 +87,11 @@ func (s *SSHTool) Description() string { return sshDescription }
 // Returns the JSON schema for SSH parameters.
 func (s *SSHTool) Parameters() json.RawMessage { return sshParams }
 
-// Parses args, checks permission, executes SSH with timeout, truncates
-// output, and logs audit info.
+// PermLevel returns the configured permission level.
+func (s *SSHTool) PermLevel() string { return s.perm }
+
+// Parses args, executes SSH with timeout, truncates output, and logs
+// audit info. Permission is enforced by the agent loop.
 func (s *SSHTool) Run(
 	ctx context.Context, args json.RawMessage,
 ) (string, error) {
@@ -101,10 +104,6 @@ func (s *SSHTool) Run(
 	}
 	if a.Command == "" {
 		return "", fmt.Errorf("ssh: missing required field \"command\"")
-	}
-
-	if err := CheckPermission(s.perm); err != nil {
-		return "", err
 	}
 
 	sshArgs := []string{

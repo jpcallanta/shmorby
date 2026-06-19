@@ -895,3 +895,192 @@ func TestModelUpdate_HaltPromptIgnoresOtherKeys(t *testing.T) {
 		t.Error("should still be running")
 	}
 }
+
+// Tests that permissionReqMsg sets the permission prompt on the model.
+func TestModelUpdate_PermissionReqMsg_SetsPermission(t *testing.T) {
+	m := NewModel(Config{})
+	if m.permission != nil {
+		t.Fatal("expected nil permission initially")
+	}
+
+	prompt := NewPermissionPrompt("shell", "reboot", "service restart", "tool permission")
+
+	updated, cmd := m.Update(permissionReqMsg{prompt: prompt})
+	m = updated.(Model)
+
+	if m.permission == nil {
+		t.Fatal("expected permission to be set after permissionReqMsg")
+	}
+	if m.permission.Tool != "shell" {
+		t.Errorf("want tool 'shell', got %q", m.permission.Tool)
+	}
+	if m.permission.Command != "reboot" {
+		t.Errorf("want command 'reboot', got %q", m.permission.Command)
+	}
+	if cmd == nil {
+		t.Error("expected a follow-up command (listenPermissionReqs)")
+	}
+}
+
+// Tests that pressing 'y' with an active permission prompt returns
+// a non-nil cmd (the runtime executes the cmd, which sends
+// permissionResultMsg to write to the channel).
+func TestModelUpdate_PermissionKeyY_ReturnsCmd(t *testing.T) {
+	m := NewModel(Config{})
+	m.permission = &PermissionPrompt{
+		Tool: "shell", Command: "reboot", Choice: make(chan PermissionChoice, 1),
+	}
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	if cmd == nil {
+		t.Fatal("expected non-nil cmd for 'y'")
+	}
+	// Execute the cmd and check it produces a permissionResultMsg.
+	msg := cmd()
+	pmsg, ok := msg.(permissionResultMsg)
+	if !ok {
+		t.Fatalf("want permissionResultMsg, got %T", msg)
+	}
+	if pmsg.choice != PermissionAllow {
+		t.Errorf("want PermissionAllow, got %v", pmsg.choice)
+	}
+}
+
+// Tests that pressing 'n' with an active permission prompt returns
+// a cmd that produces a permissionResultMsg with PermissionDeny.
+func TestModelUpdate_PermissionKeyN_ReturnsCmd(t *testing.T) {
+	m := NewModel(Config{})
+	m.permission = &PermissionPrompt{
+		Tool: "shell", Command: "reboot", Choice: make(chan PermissionChoice, 1),
+	}
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	if cmd == nil {
+		t.Fatal("expected non-nil cmd for 'n'")
+	}
+	msg := cmd()
+	pmsg, ok := msg.(permissionResultMsg)
+	if !ok {
+		t.Fatalf("want permissionResultMsg, got %T", msg)
+	}
+	if pmsg.choice != PermissionDeny {
+		t.Errorf("want PermissionDeny, got %v", pmsg.choice)
+	}
+}
+
+// Tests that pressing 'a' with an active permission prompt returns
+// a cmd that produces a permissionResultMsg with PermissionAllowAll.
+func TestModelUpdate_PermissionKeyA_ReturnsCmd(t *testing.T) {
+	m := NewModel(Config{})
+	m.permission = &PermissionPrompt{
+		Tool: "shell", Command: "reboot", Choice: make(chan PermissionChoice, 1),
+	}
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if cmd == nil {
+		t.Fatal("expected non-nil cmd for 'a'")
+	}
+	msg := cmd()
+	pmsg, ok := msg.(permissionResultMsg)
+	if !ok {
+		t.Fatalf("want permissionResultMsg, got %T", msg)
+	}
+	if pmsg.choice != PermissionAllowAll {
+		t.Errorf("want PermissionAllowAll, got %v", pmsg.choice)
+	}
+}
+
+// Tests that pressing 'esc' with an active permission prompt returns
+// a cmd that produces a permissionResultMsg with PermissionDeny.
+func TestModelUpdate_PermissionKeyEsc_ReturnsCmd(t *testing.T) {
+	m := NewModel(Config{})
+	m.permission = &PermissionPrompt{
+		Tool: "shell", Command: "reboot", Choice: make(chan PermissionChoice, 1),
+	}
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	if cmd == nil {
+		t.Fatal("expected non-nil cmd for esc")
+	}
+	msg := cmd()
+	pmsg, ok := msg.(permissionResultMsg)
+	if !ok {
+		t.Fatalf("want permissionResultMsg, got %T", msg)
+	}
+	if pmsg.choice != PermissionDeny {
+		t.Errorf("want PermissionDeny, got %v", pmsg.choice)
+	}
+}
+
+// Tests that unrelated keys are ignored while permission prompt is active.
+func TestModelUpdate_PermissionKey_OtherKeysIgnored(t *testing.T) {
+	m := NewModel(Config{})
+	choice := make(chan PermissionChoice, 1)
+	m.permission = &PermissionPrompt{
+		Tool: "shell", Command: "reboot", Choice: choice,
+	}
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'x'}})
+	if cmd != nil {
+		t.Error("expected nil cmd for ignored key")
+	}
+	// Channel should not receive anything.
+	select {
+	case <-choice:
+		t.Error("unexpected choice for ignored key")
+	default:
+	}
+}
+
+// Tests that permissionResultMsg writes the choice to the channel.
+func TestModelUpdate_PermissionResultMsg_WritesChannel(t *testing.T) {
+	m := NewModel(Config{})
+	choice := make(chan PermissionChoice, 1)
+	m.permission = &PermissionPrompt{
+		Tool: "shell", Command: "reboot", Choice: choice,
+	}
+
+	updated, _ := m.Update(permissionResultMsg{choice: PermissionAllow})
+	m = updated.(Model)
+
+	select {
+	case c := <-choice:
+		if c != PermissionAllow {
+			t.Errorf("want PermissionAllow, got %v", c)
+		}
+	default:
+		t.Error("expected choice to be sent on channel")
+	}
+	if m.permission != nil {
+		t.Error("permission should be nil after result is processed")
+	}
+}
+
+// Tests that permission prompt renders in view.
+func TestModelView_PermissionPromptVisible(t *testing.T) {
+	m := NewModel(Config{ThemeName: "catppuccin-mocha"})
+	m.width = 80
+	m.height = 24
+	m.permission = &PermissionPrompt{
+		Tool:    "shell",
+		Command: "reboot",
+		Reason:  "service restart",
+	}
+
+	view := m.View()
+	if !strings.Contains(view, "reboot") {
+		t.Error("view should contain the command")
+	}
+	if !strings.Contains(view, "service restart") {
+		t.Error("view should contain the reason")
+	}
+	if !strings.Contains(view, "[y] allow") {
+		t.Error("view should contain allow option")
+	}
+	if !strings.Contains(view, "[n] deny") {
+		t.Error("view should contain deny option")
+	}
+	if !strings.Contains(view, "[a] allow all") {
+		t.Error("view should contain allow-all option")
+	}
+}

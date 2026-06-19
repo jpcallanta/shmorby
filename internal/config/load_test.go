@@ -274,7 +274,7 @@ func TestLoad_CLIModelOverridesEnv(t *testing.T) {
 // TestLoad_EnvOllamaBaseURL checks OLLAMA_BASE_URL overrides the default.
 func TestLoad_EnvOllamaBaseURL(t *testing.T) {
 	ucd := filepath.Join(t.TempDir(), "shmorby")
-	t.Setenv("OLLAMA_BASE_URL", "http://ollama.example.com:11434")
+	t.Setenv("OLLAMA_BASE_URL", "http://ollama.internal:11434")
 
 	cfg, err := Load(LoadOptions{
 		SystemConfig:  "/nonexistent-sys-config",
@@ -283,8 +283,8 @@ func TestLoad_EnvOllamaBaseURL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Ollama.BaseURL != "http://ollama.example.com:11434" {
-		t.Fatalf("Ollama.BaseURL: got %q want %q", cfg.Ollama.BaseURL, "http://ollama.example.com:11434")
+	if cfg.Ollama.BaseURL != "http://ollama.internal:11434" {
+		t.Fatalf("Ollama.BaseURL: got %q want %q", cfg.Ollama.BaseURL, "http://ollama.internal:11434")
 	}
 }
 
@@ -626,5 +626,26 @@ func TestLoad_MemoryEmbeddingDefaults(t *testing.T) {
 	if cfg.Memory.Embedding.Provider != "" {
 		t.Errorf("Provider: want empty, got %s",
 			cfg.Memory.Embedding.Provider)
+	}
+}
+
+// TestPermissionDefaults_InteractiveFalse checks that permission
+// interactive defaults to false when not specified in config.
+func TestPermissionDefaults_InteractiveFalse(t *testing.T) {
+	cfg, err := Load(LoadOptions{
+		SystemConfig:  "/nonexistent",
+		UserConfigDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Permission.Interactive {
+		t.Error("Permission.Interactive: want false by default")
+	}
+	if cfg.Permission.Presets != nil {
+		t.Error("Permission.Presets: want nil by default")
+	}
+	if cfg.Permission.Rules != nil {
+		t.Error("Permission.Rules: want nil by default")
 	}
 }

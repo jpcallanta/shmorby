@@ -43,19 +43,18 @@ permission:
   ssh: allow                   # allow | ask | deny (default allow)
   sudo: ask                    # allow | ask | deny (default ask)
   aws: ask                     # allow | ask | deny (default ask)
-  # interactive: true          # enable TUI approval prompts
-  # session_overrides: true    # allow "allow all like this" per session
-  # presets:
-  #   - destructive            # deny all destructive ops
-  #   - service                # ask on service changes
-  #   - user                   # ask on user management
-  # rules:
-  #   - match: "rm -rf /"
-  #     action: deny
-  #     reason: "destruction of root filesystem"
-  #   - match: "aws ec2 terminate-instances *"
-  #     action: deny
-  #     reason: "instance termination"
+  interactive: false           # enable approval prompts (default false)
+  presets:                     # named rule presets (optional)
+    # - destructive            # deny all destructive ops
+    # - service                # ask on service changes
+    # - user                   # ask on user management
+  rules:                       # custom permission rules (optional)
+    # - match: "rm -rf /"
+    #   action: deny
+    #   reason: "destruction of root filesystem"
+    # - match: "aws ec2 terminate-instances *"
+    #   action: deny
+    #   reason: "instance termination"
 
 # Model info overrides — used when provider API is unreachable or returns no
 # context_length (e.g. OpencodeZen /v1/models omits the field).

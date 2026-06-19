@@ -39,6 +39,9 @@ type REPL struct {
 	Retriever    *memory.Retriever
 	Compressor   *ctxcomp.Compressor
 	ModelInfo    llm.ModelInfo
+	ToolPermFunc ToolPermissionFunc
+	ToolRules    map[string]*tools.RuleSet
+	scanner      *bufio.Scanner
 }
 
 // Starts the interactive REPL loop reading from In and writing to Out.
@@ -46,15 +49,15 @@ type REPL struct {
 func (r *REPL) Run(ctx context.Context) error {
 	fmt.Fprint(r.Out, "shmorby> ")
 
-	scanner := bufio.NewScanner(r.In)
+	r.scanner = bufio.NewScanner(r.In)
 
-	for scanner.Scan() {
+	for r.scanner.Scan() {
 		// Check for context cancellation.
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 
-		line := strings.TrimSpace(scanner.Text())
+		line := strings.TrimSpace(r.scanner.Text())
 
 		// Check for empty input.
 		if line == "" {
@@ -88,6 +91,10 @@ func (r *REPL) Run(ctx context.Context) error {
 		}
 
 		if r.Registry != nil {
+			permFunc := r.ToolPermFunc
+			if permFunc == nil && r.ToolRules != nil {
+				permFunc = r.toolPermissionFunc
+			}
 			reply, err = RunTurnWithTools(
 				ctx, r.Provider, r.Session,
 				r.Mode, r.Scope, r.Override, r.Model, line,
@@ -95,6 +102,8 @@ func (r *REPL) Run(ctx context.Context) error {
 				r.Store, r.Retriever,
 				r.Compressor, r.ModelInfo,
 				nil,
+				permFunc,
+				r.ToolRules,
 			)
 		} else {
 			reply, err = RunTurn(
@@ -125,7 +134,7 @@ func (r *REPL) Run(ctx context.Context) error {
 		fmt.Fprint(r.Out, "shmorby> ")
 	}
 
-	if err := scanner.Err(); err != nil {
+	if err := r.scanner.Err(); err != nil {
 		return fmt.Errorf("scanner: %w", err)
 	}
 
@@ -488,4 +497,30 @@ func (r *REPL) handleLogCommand(parts []string) (bool, bool, error) {
 	}
 	fmt.Fprintln(r.Out, "Log level: info")
 	return true, false, nil
+}
+
+// toolPermissionFunc implements the permission callback for the REPL,
+// prompting the user via stdin/stdout.
+func (r *REPL) toolPermissionFunc(toolName, command, reason string) ToolPermissionResponse {
+	fmt.Fprintf(r.Out, "\nPermission requested: %s\n", toolName)
+	fmt.Fprintf(r.Out, "  command: %s\n", command)
+	if reason != "" {
+		fmt.Fprintf(r.Out, "  reason:  %s\n", reason)
+	}
+	fmt.Fprint(r.Out, "Allow? [y]es / [n]o / [a]llow all like this: ")
+
+	for r.scanner.Scan() {
+		line := strings.TrimSpace(r.scanner.Text())
+		switch strings.ToLower(line) {
+		case "y", "yes":
+			return PermAllow
+		case "n", "no":
+			return PermDeny
+		case "a", "all":
+			return PermAllowAll
+		default:
+			fmt.Fprint(r.Out, "y/n/a: ")
+		}
+	}
+	return PermDeny
 }

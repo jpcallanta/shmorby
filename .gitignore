@@ -45,6 +45,3 @@ Thumbs.db
 
 # Misc
 project/review/*
-
-# Git worktree pointer (local only, not for public repos)
-.git

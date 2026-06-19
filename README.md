@@ -226,13 +226,46 @@ Permissions gate shell, SSH, sudo, and AWS commands:
 
 Set in the `permission` section of config. Options: `allow`, `ask`, `deny`.
 
+### Interactive prompts
+
+When `permission.interactive` is `true` (default `false`), tools with `ask`
+level show an inline y/n/a prompt:
+
+- **y** — allow this tool call
+- **n** — deny this tool call
+- **a** — allow all subsequent calls for this tool in the current message
+
+Prompts appear in the TUI (inline) or REPL (stdin). When `interactive` is
+`false`, `ask` tools default to allow (v1 backward-compatible behavior).
+
 ### Permission presets
+
+Built-in presets:
 
 | Preset | shell | ssh | sudo | aws |
 |--------|-------|-----|------|-----|
 | full | allow | allow | ask | ask |
 | read-only | allow | allow | deny | deny |
 | locked | deny | deny | deny | deny |
+
+Custom presets can be added in `permission.presets` and override built-ins.
+Custom rules (`permission.rules`) take precedence over presets.
+
+### Custom rules
+
+```yaml
+permission:
+  rules:
+    - match: "rm -rf /"
+      action: deny
+      reason: "destruction of root filesystem"
+    - match: "aws ec2 terminate-instances *"
+      action: deny
+      reason: "instance termination"
+```
+
+Rules use glob matching. The first matching rule wins. Tool-level `deny`
+always wins regardless of rules.
 
 ### Blast radius
 

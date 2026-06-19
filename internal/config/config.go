@@ -1,6 +1,10 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+
+	"shmorby/internal/tools"
+)
 
 // Config is Phase 1 configuration.
 //
@@ -56,10 +60,13 @@ type Config struct {
 	} `yaml:"tools"`
 
 	Permission struct {
-		Shell string `yaml:"shell"`
-		SSH   string `yaml:"ssh"`
-		Sudo  string `yaml:"sudo"`
-		AWS   string `yaml:"aws"`
+		Shell       string                 `yaml:"shell"`
+		SSH         string                 `yaml:"ssh"`
+		Sudo        string                 `yaml:"sudo"`
+		AWS         string                 `yaml:"aws"`
+		Interactive bool                   `yaml:"interactive"`
+		Presets     []string               `yaml:"presets"`
+		Rules       []tools.PermissionRule `yaml:"rules"`
 	} `yaml:"permission"`
 
 	Models map[string]ModelOverride `yaml:"models"`

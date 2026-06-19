@@ -354,11 +354,11 @@ func TestCompressor_Compress_AlwaysTruncatesAssistantMessages(t *testing.T) {
 	bigOutput := strings.Join(lines, "\n")
 
 	c := NewCompressor(CompressorConfig{
-		Enabled:             true,
-		Mode:                "conservative",
-		MaxToolOutputTokens: 1, // trigger compression on any content
-		MaxToolOutputLines:  0, // per-turn unlimited
-		Threshold:           0.8,
+		Enabled:               true,
+		Mode:                  "conservative",
+		MaxToolOutputTokens:   1, // trigger compression on any content
+		MaxToolOutputLines:    0, // per-turn unlimited
+		Threshold:             0.8,
 		MinMessagesToCompress: 2,
 		FallbackContextWindow: 100,
 	}, nil, &fixedEstimator{perMsg: 90}, nil)

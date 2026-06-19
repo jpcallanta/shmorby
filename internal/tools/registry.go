@@ -57,6 +57,14 @@ func (r *Registry) Schemas() []ToolSchema {
 	return schemas
 }
 
+// Lookup returns the tool by name. Returns nil, false if not found.
+func (r *Registry) Lookup(name string) (Tool, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	t, ok := r.tools[name]
+	return t, ok
+}
+
 // Dispatches to the named tool. Returns error for unknown tool.
 func (r *Registry) Run(
 	ctx context.Context, name string, args json.RawMessage,

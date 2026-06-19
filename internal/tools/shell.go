@@ -90,9 +90,13 @@ func (s *ShellTool) Description() string { return shellDescription }
 // Returns the JSON schema for shell parameters.
 func (s *ShellTool) Parameters() json.RawMessage { return shellParams }
 
-// Parses args, checks permission, executes with timeout, truncates
-// output, and logs audit info. Non-zero exits are returned as
-// output text with appended exit code (not as Go errors).
+// PermLevel returns the configured permission level.
+func (s *ShellTool) PermLevel() string { return s.perm }
+
+// Parses args, executes with timeout, truncates output, and logs
+// audit info. Permission is enforced by the agent loop.
+// Non-zero exits are returned as output text with appended exit code
+// (not as Go errors).
 func (s *ShellTool) Run(
 	ctx context.Context, args json.RawMessage,
 ) (string, error) {
@@ -109,10 +113,6 @@ func (s *ShellTool) Run(
 		return "", fmt.Errorf(
 			`invalid shell args: missing required field "command"`,
 		)
-	}
-
-	if err := CheckPermission(s.perm); err != nil {
-		return "", err
 	}
 
 	cwd := s.workdir

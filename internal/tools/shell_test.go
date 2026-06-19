@@ -25,50 +25,18 @@ func TestNewShellTool_EchoHello(t *testing.T) {
 	}
 }
 
-// TestCheckPermission_Deny_ReturnsError checks deny blocks without exec.
-func TestCheckPermission_Deny_ReturnsError(t *testing.T) {
-	err := CheckPermission("deny")
-	if err == nil {
-		t.Fatal("want error for deny, got nil")
-	}
-	if !strings.Contains(err.Error(), "denied") {
-		t.Errorf("want error containing 'denied', got %v", err)
-	}
-}
-
-// TestShellTool_Deny_NotExecuted checks deny prevents shell execution.
-func TestShellTool_Deny_NotExecuted(t *testing.T) {
+// TestShellTool_Deny_NowExecutes checks that Run() no longer checks
+// permission (enforced at agent loop level).
+func TestShellTool_Deny_NowExecutes(t *testing.T) {
 	tool := NewShellTool("bash", "", "deny")
-	args := []byte(`{"command":"echo should-not-run"}`)
+	args := []byte(`{"command":"echo should-run"}`)
 
-	_, err := tool.Run(context.Background(), args)
-	if err == nil {
-		t.Fatal("want error for deny, got nil")
+	result, err := tool.Run(context.Background(), args)
+	if err != nil {
+		t.Fatalf("want no error (permission checked by agent loop), got %v", err)
 	}
-	if !strings.Contains(err.Error(), "denied") {
-		t.Errorf("want error containing 'denied', got %v", err)
-	}
-}
-
-// TestCheckPermission_Allow_ReturnsNil checks allow returns nil.
-func TestCheckPermission_Allow_ReturnsNil(t *testing.T) {
-	if err := CheckPermission("allow"); err != nil {
-		t.Fatalf("want nil, got %v", err)
-	}
-}
-
-// TestCheckPermission_Ask_ReturnsNil checks ask returns nil (v1).
-func TestCheckPermission_Ask_ReturnsNil(t *testing.T) {
-	if err := CheckPermission("ask"); err != nil {
-		t.Fatalf("want nil, got %v", err)
-	}
-}
-
-// TestCheckPermission_Unknown_ReturnsError checks unknown level errors.
-func TestCheckPermission_Unknown_ReturnsError(t *testing.T) {
-	err := CheckPermission("bogus")
-	if err == nil {
-		t.Fatal("want error for unknown level, got nil")
+	if !strings.Contains(result, "should-run") {
+		t.Errorf("want command output, got %q", result)
 	}
 }
 
@@ -267,22 +235,23 @@ func TestRegistry_Run_EchoHello(t *testing.T) {
 	}
 }
 
-// TestRegistry_Run_Deny_NotExecuted checks deny blocks via registry.
-func TestRegistry_Run_Deny_NotExecuted(t *testing.T) {
+// TestRegistry_Run_Deny_NowExecutes checks Registry.Run() no longer
+// checks permission (enforced at agent loop level).
+func TestRegistry_Run_Deny_NowExecutes(t *testing.T) {
 	r := NewRegistry()
 	tool := NewShellTool("bash", "", "deny")
 	r.Register(tool)
 
-	_, err := r.Run(
+	result, err := r.Run(
 		context.Background(),
 		"shell",
-		[]byte(`{"command":"echo should-not-run"}`),
+		[]byte(`{"command":"echo should-run"}`),
 	)
-	if err == nil {
-		t.Fatal("want error for deny, got nil")
+	if err != nil {
+		t.Fatalf("want no error (permission checked by agent loop), got %v", err)
 	}
-	if !strings.Contains(err.Error(), "denied") {
-		t.Errorf("want error containing 'denied', got %v", err)
+	if !strings.Contains(result, "should-run") {
+		t.Errorf("want command output, got %q", result)
 	}
 }
 
@@ -471,6 +440,7 @@ func (n *namedTool) Description() string { return "test tool" }
 func (n *namedTool) Parameters() json.RawMessage {
 	return json.RawMessage(`{"type":"object"}`)
 }
+func (n *namedTool) PermLevel() string { return "allow" }
 func (n *namedTool) Run(ctx context.Context, args json.RawMessage) (string, error) {
 	return "", nil
 }
