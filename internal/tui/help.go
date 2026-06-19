@@ -3,8 +3,8 @@ package tui
 import (
 	"strings"
 
-	"shmorby/internal/tui/styles"
 	"github.com/charmbracelet/lipgloss"
+	"shmorby/internal/tui/styles"
 )
 
 // HelpModel manages the full-screen help overlay.

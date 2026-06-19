@@ -3,6 +3,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync/atomic"
 	"time"
@@ -62,7 +63,7 @@ func (h *TUILogHandler) Handle(
 	// is connected (headless / --no-tui mode).
 	if h.logs == nil && h.inner.Enabled(ctx, r.Level) {
 		if err := h.inner.Handle(ctx, r); err != nil {
-			return err
+			return fmt.Errorf("log handle: %w", err)
 		}
 	}
 

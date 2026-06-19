@@ -76,7 +76,7 @@ func (s *SudoTool) Parameters() json.RawMessage { return sudoParams }
 func (s *SudoTool) PermLevel() string { return s.perm }
 
 // Parses args, executes sudo -n with timeout, truncates output, and
-// logs audit info. Permission is enforced by the agent loop.
+// redacts secrets. Permission is enforced by the agent loop.
 func (s *SudoTool) Run(
 	ctx context.Context, args json.RawMessage,
 ) (string, error) {
@@ -138,7 +138,7 @@ func (s *SudoTool) Run(
 			return result, nil
 		}
 
-		return string(truncated), err
+		return string(truncated), fmt.Errorf("sudo exec: %w", err)
 	}
 
 	return string(truncated), nil

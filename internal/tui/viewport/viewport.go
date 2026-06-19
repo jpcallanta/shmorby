@@ -102,31 +102,31 @@ func (m Model) NewContent() bool {
 	return m.newContent
 }
 
-// LineUp scrolls up by the given number of lines.
-func (m *Model) LineUp(n int) {
-	m.vp.LineUp(n)
+// ScrollUp scrolls up by the given number of lines.
+func (m *Model) ScrollUp(n int) {
+	m.vp.ScrollUp(n)
 	m.checkFollowMode()
 }
 
-// LineDown scrolls down by the given number of lines.
+// ScrollDown scrolls down by the given number of lines.
 // Re-enables follow mode if the user reaches the bottom.
-func (m *Model) LineDown(n int) {
-	m.vp.LineDown(n)
+func (m *Model) ScrollDown(n int) {
+	m.vp.ScrollDown(n)
 	if m.AtBottom() {
 		m.SetFollowMode(true)
 	}
 }
 
-// HalfViewUp scrolls up by half the viewport height.
-func (m *Model) HalfViewUp() {
-	m.vp.HalfViewUp()
+// ScrollHalfPageUp scrolls up by half the viewport height.
+func (m *Model) ScrollHalfPageUp() {
+	m.vp.HalfPageUp()
 	m.checkFollowMode()
 }
 
-// HalfViewDown scrolls down by half the viewport height.
+// ScrollHalfPageDown scrolls down by half the viewport height.
 // Re-enables follow mode if the user reaches the bottom.
-func (m *Model) HalfViewDown() {
-	m.vp.HalfViewDown()
+func (m *Model) ScrollHalfPageDown() {
+	m.vp.HalfPageDown()
 	if m.AtBottom() {
 		m.SetFollowMode(true)
 	}

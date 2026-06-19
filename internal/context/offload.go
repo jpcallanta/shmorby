@@ -45,7 +45,7 @@ func (c *Compressor) Offload(
 func newUUID() (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
-		return "", err
+		return "", fmt.Errorf("read rand: %w", err)
 	}
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80

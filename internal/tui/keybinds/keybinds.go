@@ -1,11 +1,7 @@
 // Package keybinds implements leader key and keybind map system.
 package keybinds
 
-import (
-	"fmt"
-	"strings"
-	"time"
-)
+import "time"
 
 // Action represents a named action triggered by a keybind.
 type Action string
@@ -149,74 +145,4 @@ func (l *LeaderKey) BindingsList() []Binding {
 		})
 	}
 	return list
-}
-
-// ParseKeybind parses a keybind spec string into canonical form.
-// Supports: "tab", "shift+tab", "ctrl+x", "<leader>x", "up", etc.
-// Unknown keys are accepted to allow graceful degradation.
-func ParseKeybind(s string) (string, error) {
-	s = strings.TrimSpace(strings.ToLower(s))
-	if s == "" {
-		return "", fmt.Errorf("empty keybind")
-	}
-	if s == "none" {
-		return "none", nil
-	}
-	// Handle <leader>x format
-	if strings.HasPrefix(s, "<leader>") {
-		suffix := strings.TrimPrefix(s, "<leader>")
-		if suffix == "" {
-			return "", fmt.Errorf("incomplete leader bind: %q", s)
-		}
-		return s, nil
-	}
-	// Validate comma-separated alternatives
-	for _, part := range strings.Split(s, ",") {
-		part = strings.TrimSpace(part)
-		if !isValidKey(part) {
-			return "", fmt.Errorf("unknown key: %q", part)
-		}
-	}
-	return s, nil
-}
-
-// isValidKey reports whether a single key token is recognized.
-// Accepts any ctrl+letter, shift+letter, alt+letter, F-key,
-// arrow, modifier, or single printable letter.
-func isValidKey(key string) bool {
-	known := map[string]bool{
-		"tab": true, "shift+tab": true, "ctrl+tab": true,
-		"ctrl+shift+tab": true,
-		"return":         true, "enter": true, "escape": true, "esc": true,
-		"up": true, "down": true, "left": true, "right": true,
-		"pageup": true, "pagedown": true, "home": true, "end": true,
-		"space": true, "backspace": true, "delete": true,
-	}
-	if known[key] {
-		return true
-	}
-	// F1-F12
-	if len(key) == 3 && key[0] == 'f' && key[1] >= '1' && key[1] <= '9' && key[2] >= '0' && key[2] <= '9' {
-		return true
-	}
-	// ctrl+letter, shift+letter, alt+letter
-	parts := strings.SplitN(key, "+", 2)
-	if len(parts) == 2 {
-		mod := parts[0]
-		if mod == "ctrl" || mod == "shift" || mod == "alt" || mod == "meta" {
-			if len(parts[1]) == 1 {
-				return true
-			}
-			// ctrl+shift+letter
-			sub := strings.SplitN(parts[1], "+", 2)
-			if len(sub) == 2 && (sub[0] == "shift" || sub[0] == "ctrl") && len(sub[1]) == 1 {
-				return true
-			}
-		}
-	}
-	// Single printable letter or number
-	if len(key) == 1 {
-		return true
-	}
-	return false
 }

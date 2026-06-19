@@ -91,7 +91,7 @@ func (e *ReferenceEngine) Resolve(alias string) (string, string, error) {
 				if item.Kind == "file" || item.Kind == "" {
 					data, err := os.ReadFile(item.Value)
 					if err != nil {
-						return "", "file", err
+						return "", "file", fmt.Errorf("read reference: %w", err)
 					}
 					return string(data), "file", nil
 				}

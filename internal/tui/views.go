@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"shmorby/internal/tui/styles"
 	"github.com/charmbracelet/lipgloss"
+	"shmorby/internal/tui/styles"
 )
 
 // partialANSI matches ANSI escape sequences with an optional final

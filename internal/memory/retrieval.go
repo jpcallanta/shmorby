@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"fmt"
 	"strings"
 )
 
@@ -114,7 +115,7 @@ func (r *Retriever) keywordFallback(
 
 	entries, err := r.store.List(1000, 0)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list store: %w", err)
 	}
 
 	var matches []MemoryEntry

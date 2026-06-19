@@ -136,7 +136,7 @@ func (p *openaiProvider) readSSEStream(
 	events chan<- StreamEvent,
 ) {
 	defer close(events)
-	defer body.Close()
+	defer func() { _ = body.Close() }()
 
 	scanner := bufio.NewScanner(body)
 	for scanner.Scan() {
@@ -212,7 +212,7 @@ func (p *openaiProvider) fetchModelInfo(
 	if err != nil {
 		return ModelInfo{}, fmt.Errorf("http request: %w", err)
 	}
-	defer httpResp.Body.Close()
+	defer func() { _ = httpResp.Body.Close() }()
 
 	if httpResp.StatusCode >= 400 {
 		bodyBytes, _ := io.ReadAll(httpResp.Body)

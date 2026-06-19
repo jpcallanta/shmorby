@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"shmorby/internal/agent"
 	tea "github.com/charmbracelet/bubbletea"
+	"shmorby/internal/agent"
 )
 
 // Tests that TUILogHandler sends entries to the channel.

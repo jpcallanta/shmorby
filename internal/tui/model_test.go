@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"shmorby/internal/tui/navigation"
 	tea "github.com/charmbracelet/bubbletea"
+	"shmorby/internal/tui/navigation"
 )
 
 // Tests that View renders the bottom-anchored layout.

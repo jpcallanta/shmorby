@@ -1,8 +1,8 @@
 package context
 
 import (
-	"shmorby/internal/session"
 	"github.com/pkoukk/tiktoken-go"
+	"shmorby/internal/session"
 )
 
 // Estimator estimates token counts for text and messages.

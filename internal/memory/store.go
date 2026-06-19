@@ -118,7 +118,7 @@ func newVectorStoreForMemory(
 	embedFunc := func(ctx context.Context, text string) ([]float32, error) {
 		results, err := emb.Embed(ctx, []string{text})
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("embed text: %w", err)
 		}
 		if len(results) == 0 {
 			return nil, fmt.Errorf("no embedding returned")
@@ -129,7 +129,7 @@ func newVectorStoreForMemory(
 
 	vs, err := NewVectorStore(db, "memory", embedFunc)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("create vector store: %w", err)
 	}
 
 	return vs, nil
@@ -196,7 +196,8 @@ func (s *sqliteStore) Insert(entry MemoryEntry) error {
 
 	// Upsert vector embedding if available.
 	if s.vector != nil && s.embedder != nil {
-		ctx := context.Background()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 		text := entryText(entry)
 		embeddings, embErr := s.embedder.Embed(ctx, []string{text})
 		if embErr == nil && len(embeddings) > 0 {
@@ -214,7 +215,7 @@ func (s *sqliteStore) evictIfNeededLocked() error {
 	var count int
 	err := s.db.QueryRow("SELECT COUNT(*) FROM memory").Scan(&count)
 	if err != nil {
-		return err
+		return fmt.Errorf("count entries: %w", err)
 	}
 
 	if count < s.config.MaxEntries {
@@ -232,7 +233,7 @@ func (s *sqliteStore) evictIfNeededLocked() error {
 		)
 	`, excess)
 	if err != nil {
-		return err
+		return fmt.Errorf("evict entries: %w", err)
 	}
 
 	n, _ := result.RowsAffected()
@@ -264,7 +265,9 @@ func (s *sqliteStore) Delete(id string) error {
 
 	// Remove vector if present.
 	if s.vector != nil {
-		_ = s.vector.Delete(context.Background(), id)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_ = s.vector.Delete(ctx, id)
 	}
 
 	return nil
@@ -279,7 +282,7 @@ func (s *sqliteStore) List(limit, offset int) ([]MemoryEntry, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	return s.scanEntries(rows)
 }
@@ -287,8 +290,10 @@ func (s *sqliteStore) List(limit, offset int) ([]MemoryEntry, error) {
 func (s *sqliteStore) Count() (int, error) {
 	var count int
 	err := s.db.QueryRow("SELECT COUNT(*) FROM memory").Scan(&count)
-
-	return count, err
+	if err != nil {
+		return 0, fmt.Errorf("count entries: %w", err)
+	}
+	return count, nil
 }
 
 func (s *sqliteStore) Close() error {
@@ -383,7 +388,7 @@ func (s *sqliteStore) migrateToVectors(
 
 	entries, err := s.List(100000, 0)
 	if err != nil {
-		return err
+		return fmt.Errorf("list for migration: %w", err)
 	}
 
 	for i := 0; i < len(entries); i += 32 {

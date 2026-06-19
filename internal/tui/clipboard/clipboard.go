@@ -57,5 +57,5 @@ func osc52Copy(text string) error {
 	// OSC-52 sequence: ESC ] 52 ; c ; <base64> BEL
 	seq := fmt.Sprintf("\033]52;c;%s\007", encoded)
 	_, err := os.Stdout.WriteString(seq)
-	return err
+	return fmt.Errorf("write OSC-52: %w", err)
 }

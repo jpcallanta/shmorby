@@ -90,7 +90,7 @@ func (o *openRouterProvider) fetchModelInfo(
 	if err != nil {
 		return ModelInfo{}, fmt.Errorf("http request: %w", err)
 	}
-	defer httpResp.Body.Close()
+	defer func() { _ = httpResp.Body.Close() }()
 
 	if httpResp.StatusCode >= 400 {
 		bodyBytes, _ := io.ReadAll(httpResp.Body)

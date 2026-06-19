@@ -29,7 +29,7 @@ func TestFollowMode_AutoScroll(t *testing.T) {
 func TestFollowMode_PauseOnScrollUp(t *testing.T) {
 	vp := New(80, 20)
 	vp.SetContent(strings.Repeat("line\n", 100))
-	vp.LineUp(1)
+	vp.ScrollUp(1)
 	if vp.FollowMode() {
 		t.Error("follow mode should be disabled after scrolling up")
 	}
@@ -38,7 +38,7 @@ func TestFollowMode_PauseOnScrollUp(t *testing.T) {
 func TestFollowMode_ReEnableOnGotoBottom(t *testing.T) {
 	vp := New(80, 20)
 	vp.SetContent(strings.Repeat("line\n", 100))
-	vp.LineUp(1)
+	vp.ScrollUp(1)
 	vp.GotoBottom()
 	if !vp.FollowMode() {
 		t.Error("follow mode should be re-enabled after GotoBottom")
@@ -48,7 +48,7 @@ func TestFollowMode_ReEnableOnGotoBottom(t *testing.T) {
 func TestNewContentIndicator(t *testing.T) {
 	vp := New(80, 20)
 	vp.SetContent(strings.Repeat("line\n", 100))
-	vp.LineUp(1)
+	vp.ScrollUp(1)
 	vp.NotifyContentAdded()
 	if !vp.NewContent() {
 		t.Error("new content indicator should be set when follow is paused")
@@ -58,7 +58,7 @@ func TestNewContentIndicator(t *testing.T) {
 func TestNewContentIndicator_ClearedOnGotoBottom(t *testing.T) {
 	vp := New(80, 20)
 	vp.SetContent("content")
-	vp.LineUp(1)
+	vp.ScrollUp(1)
 	vp.NotifyContentAdded()
 	vp.GotoBottom()
 	if vp.NewContent() {

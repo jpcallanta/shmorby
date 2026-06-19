@@ -9,6 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/textarea"
+	tea "github.com/charmbracelet/bubbletea"
 	"shmorby/internal/agent"
 	ctxcomp "shmorby/internal/context"
 	"shmorby/internal/llm"
@@ -26,9 +29,6 @@ import (
 	"shmorby/internal/tui/spinner"
 	"shmorby/internal/tui/styles"
 	tuivp "shmorby/internal/tui/viewport"
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/textarea"
-	tea "github.com/charmbracelet/bubbletea"
 )
 
 // Messages sent through the Bubbletea update loop.
@@ -62,9 +62,6 @@ type permissionReqMsg struct {
 // settleMsg signals that the stream settle timer has expired.
 type settleMsg struct{}
 
-// haltResultMsg carries the user's response to the stop-all confirmation.
-type haltResultMsg struct{ confirm bool }
-
 // spinnerStopMsg stops the spinner after output is rendered.
 type spinnerStopMsg struct{}
 
@@ -75,9 +72,6 @@ type agentModeChangedMsg struct {
 
 // leaderTimeoutMsg signals that the leader key sequence timed out.
 type leaderTimeoutMsg struct{}
-
-// whichKeyDismissMsg dismisses the which-key popup.
-type whichKeyDismissMsg struct{}
 
 // Logging messages.
 type logEntryMsg struct {
@@ -1804,10 +1798,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
-	case whichKeyDismissMsg:
-		m.whichKey.Dismiss()
-		return m, nil
-
 	case logEntryMsg:
 		m.logEntries = append(m.logEntries, msg.entry)
 		if len(m.logEntries) > m.logMaxEntries {
@@ -2303,7 +2293,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			n = int(m.scrollAccel.Tick())
 		}
 		for i := 0; i < n; i++ {
-			m.viewport.HalfViewUp()
+			m.viewport.ScrollHalfPageUp()
 		}
 		return m, nil
 
@@ -2313,7 +2303,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			n = int(m.scrollAccel.Tick())
 		}
 		for i := 0; i < n; i++ {
-			m.viewport.HalfViewDown()
+			m.viewport.ScrollHalfPageDown()
 		}
 		return m, nil
 

@@ -5,106 +5,75 @@ import (
 	"time"
 )
 
-func TestNewLeaderKey(t *testing.T) {
-	lk := NewLeaderKey("ctrl+x", 2*time.Second)
-	if lk.Key != "ctrl+x" {
-		t.Errorf("want ctrl+x, got %q", lk.Key)
-	}
-	if lk.Active() {
-		t.Error("should not be active initially")
-	}
-}
-
 func TestLeaderKey_ActivateDeactivate(t *testing.T) {
-	lk := NewLeaderKey("ctrl+x", 2*time.Second)
+	lk := NewLeaderKey("space", 2*time.Second)
+	if lk.Active() {
+		t.Error("expected inactive initially")
+	}
 	lk.Activate()
 	if !lk.Active() {
-		t.Error("should be active after Activate")
+		t.Error("expected active after Activate")
 	}
 	lk.Deactivate()
 	if lk.Active() {
-		t.Error("should not be active after Deactivate")
+		t.Error("expected inactive after Deactivate")
 	}
 }
 
-func TestLeaderKey_HandleKey(t *testing.T) {
-	lk := NewLeaderKey("ctrl+x", 2*time.Second)
-	lk.RegisterBinding("c", ActionCompact)
+func TestLeaderKey_Deadline(t *testing.T) {
+	lk := NewLeaderKey("space", 2*time.Second)
 	lk.Activate()
-	action, consumed := lk.HandleKey("c")
-	if !consumed {
-		t.Error("key should be consumed")
-	}
-	if action != ActionCompact {
-		t.Errorf("want compact, got %s", action)
+	if lk.Deadline().Before(time.Now()) {
+		t.Error("deadline should be in the future")
 	}
 }
 
 func TestLeaderKey_HandleKey_NotActive(t *testing.T) {
-	lk := NewLeaderKey("ctrl+x", 2*time.Second)
-	lk.RegisterBinding("c", ActionCompact)
-	action, consumed := lk.HandleKey("c")
+	lk := NewLeaderKey("space", 2*time.Second)
+	action, consumed := lk.HandleKey("n")
 	if consumed {
-		t.Error("should not consume when inactive")
+		t.Error("should not be consumed when inactive")
 	}
 	if action != "" {
-		t.Errorf("want empty, got %s", action)
+		t.Errorf("want empty action, got %q", action)
 	}
 }
 
-func TestLeaderKey_IsLeaderKey(t *testing.T) {
-	lk := NewLeaderKey("ctrl+x", 2*time.Second)
-	if !lk.IsLeaderKey("ctrl+x") {
-		t.Error("should match leader key")
+func TestLeaderKey_HandleKey_Active(t *testing.T) {
+	lk := NewLeaderKey("space", 2*time.Second)
+	lk.RegisterBinding("n", ActionNew)
+	lk.RegisterBinding("c", ActionCompact)
+
+	lk.Activate()
+
+	tests := []struct {
+		key      string
+		wantAct  Action
+		wantCons bool
+	}{
+		{"n", ActionNew, true},
+		{"c", ActionCompact, true},
+		{"x", ActionNone, true},
 	}
-	if lk.IsLeaderKey("ctrl+p") {
-		t.Error("should not match other key")
+	for _, tt := range tests {
+		lk.Activate()
+		action, consumed := lk.HandleKey(tt.key)
+		if consumed != tt.wantCons {
+			t.Errorf("HandleKey(%q): consumed=%v, want %v", tt.key, consumed, tt.wantCons)
+		}
+		if action != tt.wantAct {
+			t.Errorf("HandleKey(%q): action=%q, want %q", tt.key, action, tt.wantAct)
+		}
 	}
 }
 
 func TestLeaderKey_BindingsList(t *testing.T) {
-	lk := NewLeaderKey("ctrl+x", 2*time.Second)
-	lk.RegisterBinding("c", ActionCompact)
+	lk := NewLeaderKey("space", 2*time.Second)
 	lk.RegisterBinding("n", ActionNew)
+	lk.RegisterBinding("c", ActionCompact)
+
 	bindings := lk.BindingsList()
 	if len(bindings) != 2 {
 		t.Fatalf("want 2 bindings, got %d", len(bindings))
-	}
-}
-
-func TestParseKeybind_Valid(t *testing.T) {
-	cases := []struct {
-		input string
-		want  string
-	}{
-		{"tab", "tab"},
-		{"shift+tab", "shift+tab"},
-		{"ctrl+x", "ctrl+x"},
-		{"ctrl+p", "ctrl+p"},
-		{"<leader>n", "<leader>n"},
-		{"none", "none"},
-	}
-	for _, c := range cases {
-		result, err := ParseKeybind(c.input)
-		if err != nil {
-			t.Errorf("ParseKeybind(%q): unexpected error: %v", c.input, err)
-		}
-		if result != c.want {
-			t.Errorf("ParseKeybind(%q): want %q, got %q", c.input, c.want, result)
-		}
-	}
-}
-
-func TestParseKeybind_Invalid(t *testing.T) {
-	_, err := ParseKeybind("unknown_key")
-	if err == nil {
-		t.Error("expected error for invalid key")
-	}
-}
-
-func TestParseKeybind_Empty(t *testing.T) {
-	_, err := ParseKeybind("")
-	if err == nil {
-		t.Error("expected error for empty key")
 	}
 }

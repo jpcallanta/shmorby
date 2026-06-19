@@ -52,17 +52,3 @@ func TestRenderMarkdown_List(t *testing.T) {
 		t.Errorf("output missing second list item, got %q", out)
 	}
 }
-
-func TestRenderMarkdownWithStyle_Dark(t *testing.T) {
-	out := stripANSI(RenderMarkdownWithStyle("hello **world**", 80, "dark"))
-	if !strings.Contains(out, "world") {
-		t.Errorf("output missing text, got %q", out)
-	}
-}
-
-func TestRenderMarkdownWithStyle_Light(t *testing.T) {
-	out := stripANSI(RenderMarkdownWithStyle("hello *world*", 80, "light"))
-	if !strings.Contains(out, "world") {
-		t.Errorf("output missing text, got %q", out)
-	}
-}

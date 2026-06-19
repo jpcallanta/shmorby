@@ -83,10 +83,10 @@ func Load(opts LoadOptions) (Config, error) {
 	}
 
 	if err := validateProvider(cfg.Provider); err != nil {
-		return Config{}, err
+		return Config{}, fmt.Errorf("validate provider: %w", err)
 	}
 	if err := validateAgent(cfg.Agent.Default); err != nil {
-		return Config{}, err
+		return Config{}, fmt.Errorf("validate agent: %w", err)
 	}
 
 	return cfg, nil
@@ -98,7 +98,7 @@ func loadYAMLIfExists(cfg *Config, path string) error {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
-		return err
+		return fmt.Errorf("stat config: %w", err)
 	}
 	return loadYAML(cfg, path)
 }
@@ -107,7 +107,7 @@ func loadYAMLIfExists(cfg *Config, path string) error {
 func loadYAML(cfg *Config, path string) error {
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		return fmt.Errorf("read config %s: %w", path, err)
 	}
 	return yaml.Unmarshal(b, cfg)
 }

@@ -93,8 +93,8 @@ func (s *ShellTool) Parameters() json.RawMessage { return shellParams }
 // PermLevel returns the configured permission level.
 func (s *ShellTool) PermLevel() string { return s.perm }
 
-// Parses args, executes with timeout, truncates output, and logs
-// audit info. Permission is enforced by the agent loop.
+// Parses args, executes with timeout, truncates output, and redacts
+// secrets. Permission is enforced by the agent loop.
 // Non-zero exits are returned as output text with appended exit code
 // (not as Go errors).
 func (s *ShellTool) Run(
@@ -103,7 +103,7 @@ func (s *ShellTool) Run(
 	var a shellArgs
 	if err := json.Unmarshal(args, &a); err != nil {
 		return "", fmt.Errorf(
-			"invalid shell args: %s - "+
+			"invalid shell args: %w - "+
 				`expected {"command":"<cmd>","cwd":"<dir>",`+
 				`"timeout_seconds":<int>}`,
 			err,
@@ -136,7 +136,7 @@ func (s *ShellTool) Run(
 	out, err := cmd.CombinedOutput()
 	elapsed := time.Since(start)
 
-	// Determine exit code for audit and output.
+	// Determine exit code for output.
 	exitStr := "0"
 	if err != nil {
 		var exitErr *exec.ExitError
@@ -171,7 +171,7 @@ func (s *ShellTool) Run(
 		}
 		// Other error (timeout, exec failure, signal kill):
 		// return as error.
-		return string(truncated), err
+		return string(truncated), fmt.Errorf("shell exec: %w", err)
 	}
 
 	return string(truncated), nil

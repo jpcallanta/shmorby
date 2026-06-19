@@ -57,7 +57,7 @@ func (v *VectorStore) Search(
 		ctx, embedding, limit, where, nil,
 	)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("query embeddings: %w", err)
 	}
 
 	ids := make([]string, len(results))
