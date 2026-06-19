@@ -173,5 +173,12 @@ func (m Model) renderHelpOverlay() string {
 	footer := " Press any key to close."
 	sb.WriteString(theme.PopupDesc.Render(footer))
 
-	return sb.String()
+	result := sb.String()
+	if m.height > 0 {
+		lines := strings.Count(result, "\n") + 1
+		if pad := m.height - lines; pad > 0 {
+			result += strings.Repeat("\n", pad)
+		}
+	}
+	return result
 }

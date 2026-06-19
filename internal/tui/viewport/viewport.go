@@ -3,6 +3,8 @@
 package viewport
 
 import (
+	"strings"
+
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -204,14 +206,14 @@ func (m *Model) SelectedText(lines []string) string {
 	if end > len(lines) {
 		end = len(lines)
 	}
-	var out string
+	var sb strings.Builder
 	for i := start; i < end; i++ {
 		if i > start {
-			out += "\n"
+			sb.WriteString("\n")
 		}
-		out += lines[i]
+		sb.WriteString(lines[i])
 	}
-	return out
+	return sb.String()
 }
 
 // MouseMsg handles mouse events for selection when mouse tracking is enabled.

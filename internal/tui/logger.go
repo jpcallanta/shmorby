@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -141,11 +142,11 @@ func (b *ThinkingBuffer) End() bool {
 
 // Text returns the accumulated reasoning content.
 func (b *ThinkingBuffer) Text() string {
-	var s string
+	var sb strings.Builder
 	for _, l := range b.lines {
-		s += l
+		sb.WriteString(l)
 	}
-	return s
+	return sb.String()
 }
 
 // Elapsed returns the duration since the block started.

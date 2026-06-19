@@ -1698,7 +1698,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.viewport = tuivp.New(msg.Width, msg.Height-6)
+		m.viewport.SetWidth(msg.Width)
 		m.textarea.SetWidth(msg.Width)
 		m.textarea.SetHeight(m.inputLineHeight())
 		return m, nil
@@ -2537,13 +2537,15 @@ func (m *Model) handleCommand(line string) (bool, bool, error) {
 		return true, false, nil
 
 	case "/scope":
-		text := fmt.Sprintf("scope: %d bytes", m.scopeInfo.TotalBytes)
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("scope: %d bytes", m.scopeInfo.TotalBytes))
 		if m.scopeInfo.PrimaryPath != "" {
-			text += fmt.Sprintf("\n  primary: %s", m.scopeInfo.PrimaryPath)
+			sb.WriteString(fmt.Sprintf("\n  primary: %s", m.scopeInfo.PrimaryPath))
 		}
 		for _, inst := range m.scopeInfo.Instructions {
-			text += fmt.Sprintf("\n  instruction: %s", inst)
+			sb.WriteString(fmt.Sprintf("\n  instruction: %s", inst))
 		}
+		text := sb.String()
 		m.output = append(m.output, outputEntry{
 			kind: "agent",
 			text: text,
@@ -2855,6 +2857,9 @@ func (m *Model) ensureLayout() {
 	}
 	inputHeight := m.inputLineHeight()
 	statusHeight := 3
+	if m.tabBar.Visible() {
+		statusHeight++
+	}
 	vpHeight := m.height - inputHeight - statusHeight
 	if vpHeight < 1 {
 		vpHeight = 1
@@ -2875,6 +2880,50 @@ func (m Model) inputLineHeight() int {
 		lines = 1
 	}
 	return lines
+}
+
+// cursorVisualPos returns the visual line and column of the cursor
+// in the word-wrapped output for the given wrapped lines and original text.
+func (m Model) cursorVisualPos(lines []string, text string, width int) (int, int) {
+	cursorLine := m.textarea.Line()
+	li := m.textarea.LineInfo()
+	colRunes := li.ColumnOffset + li.StartColumn
+
+	textLines := strings.Split(text, "\n")
+	bytePos := 0
+	for i := 0; i < cursorLine && i < len(textLines); i++ {
+		bytePos += len(textLines[i]) + 1
+	}
+	if cursorLine < len(textLines) {
+		runes := []rune(textLines[cursorLine])
+		if colRunes > len(runes) {
+			colRunes = len(runes)
+		}
+		bytePos += len(string(runes[:colRunes]))
+	}
+	if bytePos > len(text) {
+		bytePos = len(text)
+	}
+
+	origPos := 0
+	for li, line := range lines {
+		lineLen := len(line)
+		if origPos+lineLen > bytePos {
+			return li, bytePos - origPos
+		}
+		if origPos+lineLen == bytePos {
+			return li, lineLen
+		}
+		origPos += lineLen
+		if origPos < len(text) {
+			if text[origPos] == '\n' {
+				origPos++
+			} else if text[origPos] == ' ' && origPos+1 < len(text) && text[origPos+1] != '\n' {
+				origPos++
+			}
+		}
+	}
+	return len(lines) - 1, len([]rune(lines[len(lines)-1]))
 }
 
 // View renders the entire UI.
@@ -2956,23 +3005,40 @@ func (m Model) View() string {
 	wrapped := wrapText(inputText, avail)
 	m.textarea.SetHeight(m.inputLineHeight())
 
-	cursorRune := ""
-	if m.textarea.Focused() {
-		cursorRune = "█"
-	}
+	lines := strings.Split(wrapped, "\n")
 
 	var promptSection strings.Builder
-	lines := strings.Split(wrapped, "\n")
-	for i, line := range lines {
-		if i == 0 {
-			promptSection.WriteString(promptChar + " " + line)
-		} else {
-			promptSection.WriteString("  " + line)
+	if m.textarea.Focused() {
+		visLine, visCol := m.cursorVisualPos(lines, inputText, avail)
+		for i, line := range lines {
+			if i == 0 {
+				promptSection.WriteString(promptChar + " ")
+			} else {
+				promptSection.WriteString("  ")
+			}
+
+			if i == visLine {
+				r := []rune(line)
+				if visCol > len(r) {
+					visCol = len(r)
+				}
+				promptSection.WriteString(string(r[:visCol]))
+				promptSection.WriteString("█")
+				promptSection.WriteString(string(r[visCol:]))
+			} else {
+				promptSection.WriteString(line)
+			}
+			promptSection.WriteString("\n")
 		}
-		if i == len(lines)-1 {
-			promptSection.WriteString(cursorRune)
+	} else {
+		for i, line := range lines {
+			if i == 0 {
+				promptSection.WriteString(promptChar + " " + line)
+			} else {
+				promptSection.WriteString("  " + line)
+			}
+			promptSection.WriteString("\n")
 		}
-		promptSection.WriteString("\n")
 	}
 	sections = append(sections, promptSection.String())
 
@@ -2992,7 +3058,16 @@ func (m Model) View() string {
 	// Status line (indented 2 spaces).
 	sections = append(sections, "  "+m.renderStatus())
 
-	return strings.Join(sections, "\n")
+	result := strings.Join(sections, "\n")
+
+	if m.height > 0 {
+		lines := strings.Count(result, "\n") + 1
+		if pad := m.height - lines; pad > 0 {
+			result += strings.Repeat("\n", pad)
+		}
+	}
+
+	return result
 }
 
 // renderCompletionPopup renders the slash-command completion list.

@@ -188,16 +188,7 @@ func logSep(width int, label string) string {
 
 // logEndSep returns a closing separator for log/thinking sections.
 func logEndSep(width int, label string) string {
-	text := "end " + label
-	prefix := strings.Repeat("─", 3)
-	suffixLen := width - len(prefix) - len(text) - 6
-	if suffixLen < 0 {
-		suffixLen = 0
-	}
-	suffix := strings.Repeat("─", suffixLen)
-	return lipgloss.NewStyle().Foreground(styles.Sapphire).Render(
-		prefix+" "+text+" "+suffix,
-	) + "\n"
+	return logSep(width, "end "+label)
 }
 
 // formatTokens formats a token count for display, e.g. 42000 → "42k".
