@@ -2806,6 +2806,7 @@ func (m Model) handleSettle() (tea.Model, tea.Cmd) {
 
 // syncViewport updates the viewport with current output.
 func (m *Model) syncViewport() {
+	m.ensureLayout()
 	var sb strings.Builder
 	for i, entry := range m.output {
 		selected := m.selectionMode &&

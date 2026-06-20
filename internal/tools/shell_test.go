@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"shmorby/internal/xdg"
 )
 
 // TestNewShellTool_EchoHello checks echo hello via shell tool.
@@ -280,11 +282,12 @@ func TestShellTool_MissingCommand_ReturnsError(t *testing.T) {
 	}
 }
 
-// TestNewShellTool_DefaultShell checks empty shell defaults to bash.
+// TestNewShellTool_DefaultShell checks empty shell defaults to xdg.DefaultShell().
 func TestNewShellTool_DefaultShell(t *testing.T) {
 	tool := NewShellTool("", "", "allow")
-	if tool.shell == "" {
-		t.Error("want non-empty shell, got empty")
+	want := xdg.DefaultShell()
+	if tool.shell != want {
+		t.Errorf("shell: got %q, want %q", tool.shell, want)
 	}
 }
 

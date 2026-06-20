@@ -3,6 +3,8 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -56,17 +58,20 @@ func TestLoad_DefaultsNoFiles(t *testing.T) {
 	if cfg.Agent.MaxToolIterations != 20 {
 		t.Fatalf("Agent.MaxToolIterations: got %d want 20", cfg.Agent.MaxToolIterations)
 	}
-	if cfg.Agent.Shell != "bash" {
-		t.Fatalf("Agent.Shell: got %q want %q", cfg.Agent.Shell, "bash")
+	if cfg.Agent.Shell != "" {
+		t.Fatalf("Agent.Shell: got %q want %q", cfg.Agent.Shell, "")
 	}
 	if !cfg.Tools.Shell.Enabled {
 		t.Fatal("Tools.Shell.Enabled: want true")
 	}
-	if cfg.Permission.Shell != "allow" {
-		t.Fatalf("Permission.Shell: got %q want %q", cfg.Permission.Shell, "allow")
+	if cfg.Permission.Shell != "ask" {
+		t.Fatalf("Permission.Shell: got %q want %q", cfg.Permission.Shell, "ask")
 	}
 	if cfg.Permission.Sudo != "ask" {
 		t.Fatalf("Permission.Sudo: got %q want %q", cfg.Permission.Sudo, "ask")
+	}
+	if !cfg.Permission.Interactive {
+		t.Fatal("Permission.Interactive: want true")
 	}
 }
 
@@ -142,6 +147,8 @@ func TestLoad_CLIProviderOverridesFile(t *testing.T) {
 	writeConfig(t, filepath.Join(cwd, "shmorby.yaml"), `
 provider: ollama
 model: file-model
+openrouter:
+  api_key: sk-or-test
 `)
 	if err := os.Chdir(cwd); err != nil {
 		t.Fatalf("chdir: %v", err)
@@ -206,8 +213,8 @@ provider: bogus
 	}
 }
 
-// TestLoad_EnvProviderOverridesFile checks that SHMORBY_PROVIDER overrides the YAML value.
-func TestLoad_EnvProviderOverridesFile(t *testing.T) {
+// TestLoad_EnvVarNoLongerAffectsConfig checks that env vars do not override config values.
+func TestLoad_EnvVarNoLongerAffectsConfig(t *testing.T) {
 	ucd := filepath.Join(t.TempDir(), "shmorby")
 
 	oldWd, err := os.Getwd()
@@ -235,28 +242,15 @@ provider: ollama
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Provider != "openrouter" {
-		t.Fatalf("Provider: got %q want %q", cfg.Provider, "openrouter")
+	// Env var should NOT override YAML value.
+	if cfg.Provider != "ollama" {
+		t.Fatalf("Provider: want %q, got %q (env should not affect config)", "ollama", cfg.Provider)
 	}
 }
 
-// TestLoad_EnvInvalidProvider checks that an invalid provider from env returns error.
-func TestLoad_EnvInvalidProvider(t *testing.T) {
+// TestLoad_CLIModelOverridesDefaults checks that --model CLI flag overrides defaults.
+func TestLoad_CLIModelOverridesDefaults(t *testing.T) {
 	ucd := filepath.Join(t.TempDir(), "shmorby")
-	t.Setenv("SHMORBY_PROVIDER", "invalid")
-	_, err := Load(LoadOptions{
-		SystemConfig:  "/nonexistent-sys-config",
-		UserConfigDir: ucd,
-	})
-	if err == nil {
-		t.Fatal("expected error for invalid provider from env, got nil")
-	}
-}
-
-// TestLoad_CLIModelOverridesEnv checks that --model CLI flag overrides env.
-func TestLoad_CLIModelOverridesEnv(t *testing.T) {
-	ucd := filepath.Join(t.TempDir(), "shmorby")
-	t.Setenv("SHMORBY_MODEL", "env-model")
 
 	cfg, err := Load(LoadOptions{
 		Model:         "cli-model",
@@ -267,24 +261,7 @@ func TestLoad_CLIModelOverridesEnv(t *testing.T) {
 		t.Fatalf("Load: %v", err)
 	}
 	if cfg.Model != "cli-model" {
-		t.Fatalf("Model: got %q want %q", cfg.Model, "cli-model")
-	}
-}
-
-// TestLoad_EnvOllamaBaseURL checks OLLAMA_BASE_URL overrides the default.
-func TestLoad_EnvOllamaBaseURL(t *testing.T) {
-	ucd := filepath.Join(t.TempDir(), "shmorby")
-	t.Setenv("OLLAMA_BASE_URL", "http://ollama.internal:11434")
-
-	cfg, err := Load(LoadOptions{
-		SystemConfig:  "/nonexistent-sys-config",
-		UserConfigDir: ucd,
-	})
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if cfg.Ollama.BaseURL != "http://ollama.internal:11434" {
-		t.Fatalf("Ollama.BaseURL: got %q want %q", cfg.Ollama.BaseURL, "http://ollama.internal:11434")
+		t.Fatalf("Model: want %q, got %q", "cli-model", cfg.Model)
 	}
 }
 
@@ -404,6 +381,72 @@ provider: ollama
 	}
 }
 
+// TestLoad_ConfigInvalidProviderWithLine checks that an invalid provider in
+// --config reports the YAML line number.
+func TestLoad_ConfigInvalidProviderWithLine(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "myconfig.yaml")
+	writeConfig(t, cfgPath, `
+provider: bogus
+`)
+	_, err := Load(LoadOptions{
+		ConfigFile:    cfgPath,
+		SystemConfig:  "/nonexistent",
+		UserConfigDir: t.TempDir(),
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid provider, got nil")
+	}
+	if !strings.Contains(err.Error(), cfgPath+":"+strconv.Itoa(2)) {
+		t.Errorf("want error with line 2, got:\n%s", err)
+	}
+}
+
+// TestLoad_ConfigInvalidAgentWithLine tests that an invalid agent.default in
+// the --config file reports the YAML line number.
+func TestLoad_ConfigInvalidAgentWithLine(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "myconfig.yaml")
+	writeConfig(t, cfgPath, `
+agent:
+  default: invalid-agent
+`)
+	_, err := Load(LoadOptions{
+		ConfigFile:    cfgPath,
+		SystemConfig:  "/nonexistent",
+		UserConfigDir: t.TempDir(),
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid agent, got nil")
+	}
+	if !strings.Contains(err.Error(), cfgPath+":"+strconv.Itoa(3)) {
+		t.Errorf("want error with line 3, got:\n%s", err)
+	}
+}
+
+// TestLoad_ConfigValidFileNoEarlyError checks that a --config file without
+// provider/agent keys does not trigger early validation errors.
+func TestLoad_ConfigValidFileNoEarlyError(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "myconfig.yaml")
+	writeConfig(t, cfgPath, `
+ollama:
+  base_url: http://custom:11434
+`)
+	cfg, err := Load(LoadOptions{
+		ConfigFile:    cfgPath,
+		SystemConfig:  "/nonexistent",
+		UserConfigDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Ollama.BaseURL != "http://custom:11434" {
+		t.Fatalf("Ollama.BaseURL: got %q want %q",
+			cfg.Ollama.BaseURL, "http://custom:11434")
+	}
+}
+
 // TestLoad_MalformedYAML checks that invalid YAML in --config returns a wrapped error.
 func TestLoad_MalformedYAML(t *testing.T) {
 	ucd := filepath.Join(t.TempDir(), "shmorby")
@@ -424,20 +467,6 @@ provider: ollama
 	})
 	if err == nil {
 		t.Fatal("expected error for malformed YAML, got nil")
-	}
-}
-
-// TestLoad_EmptyProviderEnv checks that SHMORBY_PROVIDER="" is rejected.
-func TestLoad_EmptyProviderEnv(t *testing.T) {
-	ucd := filepath.Join(t.TempDir(), "shmorby")
-	t.Setenv("SHMORBY_PROVIDER", "")
-
-	_, err := Load(LoadOptions{
-		SystemConfig:  "/nonexistent-sys-config",
-		UserConfigDir: ucd,
-	})
-	if err == nil {
-		t.Fatal("expected error for empty SHMORBY_PROVIDER, got nil")
 	}
 }
 
@@ -511,21 +540,6 @@ tools:
 	}
 }
 
-// TestLoad_ToolsTimeoutFromEnv checks SHMORBY_TOOLS_TIMEOUT env var works.
-func TestLoad_ToolsTimeoutFromEnv(t *testing.T) {
-	t.Setenv("SHMORBY_TOOLS_TIMEOUT", "60")
-	cfg, err := Load(LoadOptions{
-		SystemConfig:  "/nonexistent",
-		UserConfigDir: t.TempDir(),
-	})
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if cfg.Tools.Timeout != 60 {
-		t.Errorf("Tools.Timeout: want 60, got %d", cfg.Tools.Timeout)
-	}
-}
-
 // TestLoad_MaxToolOutputLinesDefault checks MaxToolOutputLines defaults to 0.
 func TestLoad_MaxToolOutputLinesDefault(t *testing.T) {
 	cfg, err := Load(LoadOptions{
@@ -561,58 +575,6 @@ context:
 	}
 }
 
-// TestLoad_MaxToolOutputLinesFromEnv checks SHMORBY_TOOL_OUTPUT_MAX_LINES env var.
-func TestLoad_MaxToolOutputLinesFromEnv(t *testing.T) {
-	t.Setenv("SHMORBY_TOOL_OUTPUT_MAX_LINES", "100")
-	cfg, err := Load(LoadOptions{
-		SystemConfig:  "/nonexistent",
-		UserConfigDir: t.TempDir(),
-	})
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if cfg.Context.MaxToolOutputLines != 100 {
-		t.Errorf("MaxToolOutputLines: want 100, got %d", cfg.Context.MaxToolOutputLines)
-	}
-}
-
-// TestLoad_MaxToolOutputLinesEnvOverridesYAML checks env overrides YAML.
-func TestLoad_MaxToolOutputLinesEnvOverridesYAML(t *testing.T) {
-	dir := t.TempDir()
-	cfgPath := filepath.Join(dir, "shmorby.yaml")
-	writeConfig(t, cfgPath, `
-context:
-  max_tool_output_lines: 50
-`)
-	t.Setenv("SHMORBY_TOOL_OUTPUT_MAX_LINES", "300")
-	cfg, err := Load(LoadOptions{
-		ConfigFile:    cfgPath,
-		SystemConfig:  "/nonexistent",
-		UserConfigDir: t.TempDir(),
-	})
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if cfg.Context.MaxToolOutputLines != 300 {
-		t.Errorf("MaxToolOutputLines: want 300, got %d", cfg.Context.MaxToolOutputLines)
-	}
-}
-
-// TestLoad_MaxToolOutputLinesFromEnvInvalid checks invalid env value is ignored.
-func TestLoad_MaxToolOutputLinesFromEnvInvalid(t *testing.T) {
-	t.Setenv("SHMORBY_TOOL_OUTPUT_MAX_LINES", "not-a-number")
-	cfg, err := Load(LoadOptions{
-		SystemConfig:  "/nonexistent",
-		UserConfigDir: t.TempDir(),
-	})
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if cfg.Context.MaxToolOutputLines != 0 {
-		t.Errorf("MaxToolOutputLines: want 0, got %d", cfg.Context.MaxToolOutputLines)
-	}
-}
-
 // TestLoad_MemoryEmbeddingDefaults checks empty embedding config.
 func TestLoad_MemoryEmbeddingDefaults(t *testing.T) {
 	cfg, err := Load(LoadOptions{
@@ -629,9 +591,9 @@ func TestLoad_MemoryEmbeddingDefaults(t *testing.T) {
 	}
 }
 
-// TestPermissionDefaults_InteractiveFalse checks that permission
-// interactive defaults to false when not specified in config.
-func TestPermissionDefaults_InteractiveFalse(t *testing.T) {
+// TestPermissionDefaults_InteractiveTrue checks that permission
+// interactive defaults to true when not specified in config.
+func TestPermissionDefaults_InteractiveTrue(t *testing.T) {
 	cfg, err := Load(LoadOptions{
 		SystemConfig:  "/nonexistent",
 		UserConfigDir: t.TempDir(),
@@ -639,13 +601,183 @@ func TestPermissionDefaults_InteractiveFalse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Permission.Interactive {
-		t.Error("Permission.Interactive: want false by default")
+	if !cfg.Permission.Interactive {
+		t.Error("Permission.Interactive: want true by default")
 	}
 	if cfg.Permission.Presets != nil {
 		t.Error("Permission.Presets: want nil by default")
 	}
 	if cfg.Permission.Rules != nil {
 		t.Error("Permission.Rules: want nil by default")
+	}
+}
+
+// TestLoad_DefaultWorkdir checks Scope.Workdir defaults to xdg.DefaultWorkDir().
+func TestLoad_DefaultWorkdir(t *testing.T) {
+	cfg, err := Load(LoadOptions{
+		SystemConfig:  "/nonexistent",
+		UserConfigDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Scope.Workdir == "" {
+		t.Error("Scope.Workdir: want non-empty default")
+	}
+}
+
+// TestLoad_DefaultDBPath checks Memory.DBPath uses xdg.UserDataDir().
+func TestLoad_DefaultDBPath(t *testing.T) {
+	cfg, err := Load(LoadOptions{
+		SystemConfig:  "/nonexistent",
+		UserConfigDir: t.TempDir(),
+	})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Memory.DBPath == "" {
+		t.Error("Memory.DBPath: want non-empty default")
+	}
+	if cfg.Memory.DBPath == "~/.local/share/shmorby/memory.db" {
+		t.Error("Memory.DBPath: want xdg-based path, not hardcoded tilde path")
+	}
+}
+
+// TestLoad_EachLayerValidatesWithLine checks that every YAML layer validates
+// with file:line reporting.
+func TestLoad_EachLayerValidatesWithLine(t *testing.T) {
+	t.Run("system layer", func(t *testing.T) {
+		dir := t.TempDir()
+		sysPath := filepath.Join(dir, "sys", "config.yaml")
+		writeConfig(t, sysPath, `provider: bogus
+`)
+		_, err := Load(LoadOptions{
+			SystemConfig:  sysPath,
+			UserConfigDir: t.TempDir(),
+		})
+		if err == nil {
+			t.Fatal("expected error for invalid provider in system config")
+		}
+		if !strings.Contains(err.Error(), "sys/config.yaml:1") {
+			t.Errorf("want error with file:line, got:\n%s", err)
+		}
+	})
+
+	t.Run("user layer", func(t *testing.T) {
+		dir := t.TempDir()
+		userDir := filepath.Join(dir, "user")
+		writeConfig(t, filepath.Join(userDir, "shmorby", "config.yaml"), `provider: bogus
+`)
+		_, err := Load(LoadOptions{
+			SystemConfig:  "/nonexistent",
+			UserConfigDir: userDir,
+		})
+		if err == nil {
+			t.Fatal("expected error for invalid provider in user config")
+		}
+		if !strings.Contains(err.Error(), "config.yaml:1") {
+			t.Errorf("want error with file:line, got:\n%s", err)
+		}
+	})
+
+	t.Run("cwd layer", func(t *testing.T) {
+		dir := t.TempDir()
+		cwdDir := filepath.Join(dir, "cwd")
+		if err := os.MkdirAll(cwdDir, 0o755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		writeConfig(t, filepath.Join(cwdDir, "shmorby.yaml"), `provider: bogus
+`)
+		oldWd, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("getwd: %v", err)
+		}
+		if err := os.Chdir(cwdDir); err != nil {
+			t.Fatalf("chdir: %v", err)
+		}
+		defer func() { _ = os.Chdir(oldWd) }()
+
+		_, err = Load(LoadOptions{
+			SystemConfig:  "/nonexistent",
+			UserConfigDir: t.TempDir(),
+		})
+		if err == nil {
+			t.Fatal("expected error for invalid provider in cwd config")
+		}
+		if !strings.Contains(err.Error(), "shmorby.yaml:1") {
+			t.Errorf("want error with file:line, got:\n%s", err)
+		}
+	})
+}
+
+// TestLoad_MissingAPIKeyForProvider_ReturnsError checks that missing API key
+// for the chosen provider returns an error.
+func TestLoad_MissingAPIKeyForProvider_ReturnsError(t *testing.T) {
+	tests := []struct {
+		provider string
+		want     string
+	}{
+		{"openai", "openai.api_key is not set"},
+		{"openrouter", "openrouter.api_key is not set"},
+		{"opencode_zen", "opencode_zen.api_key is not set"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.provider, func(t *testing.T) {
+			_, err := Load(LoadOptions{
+				Provider:      tt.provider,
+				SystemConfig:  "/nonexistent",
+				UserConfigDir: t.TempDir(),
+			})
+			if err == nil {
+				t.Fatal("expected error for missing API key, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("want error containing %q, got:\n%s", tt.want, err)
+			}
+		})
+	}
+}
+
+// TestValidateConfig_InvalidPermission_ReturnsError checks permission validation.
+func TestValidateConfig_InvalidPermission_ReturnsError(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Permission.Shell = "maybe"
+	if err := validateConfig(cfg); err == nil {
+		t.Fatal("expected error for invalid permission level, got nil")
+	}
+}
+
+// TestValidateConfig_InvalidTokenEstimator_ReturnsError checks token estimator validation.
+func TestValidateConfig_InvalidTokenEstimator_ReturnsError(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Context.TokenEstimator = "gpt3"
+	if err := validateConfig(cfg); err == nil {
+		t.Fatal("expected error for invalid token_estimator, got nil")
+	}
+}
+
+// TestValidateConfig_InvalidContextMode_ReturnsError checks context mode validation.
+func TestValidateConfig_InvalidContextMode_ReturnsError(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Context.Mode = "ultra"
+	if err := validateConfig(cfg); err == nil {
+		t.Fatal("expected error for invalid context.mode, got nil")
+	}
+}
+
+// TestValidateConfig_NegativeTimeout_ReturnsError checks negative timeout validation.
+func TestValidateConfig_NegativeTimeout_ReturnsError(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Tools.Timeout = -1
+	if err := validateConfig(cfg); err == nil {
+		t.Fatal("expected error for negative timeout, got nil")
+	}
+}
+
+// TestValidateConfig_ValidConfig_ReturnsNil checks valid config passes validation.
+func TestValidateConfig_ValidConfig_ReturnsNil(t *testing.T) {
+	cfg := defaultConfig()
+	if err := validateConfig(cfg); err != nil {
+		t.Fatalf("expected nil error for valid config, got: %v", err)
 	}
 }

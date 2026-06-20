@@ -2,7 +2,6 @@ package llm
 
 import (
 	"fmt"
-	"os"
 
 	"shmorby/internal/config"
 )
@@ -17,7 +16,7 @@ func NewProvider(cfg config.Config) (Provider, error) {
 	case "openrouter":
 		if cfg.OpenRouter.APIKey == "" {
 			return nil, fmt.Errorf(
-				"openrouter: OPENROUTER_API_KEY is required",
+				"openrouter: openrouter.api_key is required",
 			)
 		}
 		return newOpenRouterProvider(
@@ -27,7 +26,7 @@ func NewProvider(cfg config.Config) (Provider, error) {
 	case "opencode_zen":
 		if cfg.OpencodeZen.APIKey == "" {
 			return nil, fmt.Errorf(
-				"opencode_zen: OPENCODE_ZEN_API_KEY is required",
+				"opencode_zen: opencode_zen.api_key is required",
 			)
 		}
 		baseURL := cfg.OpencodeZen.BaseURL
@@ -39,16 +38,8 @@ func NewProvider(cfg config.Config) (Provider, error) {
 			cfg.Model, cfg,
 		), nil
 	case "openai":
-		apiKey := cfg.OpenAI.APIKey
-		if apiKey == "" {
-			envName := cfg.OpenAI.APIKeyEnv
-			if envName == "" {
-				envName = "OPENAI_API_KEY"
-			}
-			apiKey = os.Getenv(envName)
-		}
-		if apiKey == "" {
-			return nil, fmt.Errorf("openai: API key is required")
+		if cfg.OpenAI.APIKey == "" {
+			return nil, fmt.Errorf("openai: api_key is required")
 		}
 		baseURL := cfg.OpenAI.BaseURL
 		if baseURL == "" {
@@ -60,7 +51,7 @@ func NewProvider(cfg config.Config) (Provider, error) {
 			timeout = 120
 		}
 		return newOpenAIProvider(
-			baseURL, apiKey, org, cfg.Model, timeout, cfg,
+			baseURL, cfg.OpenAI.APIKey, org, cfg.Model, timeout, cfg,
 		), nil
 
 	default:

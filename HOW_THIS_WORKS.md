@@ -45,6 +45,7 @@ or OpenCode Zen with a config change.
 |---------|------|
 | `cmd/shmorby` | CLI entrypoint (Cobra) |
 | `internal/config` | Layered YAML merge |
+| `internal/xdg` | Cross-platform path resolution |
 | `internal/llm` | Provider interface + backends |
 | `internal/agent` | Loop, modes, prompts, step cap |
 | `internal/tools` | Registry, schemas, permissions |
@@ -118,7 +119,7 @@ TUI. `a` allows all for this turn. Configurable
 `interactive: true/false`.
 
 **Audit trail**: JSON-lines log at
-`$XDG_DATA_HOME/shmorby/audit.log` with timestamp, tool, command,
+`$XDG_DATA_HOME/shmorby/audit.log` (Unix) / `%LOCALAPPDATA%\shmorby\audit.log` (Windows) with timestamp, tool, command,
 matched rule, decision, reason.
 
 ---
@@ -173,9 +174,9 @@ Single `Provider` interface, 4 backends:
 | Provider | Auth | Streaming | Embeddings |
 |----------|------|-----------|------------|
 | Ollama | None (local) | JSON-lines | `nomic-embed-text` |
-| OpenAI | `OPENAI_API_KEY` | SSE | `text-embedding-3-small` |
-| OpenRouter | `OPENROUTER_API_KEY` | SSE | — |
-| OpenCode Zen | `OPENCODE_ZEN_API_KEY` | SSE | — |
+| OpenAI | `openai.api_key` in YAML | SSE | `text-embedding-3-small` |
+| OpenRouter | `openrouter.api_key` in YAML | SSE | — |
+| OpenCode Zen | `opencode_zen.api_key` in YAML | SSE | — |
 
 **Model info resolution** (no hardcoded context windows):
 1. Provider API call (live fetch)
@@ -188,14 +189,13 @@ Single `Provider` interface, 4 backends:
 
 Later wins:
 
-1. `/etc/shmorby/config.yaml` (optional)
-2. `~/.config/shmorby/config.yaml`
+1. `/etc/shmorby/config.yaml` (Unix) / `%ProgramData%\shmorby\config.yaml` (Windows) — optional
+2. `~/.config/shmorby/config.yaml` (Unix) / `%APPDATA%\shmorby\config.yaml` (Windows)
 3. `--config` flag
 4. `./shmorby.yaml` in cwd
-5. Env vars (`SHMORBY_PROVIDER`, `SHMORBY_MODEL`, etc.)
-6. CLI flags (`--provider`, `--model`, `--agent`)
+5. CLI flags (`--provider`, `--model`, `--agent`)
 
-Secrets via env only (API keys).
+Secrets via `api_key` fields in YAML.
 
 ---
 

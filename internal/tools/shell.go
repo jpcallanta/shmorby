@@ -6,12 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
 	"time"
 
-	"log/slog"
+	"shmorby/internal/xdg"
 )
 
 //go:embed shell.txt
@@ -58,15 +59,12 @@ func (s *ShellTool) SetDefaultTimeout(t int) {
 }
 
 // Creates a ShellTool with the given shell, workdir, and permission
-// level. Empty shell defaults to $SHELL then bash.
+// level. Empty shell defaults to the OS-preferred shell via xdg.DefaultShell().
 // Empty workdir defaults to os.Getwd().
 func NewShellTool(cfgShell, scopeWD, permLevel string) *ShellTool {
 	sh := cfgShell
 	if sh == "" {
-		sh = os.Getenv("SHELL")
-	}
-	if sh == "" {
-		sh = "bash"
+		sh = xdg.DefaultShell()
 	}
 	wd := scopeWD
 	if wd == "" {

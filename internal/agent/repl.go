@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	ctxcomp "shmorby/internal/context"
 	"shmorby/internal/llm"
@@ -42,12 +43,20 @@ type REPL struct {
 	ToolPermFunc ToolPermissionFunc
 	ToolRules    map[string]*tools.RuleSet
 	scanner      *bufio.Scanner
+
+	// Streaming support for non-TUI mode.
+	streamEnabled       bool
+	thinkingDone        chan struct{}
+	thinkingSpinnerDone chan struct{}
+	toolDone            chan struct{}
+	toolSpinnerDone     chan struct{}
 }
 
 // Starts the interactive REPL loop reading from In and writing to Out.
 // Runs until /quit, ctx cancellation, or EOF.
 func (r *REPL) Run(ctx context.Context) error {
-	fmt.Fprint(r.Out, "shmorby> ")
+	r.streamEnabled = stdoutIsTerminal.Load()
+	fmt.Fprint(r.Out, Prompt())
 
 	r.scanner = bufio.NewScanner(r.In)
 
@@ -61,7 +70,7 @@ func (r *REPL) Run(ctx context.Context) error {
 
 		// Check for empty input.
 		if line == "" {
-			fmt.Fprint(r.Out, "shmorby> ")
+			fmt.Fprint(r.Out, Prompt())
 
 			continue
 		}
@@ -71,11 +80,11 @@ func (r *REPL) Run(ctx context.Context) error {
 			return nil
 		} else if err != nil {
 			fmt.Fprintf(r.Out, "Error: %v\n", err)
-			fmt.Fprint(r.Out, "shmorby> ")
+			fmt.Fprint(r.Out, Prompt())
 
 			continue
 		} else if cmd {
-			fmt.Fprint(r.Out, "shmorby> ")
+			fmt.Fprint(r.Out, Prompt())
 
 			continue
 		}
@@ -84,28 +93,127 @@ func (r *REPL) Run(ctx context.Context) error {
 		var reply string
 		var err error
 
-		// Track memory stats before the turn.
-		var prevHits int
-		if r.Retriever != nil {
-			prevHits = r.Retriever.Stats().Hits
+		// Start thinking spinner for all paths.
+		if r.streamEnabled {
+			r.thinkingDone = make(chan struct{})
+			r.thinkingSpinnerDone = make(chan struct{})
+			td := r.thinkingDone
+			tsd := r.thinkingSpinnerDone
+			go func(done chan struct{}, sd chan struct{}) {
+				defer close(sd)
+				ticker := time.NewTicker(100 * time.Millisecond)
+				start := time.Now()
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ticker.C:
+						fmt.Fprint(r.Out, ThinkingLine(time.Since(start)))
+					case <-done:
+						fmt.Fprint(r.Out, ClearLine())
+						return
+					}
+				}
+			}(td, tsd)
 		}
 
 		if r.Registry != nil {
+			// Build onEvent closure for tool visibility.
+			onEvent := func(ev AgentEvent) {
+				switch ev.Type {
+				case "tool-start":
+					if r.thinkingDone != nil {
+						close(r.thinkingDone)
+						r.thinkingDone = nil
+					}
+					fmt.Fprintln(r.Out)
+					fmt.Fprintln(r.Out, ToolStart(ev.Name, ev.Info))
+
+					if r.streamEnabled {
+						// Start tool spinner.
+						r.toolDone = make(chan struct{})
+						r.toolSpinnerDone = make(chan struct{})
+						td := r.toolDone
+						tsd := r.toolSpinnerDone
+						go func(done chan struct{}, sd chan struct{}) {
+							defer close(sd)
+							ticker := time.NewTicker(100 * time.Millisecond)
+							start := time.Now()
+							defer ticker.Stop()
+							for {
+								select {
+								case <-ticker.C:
+									fmt.Fprint(r.Out, RunningLine(time.Since(start)))
+								case <-done:
+									fmt.Fprint(r.Out, ClearLine())
+									return
+								}
+							}
+						}(td, tsd)
+					}
+
+				case "tool-end":
+					if r.toolDone != nil {
+						close(r.toolDone)
+						r.toolDone = nil
+					}
+					fmt.Fprintln(r.Out, ToolEnd(ev.Name, ev.Info, ev.Output))
+					fmt.Fprintln(r.Out)
+				}
+			}
+
 			permFunc := r.ToolPermFunc
 			if permFunc == nil && r.ToolRules != nil {
 				permFunc = r.toolPermissionFunc
 			}
-			reply, err = RunTurnWithTools(
-				ctx, r.Provider, r.Session,
-				r.Mode, r.Scope, r.Override, r.Model, line,
-				r.Registry, r.MaxToolIter, r.ShellEnabled,
-				r.Store, r.Retriever,
-				r.Compressor, r.ModelInfo,
-				nil,
-				permFunc,
-				r.ToolRules,
-			)
+
+			if r.streamEnabled {
+				// Streaming path with progressive text output.
+				onDelta := func(delta string) {
+					// Kill thinking spinner on first delta.
+					if r.thinkingDone != nil {
+						close(r.thinkingDone)
+						r.thinkingDone = nil
+					}
+					fmt.Fprint(r.Out, delta)
+				}
+				reply, err = RunTurnWithToolsStream(
+					ctx, r.Provider, r.Session,
+					r.Mode, r.Scope, r.Override, r.Model, line,
+					r.Registry, r.MaxToolIter, r.ShellEnabled,
+					r.Store, r.Retriever,
+					r.Compressor, r.ModelInfo,
+					onEvent, onDelta, permFunc, r.ToolRules,
+				)
+
+				// Fall back to non-streaming when provider doesn't
+				// support it (e.g. opencode_zen).
+				if err != nil && strings.Contains(
+					err.Error(), "streaming not",
+				) {
+					reply, err = RunTurnWithTools(
+						ctx, r.Provider, r.Session,
+						r.Mode, r.Scope, r.Override,
+						r.Model, line,
+						r.Registry, r.MaxToolIter,
+						r.ShellEnabled,
+						r.Store, r.Retriever,
+						r.Compressor, r.ModelInfo,
+						onEvent, permFunc, r.ToolRules,
+					)
+				}
+			} else {
+				// Non-streaming fallback (piped / CI).
+				reply, err = RunTurnWithTools(
+					ctx, r.Provider, r.Session,
+					r.Mode, r.Scope, r.Override, r.Model, line,
+					r.Registry, r.MaxToolIter, r.ShellEnabled,
+					r.Store, r.Retriever,
+					r.Compressor, r.ModelInfo,
+					onEvent, permFunc, r.ToolRules,
+				)
+			}
 		} else {
+			// No tools path.
 			reply, err = RunTurn(
 				ctx, r.Provider, r.Session,
 				r.Mode, r.Scope, r.Override, r.Model, line,
@@ -113,25 +221,32 @@ func (r *REPL) Run(ctx context.Context) error {
 				r.Compressor, r.ModelInfo,
 			)
 		}
+
+		// Ensure spinner is killed after any path completes.
+		if r.thinkingDone != nil {
+			close(r.thinkingDone)
+			r.thinkingDone = nil
+		}
+
 		if err != nil {
-			fmt.Fprintf(r.Out, "Error: %v\n", err)
-			fmt.Fprint(r.Out, "shmorby> ")
+			fmt.Fprintf(r.Out, "\n%s\n", colorize(ansiRed, "Error: "+err.Error()))
+			fmt.Fprint(r.Out, Prompt())
 
 			continue
 		}
 
-		fmt.Fprintln(r.Out, reply)
+		// Render separator + markdown reply + footer separator.
+		fmt.Fprintln(r.Out)
+		fmt.Fprintln(r.Out, Separator("agent"))
+		fmt.Fprintln(r.Out, FormatMarkdown(reply))
+		fmt.Fprintln(r.Out, Separator(""))
 
-		// Show memory indicator when memory was used.
-		if r.Retriever != nil {
-			currentHits := r.Retriever.Stats().Hits
-			if currentHits > prevHits {
-				fmt.Fprintf(r.Out, "[memory: %d entries]\n",
-					r.Retriever.Stats().LastCount)
-			}
+		// Show memory retrieval indicator when memory was used.
+		if r.Retriever != nil && r.Retriever.Stats().LastCount > 0 {
+			fmt.Fprintln(r.Out, MemoryIndicator(r.Retriever.Stats().LastCount))
 		}
 
-		fmt.Fprint(r.Out, "shmorby> ")
+		fmt.Fprint(r.Out, Prompt())
 	}
 
 	if err := r.scanner.Err(); err != nil {
@@ -500,8 +615,21 @@ func (r *REPL) handleLogCommand(parts []string) (bool, bool, error) {
 }
 
 // toolPermissionFunc implements the permission callback for the REPL,
-// prompting the user via stdin/stdout.
+// prompting the user via a fresh scanner on In.
 func (r *REPL) toolPermissionFunc(toolName, command, reason string) ToolPermissionResponse {
+	// Suspend thinking spinner while prompting.
+	if r.thinkingDone != nil {
+		close(r.thinkingDone)
+		r.thinkingDone = nil
+		<-r.thinkingSpinnerDone
+	}
+	// Suspend tool-running spinner while prompting.
+	if r.toolDone != nil {
+		close(r.toolDone)
+		r.toolDone = nil
+		<-r.toolSpinnerDone
+	}
+
 	fmt.Fprintf(r.Out, "\nPermission requested: %s\n", toolName)
 	fmt.Fprintf(r.Out, "  command: %s\n", command)
 	if reason != "" {
@@ -509,8 +637,10 @@ func (r *REPL) toolPermissionFunc(toolName, command, reason string) ToolPermissi
 	}
 	fmt.Fprint(r.Out, "Allow? [y]es / [n]o / [a]llow all like this: ")
 
-	for r.scanner.Scan() {
-		line := strings.TrimSpace(r.scanner.Text())
+	// Use a fresh scanner to avoid racing with the main loop's scanner.
+	s := bufio.NewScanner(r.In)
+	for s.Scan() {
+		line := strings.TrimSpace(s.Text())
 		switch strings.ToLower(line) {
 		case "y", "yes":
 			return PermAllow

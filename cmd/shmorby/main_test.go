@@ -23,7 +23,6 @@ func TestHelpOutput_AllSections(t *testing.T) {
 	sections := []string{
 		"shmorby",
 		"Flags:",
-		"Environment variables:",
 		"Config file",
 		"Slash commands",
 		"Quick start",
@@ -49,38 +48,13 @@ func TestHelpOutput_AllFlags(t *testing.T) {
 
 	output := buf.String()
 	flags := []string{
-		"--provider", "--model", "--config", "--scope-file",
-		"--agent", "--system-prompt-file", "--no-tui",
-		"--log-level", "--version",
+		"--validate", "--provider", "--model", "--config",
+		"--scope-file", "--agent", "--system-prompt-file",
+		"--no-tui", "--log-level", "--version",
 	}
 	for _, f := range flags {
 		if !strings.Contains(output, f) {
 			t.Errorf("--help missing flag %q", f)
-		}
-	}
-}
-
-// Tests that --help lists all env vars.
-func TestHelpOutput_AllEnvVars(t *testing.T) {
-	buf := new(bytes.Buffer)
-	rootCmd.SetOut(buf)
-	rootCmd.SetErr(buf)
-	rootCmd.SetArgs([]string{"--help"})
-
-	err := rootCmd.Execute()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	output := buf.String()
-	envVars := []string{
-		"OPENROUTER_API_KEY", "OPENCODE_ZEN_API_KEY",
-		"OPENAI_API_KEY", "OLLAMA_BASE_URL",
-		"SHMORBY_PROVIDER", "SHMORBY_MODEL",
-	}
-	for _, v := range envVars {
-		if !strings.Contains(output, v) {
-			t.Errorf("--help missing env var %q", v)
 		}
 	}
 }
@@ -132,5 +106,34 @@ func TestHelpOutput_Defaults(t *testing.T) {
 		if !strings.Contains(output, d) {
 			t.Errorf("--help missing default %q", d)
 		}
+	}
+}
+
+// TestRootCmd_ValidateFlag_ValidConfig_ExitsZero checks that --validate with
+// valid config exits successfully.
+func TestRootCmd_ValidateFlag_ValidConfig_ExitsZero(t *testing.T) {
+	rootCmd.InitDefaultHelpFlag()
+	rootCmd.Flags().Set("help", "false")
+	rootCmd.SetArgs([]string{"--validate"})
+
+	err := rootCmd.Execute()
+	if err != nil {
+		t.Fatalf("expected no error for valid config, got: %v", err)
+	}
+}
+
+// TestRootCmd_ValidateFlag_InvalidConfig_ExitsOne checks that --validate with
+// invalid config returns an error.
+func TestRootCmd_ValidateFlag_InvalidConfig_ExitsOne(t *testing.T) {
+	rootCmd.InitDefaultHelpFlag()
+	rootCmd.Flags().Set("help", "false")
+	rootCmd.SetArgs([]string{"--validate", "--provider", "nonexistent"})
+
+	err := rootCmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for invalid config, got nil")
+	}
+	if !strings.Contains(err.Error(), "config invalid:") {
+		t.Errorf("want 'config invalid:' prefix in error, got: %v", err)
 	}
 }

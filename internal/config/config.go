@@ -2,14 +2,16 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
 
 	"shmorby/internal/tools"
+	"shmorby/internal/xdg"
 )
 
 // Config is Phase 1 configuration.
 //
 // Merge behavior: later sources override earlier keys.
-// Secrets are expected to be provided via environment variables.
+// Secrets are set in YAML api_key fields.
 type Config struct {
 	Provider string `yaml:"provider"`
 	Model    string `yaml:"model"`
@@ -119,7 +121,7 @@ type ContextConfig struct {
 	FallbackContextWindow int     `yaml:"fallback_context_window"`
 }
 
-// Returns a Config populated with standard defaults.
+// Returns a Config populated with standard defaults including xdg-based paths.
 func defaultConfig() Config {
 	cfg := Config{
 		Provider: "ollama",
@@ -131,19 +133,21 @@ func defaultConfig() Config {
 
 	cfg.Agent.Default = "operate"
 	cfg.Agent.MaxToolIterations = 20
-	cfg.Agent.Shell = "bash"
+	cfg.Agent.Shell = ""
 
 	cfg.Tools.Timeout = 120
 	cfg.Tools.Shell.Enabled = true
 	cfg.Tools.Sudo.Enabled = false
 	cfg.Tools.AWS.Enabled = false
 
-	cfg.Permission.Shell = "allow"
-	cfg.Permission.SSH = "allow"
+	cfg.Permission.Shell = "ask"
+	cfg.Permission.SSH = "ask"
 	cfg.Permission.Sudo = "ask"
 	cfg.Permission.AWS = "ask"
+	cfg.Permission.Interactive = true
 
 	cfg.TUI.Fullscreen = true
+	cfg.Scope.Workdir = xdg.DefaultWorkDir()
 	cfg.TUI.Glamour.Enabled = true
 	cfg.TUI.Logging.Enabled = true
 	cfg.TUI.Logging.DefaultLevel = "info"
@@ -183,7 +187,7 @@ func defaultConfig() Config {
 	cfg.Memory.Enabled = true
 	cfg.Memory.MaxEntries = 10000
 	cfg.Memory.AutoCapture = true
-	cfg.Memory.DBPath = "~/.local/share/shmorby/memory.db"
+	cfg.Memory.DBPath = filepath.Join(xdg.UserDataDir(), "memory.db")
 
 	cfg.Context.TokenEstimator = "heuristic"
 	cfg.Context.Enabled = true
@@ -216,5 +220,45 @@ func validateAgent(agent string) error {
 		return nil
 	default:
 		return fmt.Errorf("invalid agent %q (want operate|diagnose)", agent)
+	}
+}
+
+// Returns an error if permission level is not allow, ask, or deny.
+func validatePermissionLevel(field, level string) error {
+	switch level {
+	case "allow", "ask", "deny":
+		return nil
+	default:
+		return fmt.Errorf(
+			"%s: invalid level %q (want allow|ask|deny)",
+			field, level,
+		)
+	}
+}
+
+// Returns an error if token estimator is not heuristic or tiktoken.
+func validateTokenEstimator(estimator string) error {
+	switch estimator {
+	case "heuristic", "tiktoken":
+		return nil
+	default:
+		return fmt.Errorf(
+			"invalid token_estimator %q (want heuristic|tiktoken)",
+			estimator,
+		)
+	}
+}
+
+// Returns an error if context mode is not a known value.
+func validateContextMode(mode string) error {
+	switch mode {
+	case "auto", "aggressive", "conservative", "off":
+		return nil
+	default:
+		return fmt.Errorf(
+			"invalid context.mode %q (want auto|aggressive|"+
+				"conservative|off)",
+			mode,
+		)
 	}
 }

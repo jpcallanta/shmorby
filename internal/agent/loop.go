@@ -23,6 +23,9 @@ type AgentEvent struct {
 	Output string // tool output (only on tool-end)
 }
 
+// StreamFunc receives text deltas from LLM streaming responses.
+type StreamFunc func(delta string)
+
 // AgentEventFunc receives events during agent execution.
 type AgentEventFunc func(AgentEvent)
 
@@ -250,11 +253,6 @@ func RunTurnWithTools(
 		})
 
 		for _, tc := range resp.ToolCalls {
-			slog.Info("tool invocation",
-				"tool", tc.Name,
-				"call_id", tc.ID,
-			)
-
 			cmd := extractCommand(tc.Name, tc.Args)
 
 			// Emit tool-start event.
@@ -435,6 +433,345 @@ func RunTurnWithTools(
 		slog.Warn("summary LLM call failed, falling back to "+
 			"generic limit message",
 			"error", err,
+		)
+		reply := "Tool iteration limit reached (" +
+			strconv.Itoa(maxIterations) + " iterations)."
+		pending = append(pending, session.Message{
+			Role:    "assistant",
+			Content: reply,
+		})
+		sess.AppendMessages(pending)
+
+		return reply, nil
+	}
+
+	pending = append(pending, session.Message{
+		Role:    "assistant",
+		Content: resp.Text(),
+	})
+	sess.AppendMessages(pending)
+
+	return resp.Text(), nil
+}
+
+// RunTurnWithToolsStream is like RunTurnWithTools but uses ChatStream
+// for progressive text output. Calls onDelta for each text/reasoning
+// chunk as it arrives from the provider.
+func RunTurnWithToolsStream(
+	ctx context.Context,
+	p llm.Provider,
+	sess *session.Session,
+	mode, scope, override, model, userText string,
+	registry *tools.Registry,
+	maxIterations int,
+	shellEnabled bool,
+	store memory.Store,
+	retriever *memory.Retriever,
+	compressor *ctxcomp.Compressor,
+	modelInfo llm.ModelInfo,
+	onEvent AgentEventFunc,
+	onDelta StreamFunc,
+	permFunc ToolPermissionFunc,
+	toolRules map[string]*tools.RuleSet,
+) (string, error) {
+	if maxIterations < 1 {
+		maxIterations = 1
+	}
+
+	sys, err := SystemPrompt(mode, scope, override)
+	if err != nil {
+		return "", fmt.Errorf("build system prompt: %w", err)
+	}
+
+	var toolDefs []llm.ToolDef
+	if registry != nil {
+		schemas := registry.Schemas()
+		if mode == "diagnose" {
+			schemas = filterDiagnoseSchemas(schemas)
+		}
+		if !shellEnabled {
+			filtered := make([]tools.ToolSchema, 0, len(schemas))
+			for _, s := range schemas {
+				if s.Name != "shell" {
+					filtered = append(filtered, s)
+				}
+			}
+			schemas = filtered
+		}
+		for _, ts := range schemas {
+			toolDefs = append(toolDefs, llm.ToolDef{
+				Name:        ts.Name,
+				Description: ts.Description,
+				Parameters:  ts.Parameters,
+			})
+		}
+	}
+
+	pending := make([]session.Message, 0, 8)
+	pending = append(pending, session.Message{
+		Role:    "user",
+		Content: userText,
+	})
+
+	var memoryCtx string
+	if retriever != nil {
+		result, rErr := retriever.Retrieve(ctx, userText)
+		if rErr == nil && len(result.Entries) > 0 {
+			memoryCtx = memory.FormatMemoryContext(result.Entries)
+		}
+	}
+
+	toolOverrides := make(map[string]bool)
+
+	for i := 0; i < maxIterations; i++ {
+		if compressor != nil {
+			if cErr := compressor.Compress(ctx, sess, modelInfo); cErr != nil {
+				slog.Warn("compression failed", "err", cErr)
+			}
+		}
+
+		history := sess.Messages()
+		if memoryCtx != "" {
+			history = memory.InjectMemoryContext(history, memoryCtx)
+		}
+		msgs := make([]llm.Message, 0, len(history)+len(pending))
+		for _, m := range history {
+			msgs = append(msgs, llm.Message{
+				Role:       m.Role,
+				Content:    m.Content,
+				ToolName:   m.ToolName,
+				ToolCallID: m.ToolCallID,
+				ToolCalls:  m.ToolCalls,
+			})
+		}
+		for _, m := range pending {
+			msgs = append(msgs, llm.Message{
+				Role:       m.Role,
+				Content:    m.Content,
+				ToolName:   m.ToolName,
+				ToolCallID: m.ToolCallID,
+				ToolCalls:  m.ToolCalls,
+			})
+		}
+
+		req := llm.ChatRequest{
+			Model:    model,
+			System:   sys,
+			Messages: msgs,
+			Tools:    toolDefs,
+		}
+
+		stream, sErr := p.ChatStream(ctx, req)
+		if sErr != nil {
+			return "", fmt.Errorf("chat: %w", sErr)
+		}
+
+		var text strings.Builder
+		var toolCalls []llm.ToolCall
+
+		for event := range stream {
+			switch event.Type {
+			case "text", "reasoning":
+				text.WriteString(event.Delta)
+				if onDelta != nil {
+					onDelta(event.Delta)
+				}
+			case "tool-call":
+				toolCalls = append(toolCalls, llm.ToolCall{
+					ID:   event.ToolID,
+					Name: event.Tool,
+					Args: event.Content,
+				})
+			case "error":
+				return "", fmt.Errorf("chat: %s", event.Delta)
+			}
+		}
+
+		if len(toolCalls) == 0 {
+			pending = append(pending, session.Message{
+				Role:    "assistant",
+				Content: text.String(),
+			})
+			sess.AppendMessages(pending)
+
+			return text.String(), nil
+		}
+
+		pending = append(pending, session.Message{
+			Role:      "assistant",
+			Content:   text.String(),
+			ToolCalls: toolCalls,
+		})
+
+		for _, tc := range toolCalls {
+			cmd := extractCommand(tc.Name, tc.Args)
+
+			if onEvent != nil {
+				onEvent(AgentEvent{
+					Type: "tool-start",
+					Name: tc.Name,
+					Info: cmd,
+				})
+			}
+
+			var result string
+			var runErr error
+
+			if registry == nil {
+				result = "error: tool not found"
+			} else if tool, ok := registry.Lookup(tc.Name); ok {
+				if !toolOverrides[tc.Name] {
+					action, reason, pErr := tools.EvaluateToolPermission(
+						tool.PermLevel(), cmd, toolRules[tc.Name],
+					)
+					if pErr != nil && action != "ask" {
+						result = "error: " + pErr.Error()
+					}
+					if action == "ask" {
+						resp := PermAllow
+						if permFunc != nil {
+							resp = permFunc(tc.Name, cmd, reason)
+						}
+						switch resp {
+						case PermDeny:
+							result = fmt.Sprintf(
+								"error: permission denied for %s: %s",
+								tc.Name, cmd,
+							)
+						case PermAllowAll:
+							toolOverrides[tc.Name] = true
+						case PermAllow:
+						}
+					}
+				}
+			} else {
+				result = "error: tool not found"
+			}
+
+			if result == "" && registry != nil {
+				if tc.Name == "shell" && !shellEnabled {
+					result = "error: shell tool disabled " +
+						"(shell_enabled=false)"
+				} else if mode == "diagnose" &&
+					tc.Name == "shell" {
+					var sa struct {
+						Command string `json:"command"`
+					}
+					if uErr := json.Unmarshal(
+						[]byte(tc.Args), &sa,
+					); uErr == nil && sa.Command != "" {
+						if mErr := tools.CheckMutating(
+							sa.Command,
+						); mErr != nil {
+							result = "error: " + mErr.Error()
+						} else {
+							result, runErr = registry.Run(
+								ctx, tc.Name,
+								json.RawMessage(tc.Args),
+							)
+						}
+					} else {
+						result = "error: diagnose mode " +
+							"rejected shell call with " +
+							"invalid or empty command"
+					}
+				} else {
+					result, runErr = registry.Run(
+						ctx, tc.Name,
+						json.RawMessage(tc.Args),
+					)
+				}
+			}
+
+			if store != nil && runErr == nil && result != "" {
+				var parsed struct {
+					Command string `json:"command"`
+				}
+				commandStr := tc.Args
+				if json.Unmarshal([]byte(tc.Args), &parsed) == nil &&
+					parsed.Command != "" {
+					commandStr = parsed.Command
+				}
+				memory.CaptureToolResult(
+					store, memory.DefaultSessionID,
+					tc.Name, commandStr, tc.Args, result, 0,
+				)
+			}
+
+			if runErr != nil {
+				if result != "" {
+					result = result + "\nerror: " + runErr.Error()
+				} else {
+					result = "error: " + runErr.Error()
+				}
+			}
+
+			if compressor != nil {
+				result = compressor.CompressToolOutput(result)
+			}
+
+			if onEvent != nil {
+				status := "done"
+				if runErr != nil {
+					status = "error: " + runErr.Error()
+				}
+				onEvent(AgentEvent{
+					Type:   "tool-end",
+					Name:   tc.Name,
+					Info:   status,
+					Output: result,
+				})
+			}
+
+			pending = append(pending, session.Message{
+				Role:       "tool",
+				Content:    result,
+				ToolName:   tc.Name,
+				ToolCallID: tc.ID,
+			})
+		}
+	}
+
+	pending = append(pending, session.Message{
+		Role:    "user",
+		Content: MaxStepsPrompt,
+	})
+
+	history := sess.Messages()
+	if memoryCtx != "" {
+		history = memory.InjectMemoryContext(history, memoryCtx)
+	}
+	msgs := make([]llm.Message, 0, len(history)+len(pending))
+	for _, m := range history {
+		msgs = append(msgs, llm.Message{
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolName:   m.ToolName,
+			ToolCallID: m.ToolCallID,
+			ToolCalls:  m.ToolCalls,
+		})
+	}
+	for _, m := range pending {
+		msgs = append(msgs, llm.Message{
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolName:   m.ToolName,
+			ToolCallID: m.ToolCallID,
+			ToolCalls:  m.ToolCalls,
+		})
+	}
+
+	req := llm.ChatRequest{
+		Model:    model,
+		System:   sys,
+		Messages: msgs,
+	}
+
+	resp, cErr := p.Chat(ctx, req)
+	if cErr != nil {
+		slog.Warn("summary LLM call failed, falling back to "+
+			"generic limit message",
+			"error", cErr,
 		)
 		reply := "Tool iteration limit reached (" +
 			strconv.Itoa(maxIterations) + " iterations)."

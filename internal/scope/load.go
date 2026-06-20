@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"shmorby/internal/config"
+	"shmorby/internal/xdg"
 )
 
 // Flags holds CLI flag values that affect scope loading.
@@ -26,7 +27,7 @@ type LoadResult struct {
 // Load resolves scope content with precedence:
 // 1. --scope-file (error if path set but missing)
 // 2. Walk cwd → parents for SCOPE.md
-// 3. ~/.config/shmorby/SCOPE.md if exists
+// 3. xdg.UserConfigDir()/SCOPE.md if exists
 // 4. Append files from config.scope.instructions (literal paths)
 //
 // Returns merged scope content with source metadata.
@@ -134,8 +135,9 @@ func findScopeFile() (string, bool, string) {
 		return "", false, ""
 	}
 
+	root := xdg.RootPrefix()
 	// Walk from cwd up to root.
-	for dir := wd; dir != "/"; dir = filepath.Dir(dir) {
+	for dir := wd; dir != root; dir = filepath.Dir(dir) {
 		path := filepath.Join(dir, "SCOPE.md")
 		content, err := os.ReadFile(path)
 		if err == nil {
@@ -148,7 +150,7 @@ func findScopeFile() (string, bool, string) {
 	}
 
 	// Check root directory.
-	path := filepath.Join("/", "SCOPE.md")
+	path := filepath.Join(root, "SCOPE.md")
 	content, err := os.ReadFile(path)
 	if err == nil {
 		return string(content), true, path
@@ -157,28 +159,12 @@ func findScopeFile() (string, bool, string) {
 	return "", false, ""
 }
 
-// Checks user-level scope: $XDG_CONFIG_HOME/shmorby/SCOPE.md then
-// ~/.config/shmorby/SCOPE.md.
+// Checks user-level scope via xdg.UserConfigDir.
 func findUserScopeFile() (string, bool, string) {
-	xdg := os.Getenv("XDG_CONFIG_HOME")
-	if xdg != "" {
-		path := filepath.Join(xdg, "shmorby", "SCOPE.md")
-		content, err := os.ReadFile(path)
-		if err == nil {
-			return string(content), true, path
-		}
-	}
-
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", false, ""
-	}
-
-	path := filepath.Join(home, ".config", "shmorby", "SCOPE.md")
+	path := filepath.Join(xdg.UserConfigDir(), "SCOPE.md")
 	content, err := os.ReadFile(path)
-	if err != nil {
-		return "", false, ""
+	if err == nil {
+		return string(content), true, path
 	}
-
-	return string(content), true, path
+	return "", false, ""
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"shmorby/internal/llm"
 	"shmorby/internal/session"
@@ -42,7 +43,7 @@ func (f *fakeProvider) Chat(
 func (f *fakeProvider) ChatStream(
 	_ context.Context, _ llm.ChatRequest,
 ) (<-chan llm.StreamEvent, error) {
-	return nil, fmt.Errorf("fake: streaming not supported")
+	return nil, fmt.Errorf("fake: streaming not yet supported")
 }
 
 // Returns model info (not implemented in test double).
@@ -507,7 +508,7 @@ func (e *errorProvider) Chat(
 func (e *errorProvider) ChatStream(
 	_ context.Context, _ llm.ChatRequest,
 ) (<-chan llm.StreamEvent, error) {
-	return nil, fmt.Errorf("fake: streaming not supported")
+	return nil, fmt.Errorf("fake: streaming not yet supported")
 }
 
 // Returns model info (not implemented in test double).
@@ -548,7 +549,7 @@ func (f *fakeStepProvider) Chat(
 func (f *fakeStepProvider) ChatStream(
 	_ context.Context, _ llm.ChatRequest,
 ) (<-chan llm.StreamEvent, error) {
-	return nil, fmt.Errorf("fake: streaming not supported")
+	return nil, fmt.Errorf("fake: streaming not yet supported")
 }
 
 // Returns model info (not implemented in test double).
@@ -1543,7 +1544,902 @@ func TestRunTurnWithTools_PermissionAsk_DeniedByPermFunc(t *testing.T) {
 	}
 }
 
-// TestRunTurnWithTools_PermissionAllowAll_SkipsSubsequent checks
+// fakeStreamProvider is a test double with configurable stream function.
+type fakeStreamProvider struct {
+	name     string
+	streamFn func(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamEvent, error)
+	chatFn   func(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error)
+	chatCall int
+}
+
+func (f *fakeStreamProvider) Name() string { return f.name }
+
+func (f *fakeStreamProvider) Chat(
+	ctx context.Context, req llm.ChatRequest,
+) (llm.ChatResponse, error) {
+	f.chatCall++
+	if f.chatFn != nil {
+		return f.chatFn(ctx, req)
+	}
+	return llm.ChatResponse{}, fmt.Errorf("fake: chat not implemented")
+}
+
+func (f *fakeStreamProvider) ChatStream(
+	ctx context.Context, req llm.ChatRequest,
+) (<-chan llm.StreamEvent, error) {
+	if f.streamFn != nil {
+		return f.streamFn(ctx, req)
+	}
+	return nil, fmt.Errorf("fake: stream not implemented")
+}
+
+func (f *fakeStreamProvider) ModelInfo(
+	_ context.Context, _ string,
+) (llm.ModelInfo, error) {
+	return llm.ModelInfo{}, nil
+}
+
+// sleepyTool is a tool that delays execution for testing spinner visibility.
+type sleepyTool struct {
+	name   string
+	result string
+	err    error
+	sleep  time.Duration
+}
+
+func (s *sleepyTool) Name() string        { return s.name }
+func (s *sleepyTool) Description() string { return "sleepy tool for testing" }
+func (s *sleepyTool) Parameters() json.RawMessage {
+	return json.RawMessage(`{"type":"object"}`)
+}
+func (s *sleepyTool) PermLevel() string { return "allow" }
+func (s *sleepyTool) Run(ctx context.Context, _ json.RawMessage) (string, error) {
+	select {
+	case <-time.After(s.sleep):
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+	return s.result, s.err
+}
+
+// streamTextHelper creates a streamFn that emits the given deltas then done.
+func streamTextHelper(deltas ...string) func(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamEvent, error) {
+	return func(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamEvent, error) {
+		ch := make(chan llm.StreamEvent)
+		go func() {
+			for _, d := range deltas {
+				ch <- llm.StreamEvent{Type: "text", Delta: d}
+			}
+			ch <- llm.StreamEvent{Type: "done"}
+			close(ch)
+		}()
+		return ch, nil
+	}
+}
+
+// streamToolCallHelper creates a streamFn that emits text, then a tool-call,
+// then done.
+func streamToolCallHelper(toolName, toolID, args string) func(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamEvent, error) {
+	return func(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamEvent, error) {
+		ch := make(chan llm.StreamEvent)
+		go func() {
+			ch <- llm.StreamEvent{Type: "text", Delta: "Running " + toolName}
+			ch <- llm.StreamEvent{
+				Type:    "tool-call",
+				ToolID:  toolID,
+				Tool:    toolName,
+				Content: args,
+			}
+			ch <- llm.StreamEvent{Type: "done"}
+			close(ch)
+		}()
+		return ch, nil
+	}
+}
+
+// TestRunTurnWithToolsStream_TextDeltas checks deltas passed to onDelta.
+func TestRunTurnWithToolsStream_TextDeltas(t *testing.T) {
+	var gotDeltas []string
+	p := &fakeStreamProvider{
+		name:     "fake",
+		streamFn: streamTextHelper("Hello", " world", "!"),
+	}
+	sess := session.New()
+
+	reply, err := RunTurnWithToolsStream(
+		context.Background(), p, sess,
+		"operate", "", "", "test-model", "hi",
+		nil, 5, true, nil, nil, nil, llm.ModelInfo{},
+		nil,
+		func(delta string) { gotDeltas = append(gotDeltas, delta) },
+		nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDeltas := []string{"Hello", " world", "!"}
+	if !stringsEqual(gotDeltas, wantDeltas) {
+		t.Errorf("deltas = %v, want %v", gotDeltas, wantDeltas)
+	}
+	if reply != "Hello world!" {
+		t.Errorf("reply = %q, want %q", reply, "Hello world!")
+	}
+}
+
+func stringsEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestRunTurnWithToolsStream_AccumulatesText checks final text = all deltas.
+func TestRunTurnWithToolsStream_AccumulatesText(t *testing.T) {
+	p := &fakeStreamProvider{
+		name:     "fake",
+		streamFn: streamTextHelper("one", " two", " three"),
+	}
+	sess := session.New()
+
+	reply, err := RunTurnWithToolsStream(
+		context.Background(), p, sess,
+		"operate", "", "", "test-model", "hi",
+		nil, 5, true, nil, nil, nil, llm.ModelInfo{},
+		nil, nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply != "one two three" {
+		t.Errorf("reply = %q, want %q", reply, "one two three")
+	}
+}
+
+// TestRunTurnWithToolsStream_ReasoningDeltas checks reasoning forwarded.
+func TestRunTurnWithToolsStream_ReasoningDeltas(t *testing.T) {
+	var gotDeltas []string
+	p := &fakeStreamProvider{
+		name: "fake",
+		streamFn: func(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamEvent, error) {
+			ch := make(chan llm.StreamEvent)
+			go func() {
+				ch <- llm.StreamEvent{Type: "reasoning", Delta: "thinking step 1"}
+				ch <- llm.StreamEvent{Type: "text", Delta: "answer"}
+				ch <- llm.StreamEvent{Type: "done"}
+				close(ch)
+			}()
+			return ch, nil
+		},
+	}
+	sess := session.New()
+
+	reply, err := RunTurnWithToolsStream(
+		context.Background(), p, sess,
+		"operate", "", "", "test-model", "hi",
+		nil, 5, true, nil, nil, nil, llm.ModelInfo{},
+		nil,
+		func(delta string) { gotDeltas = append(gotDeltas, delta) },
+		nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply != "thinking step 1answer" {
+		t.Errorf("reply = %q, want combined text", reply)
+	}
+	if len(gotDeltas) != 2 {
+		t.Errorf("want 2 deltas, got %d", len(gotDeltas))
+	}
+}
+
+// TestRunTurnWithToolsStream_ToolCall_Executes checks tool runs.
+func TestRunTurnWithToolsStream_ToolCall_Executes(t *testing.T) {
+	callCount := 0
+	p := &fakeStreamProvider{
+		name: "fake",
+		streamFn: func(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamEvent, error) {
+			ch := make(chan llm.StreamEvent)
+			go func() {
+				callCount++
+				if callCount == 1 {
+					ch <- llm.StreamEvent{Type: "text", Delta: "Running tool"}
+					ch <- llm.StreamEvent{
+						Type:    "tool-call",
+						ToolID:  "call_1",
+						Tool:    "shell",
+						Content: `{"command":"echo hi"}`,
+					}
+				} else {
+					ch <- llm.StreamEvent{Type: "text", Delta: "Output: hi"}
+				}
+				ch <- llm.StreamEvent{Type: "done"}
+				close(ch)
+			}()
+			return ch, nil
+		},
+	}
+	sess := session.New()
+	reg := tools.NewRegistry()
+	reg.Register(&fakeTool{name: "shell", result: "hi"})
+
+	reply, err := RunTurnWithToolsStream(
+		context.Background(), p, sess,
+		"operate", "", "", "test-model", "run cmd",
+		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
+		nil, nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply != "Output: hi" {
+		t.Errorf("reply = %q, want %q", reply, "Output: hi")
+	}
+	msgs := sess.Messages()
+	if len(msgs) != 4 {
+		t.Fatalf("want 4 messages, got %d", len(msgs))
+	}
+	if msgs[2].Role != "tool" || msgs[2].Content != "hi" {
+		t.Errorf("tool msg = %s/%s, want tool/hi", msgs[2].Role, msgs[2].Content)
+	}
+}
+
+// TestRunTurnWithToolsStream_ToolCall_NoDelta checks tool round doesn't
+// drop subsequent deltas.
+func TestRunTurnWithToolsStream_ToolCall_NoDelta(t *testing.T) {
+	callCount := 0
+	p := &fakeStreamProvider{
+		name: "fake",
+		streamFn: func(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamEvent, error) {
+			ch := make(chan llm.StreamEvent)
+			go func() {
+				callCount++
+				if callCount == 1 {
+					ch <- llm.StreamEvent{Type: "text", Delta: "Running tool"}
+					ch <- llm.StreamEvent{
+						Type:    "tool-call",
+						ToolID:  "call_1",
+						Tool:    "shell",
+						Content: `{"command":"echo hi"}`,
+					}
+				} else {
+					ch <- llm.StreamEvent{Type: "text", Delta: "Final answer"}
+				}
+				ch <- llm.StreamEvent{Type: "done"}
+				close(ch)
+			}()
+			return ch, nil
+		},
+	}
+	sess := session.New()
+	reg := tools.NewRegistry()
+	reg.Register(&fakeTool{name: "shell", result: "ok"})
+
+	var gotDeltas []string
+	reply, err := RunTurnWithToolsStream(
+		context.Background(), p, sess,
+		"operate", "", "", "test-model", "do it",
+		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
+		nil,
+		func(delta string) { gotDeltas = append(gotDeltas, delta) },
+		nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply != "Final answer" {
+		t.Errorf("reply = %q, want %q", reply, "Final answer")
+	}
+	// Deltas should include both text phases.
+	if len(gotDeltas) < 2 {
+		t.Errorf("want at least 2 deltas across both phases, got %d: %v",
+			len(gotDeltas), gotDeltas)
+	}
+}
+
+// TestRunTurnWithToolsStream_NoTools_ReturnsText checks no tool calls.
+func TestRunTurnWithToolsStream_NoTools_ReturnsText(t *testing.T) {
+	p := &fakeStreamProvider{
+		name:     "fake",
+		streamFn: streamTextHelper("Just text"),
+	}
+	sess := session.New()
+
+	reply, err := RunTurnWithToolsStream(
+		context.Background(), p, sess,
+		"operate", "", "", "test-model", "hi",
+		nil, 5, true, nil, nil, nil, llm.ModelInfo{},
+		nil, nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply != "Just text" {
+		t.Errorf("reply = %q, want %q", reply, "Just text")
+	}
+}
+
+// TestRunTurnWithToolsStream_MultipleToolRounds checks two sequential
+// tool-call rounds work.
+func TestRunTurnWithToolsStream_MultipleToolRounds(t *testing.T) {
+	callCount := 0
+	p := &fakeStreamProvider{
+		name: "fake",
+		streamFn: func(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamEvent, error) {
+			ch := make(chan llm.StreamEvent)
+			go func() {
+				callCount++
+				if callCount == 1 {
+					ch <- llm.StreamEvent{Type: "text", Delta: "First call"}
+					ch <- llm.StreamEvent{
+						Type:    "tool-call",
+						ToolID:  "call_1",
+						Tool:    "shell",
+						Content: `{"command":"cmd1"}`,
+					}
+				} else if callCount == 2 {
+					ch <- llm.StreamEvent{Type: "text", Delta: "Second call"}
+					ch <- llm.StreamEvent{
+						Type:    "tool-call",
+						ToolID:  "call_2",
+						Tool:    "shell",
+						Content: `{"command":"cmd2"}`,
+					}
+				} else {
+					ch <- llm.StreamEvent{Type: "text", Delta: "Done"}
+				}
+				ch <- llm.StreamEvent{Type: "done"}
+				close(ch)
+			}()
+			return ch, nil
+		},
+	}
+	sess := session.New()
+	reg := tools.NewRegistry()
+	reg.Register(&fakeTool{name: "shell", result: "ok"})
+
+	reply, err := RunTurnWithToolsStream(
+		context.Background(), p, sess,
+		"operate", "", "", "test-model", "do it",
+		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
+		nil, nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply != "Done" {
+		t.Errorf("reply = %q, want %q", reply, "Done")
+	}
+	if callCount != 3 {
+		t.Errorf("want 3 stream calls, got %d", callCount)
+	}
+	msgs := sess.Messages()
+	// user + 2*(assistant+tool) + final assistant = 6
+	if len(msgs) != 6 {
+		t.Fatalf("want 6 messages (user+2*(assistant+tool)+assistant), got %d",
+			len(msgs))
+	}
+}
+
+// TestRunTurnWithToolsStream_Error_ReturnsError checks stream error.
+func TestRunTurnWithToolsStream_Error_ReturnsError(t *testing.T) {
+	p := &fakeStreamProvider{
+		name: "fake",
+		streamFn: func(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamEvent, error) {
+			ch := make(chan llm.StreamEvent)
+			go func() {
+				ch <- llm.StreamEvent{Type: "error", Delta: "stream failed"}
+				close(ch)
+			}()
+			return ch, nil
+		},
+	}
+	sess := session.New()
+
+	_, err := RunTurnWithToolsStream(
+		context.Background(), p, sess,
+		"operate", "", "", "test-model", "hi",
+		nil, 5, true, nil, nil, nil, llm.ModelInfo{},
+		nil, nil, nil, nil,
+	)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "stream failed") {
+		t.Errorf("want 'stream failed' in error, got %v", err)
+	}
+}
+
+// TestRunTurnWithToolsStream_NilDelta_NoPanic checks nil onDelta works.
+func TestRunTurnWithToolsStream_NilDelta_NoPanic(t *testing.T) {
+	p := &fakeStreamProvider{
+		name:     "fake",
+		streamFn: streamTextHelper("hello", " world"),
+	}
+	sess := session.New()
+
+	reply, err := RunTurnWithToolsStream(
+		context.Background(), p, sess,
+		"operate", "", "", "test-model", "hi",
+		nil, 5, true, nil, nil, nil, llm.ModelInfo{},
+		nil, nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply != "hello world" {
+		t.Errorf("reply = %q, want %q", reply, "hello world")
+	}
+}
+
+// TestRunTurnWithToolsStream_OutputParity checks same output as non-streaming.
+func TestRunTurnWithToolsStream_OutputParity(t *testing.T) {
+	streamCallCount := 0
+	pStream := &fakeStreamProvider{
+		name: "fake",
+		streamFn: func(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamEvent, error) {
+			ch := make(chan llm.StreamEvent)
+			go func() {
+				streamCallCount++
+				if streamCallCount == 1 {
+					ch <- llm.StreamEvent{Type: "text", Delta: "Running tool"}
+					ch <- llm.StreamEvent{
+						Type:    "tool-call",
+						ToolID:  "call_1",
+						Tool:    "shell",
+						Content: `{"command":"echo hi"}`,
+					}
+				} else {
+					ch <- llm.StreamEvent{Type: "text", Delta: "Final answer: hi"}
+				}
+				ch <- llm.StreamEvent{Type: "done"}
+				close(ch)
+			}()
+			return ch, nil
+		},
+	}
+	sess := session.New()
+	reg := tools.NewRegistry()
+	reg.Register(&fakeTool{name: "shell", result: "hi"})
+
+	streamReply, err := RunTurnWithToolsStream(
+		context.Background(), pStream, sess,
+		"operate", "", "", "test-model", "do it",
+		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
+		nil, nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Non-streaming path.
+	pStep := &fakeStepProvider{
+		name: "fake",
+		steps: []llm.ChatResponse{
+			{
+				Message: llm.Message{Role: "assistant", Content: "Running tool"},
+				ToolCalls: []llm.ToolCall{
+					{ID: "call_1", Name: "shell", Args: `{"command":"echo hi"}`},
+				},
+			},
+			{
+				Message: llm.Message{Role: "assistant", Content: "Final answer: hi"},
+			},
+		},
+	}
+	sess2 := session.New()
+
+	normalReply, err := RunTurnWithTools(
+		context.Background(), pStep, sess2,
+		"operate", "", "", "test-model", "do it",
+		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
+		nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if streamReply != normalReply {
+		t.Errorf("parity: stream = %q, normal = %q", streamReply, normalReply)
+	}
+}
+
+// TestRunTurnWithToolsStream_PermissionDeny checks deny blocks execution.
+func TestRunTurnWithToolsStream_PermissionDeny(t *testing.T) {
+	callCount := 0
+	p := &fakeStreamProvider{
+		name: "fake",
+		streamFn: func(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamEvent, error) {
+			ch := make(chan llm.StreamEvent)
+			go func() {
+				callCount++
+				if callCount == 1 {
+					ch <- llm.StreamEvent{Type: "text", Delta: "Running"}
+					ch <- llm.StreamEvent{
+						Type:    "tool-call",
+						ToolID:  "call_1",
+						Tool:    "shell",
+						Content: `{"command":"rm -rf /"}`,
+					}
+				} else {
+					ch <- llm.StreamEvent{Type: "text", Delta: "Blocked"}
+				}
+				ch <- llm.StreamEvent{Type: "done"}
+				close(ch)
+			}()
+			return ch, nil
+		},
+	}
+	sess := session.New()
+	reg := tools.NewRegistry()
+	reg.Register(&fakeTool{
+		name: "shell", result: "should-not-run", perm: "deny",
+	})
+
+	reply, err := RunTurnWithToolsStream(
+		context.Background(), p, sess,
+		"operate", "", "", "test-model", "delete",
+		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
+		nil, nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply != "Blocked" {
+		t.Errorf("reply = %q, want %q", reply, "Blocked")
+	}
+	msgs := sess.Messages()
+	if len(msgs) != 4 {
+		t.Fatalf("want 4 messages, got %d", len(msgs))
+	}
+	if !strings.Contains(msgs[2].Content, "permission denied") {
+		t.Errorf("want 'permission denied', got %q", msgs[2].Content)
+	}
+}
+
+// TestRunTurnWithToolsStream_PermissionAsk_DefaultAllow checks "ask"
+// with nil permFunc defaults to allow.
+func TestRunTurnWithToolsStream_PermissionAsk_DefaultAllow(t *testing.T) {
+	callCount := 0
+	p := &fakeStreamProvider{
+		name: "fake",
+		streamFn: func(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamEvent, error) {
+			ch := make(chan llm.StreamEvent)
+			go func() {
+				callCount++
+				if callCount == 1 {
+					ch <- llm.StreamEvent{Type: "text", Delta: "Running"}
+					ch <- llm.StreamEvent{
+						Type:    "tool-call",
+						ToolID:  "call_1",
+						Tool:    "shell",
+						Content: `{"command":"echo hi"}`,
+					}
+				} else {
+					ch <- llm.StreamEvent{Type: "text", Delta: "Output: hi"}
+				}
+				ch <- llm.StreamEvent{Type: "done"}
+				close(ch)
+			}()
+			return ch, nil
+		},
+	}
+	sess := session.New()
+	reg := tools.NewRegistry()
+	reg.Register(&fakeTool{
+		name: "shell", result: "echo hi", perm: "ask",
+	})
+
+	reply, err := RunTurnWithToolsStream(
+		context.Background(), p, sess,
+		"operate", "", "", "test-model", "say hi",
+		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
+		nil, nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply != "Output: hi" {
+		t.Errorf("reply = %q, want %q", reply, "Output: hi")
+	}
+	msgs := sess.Messages()
+	if len(msgs) != 4 {
+		t.Fatalf("want 4 messages, got %d", len(msgs))
+	}
+	if !strings.Contains(msgs[2].Content, "echo hi") {
+		t.Errorf("want tool executed, got %q", msgs[2].Content)
+	}
+}
+
+// TestRunTurnWithToolsStream_MaxIterations checks iteration limit.
+func TestRunTurnWithToolsStream_MaxIterations(t *testing.T) {
+	callCount := 0
+	p := &fakeStreamProvider{
+		name: "fake",
+		streamFn: func(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamEvent, error) {
+			ch := make(chan llm.StreamEvent)
+			go func() {
+				callCount++
+				if callCount <= 2 {
+					ch <- llm.StreamEvent{Type: "text", Delta: "Running tool"}
+					ch <- llm.StreamEvent{
+						Type:    "tool-call",
+						ToolID:  "call_" + fmt.Sprint(callCount),
+						Tool:    "shell",
+						Content: `{}`,
+					}
+				} else {
+					ch <- llm.StreamEvent{Type: "text",
+						Delta: "Summary: completed"}
+				}
+				ch <- llm.StreamEvent{Type: "done"}
+				close(ch)
+			}()
+			return ch, nil
+		},
+		chatFn: func(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
+			return llm.ChatResponse{
+				Message: llm.Message{Role: "assistant",
+					Content: "Summary: completed by chat"},
+			}, nil
+		},
+	}
+	sess := session.New()
+	reg := tools.NewRegistry()
+	reg.Register(&fakeTool{name: "shell", result: "ok"})
+
+	reply, err := RunTurnWithToolsStream(
+		context.Background(), p, sess,
+		"operate", "", "", "test-model", "do it",
+		reg, 2, true, nil, nil, nil, llm.ModelInfo{},
+		nil, nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(reply, "Summary") {
+		t.Errorf("want summary response, got %q", reply)
+	}
+}
+
+// TestRunTurnWithToolsStream_DiagnoseBlocksMutating checks diagnose mode.
+func TestRunTurnWithToolsStream_DiagnoseBlocksMutating(t *testing.T) {
+	p := &fakeStreamProvider{
+		name:     "fake",
+		streamFn: streamToolCallHelper("shell", "call_1", `{"command":"rm -rf /tmp/x"}`),
+		chatFn: func(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
+			return llm.ChatResponse{
+				Message: llm.Message{Role: "assistant", Content: "Blocked"},
+			}, nil
+		},
+	}
+	sess := session.New()
+	reg := tools.NewRegistry()
+	reg.Register(&fakeTool{name: "shell", result: "would-run"})
+
+	reply, err := RunTurnWithToolsStream(
+		context.Background(), p, sess,
+		"diagnose", "", "", "test-model", "delete files",
+		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
+		nil, nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply != "Blocked" {
+		t.Errorf("reply = %q, want %q", reply, "Blocked")
+	}
+	msgs := sess.Messages()
+	toolMsg := msgs[2]
+	if !strings.Contains(toolMsg.Content, "diagnose:") {
+		t.Errorf("want 'diagnose:' in tool result, got %q", toolMsg.Content)
+	}
+}
+
+// TestRunTurnWithToolsStream_UnknownTool checks unknown tool error.
+func TestRunTurnWithToolsStream_UnknownTool(t *testing.T) {
+	p := &fakeStreamProvider{
+		name:     "fake",
+		streamFn: streamToolCallHelper("nonexistent", "call_1", `{}`),
+		chatFn: func(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
+			return llm.ChatResponse{
+				Message: llm.Message{Role: "assistant", Content: "Saw error"},
+			}, nil
+		},
+	}
+	sess := session.New()
+	reg := tools.NewRegistry()
+
+	reply, err := RunTurnWithToolsStream(
+		context.Background(), p, sess,
+		"operate", "", "", "test-model", "test",
+		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
+		nil, nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply != "Saw error" {
+		t.Errorf("reply = %q, want %q", reply, "Saw error")
+	}
+	msgs := sess.Messages()
+	if !strings.Contains(msgs[2].Content, "tool not found") {
+		t.Errorf("want 'tool not found' in tool result, got %q", msgs[2].Content)
+	}
+}
+
+// TestRunTurnWithToolsStream_OnEvent_Called checks onEvent is called
+// for tool-start and tool-end.
+func TestRunTurnWithToolsStream_OnEvent_Called(t *testing.T) {
+	var events []AgentEvent
+	callCount := 0
+	p := &fakeStreamProvider{
+		name: "fake",
+		streamFn: func(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamEvent, error) {
+			ch := make(chan llm.StreamEvent)
+			go func() {
+				callCount++
+				if callCount == 1 {
+					ch <- llm.StreamEvent{Type: "text", Delta: "Running"}
+					ch <- llm.StreamEvent{
+						Type:    "tool-call",
+						ToolID:  "call_1",
+						Tool:    "shell",
+						Content: `{"command":"echo hi"}`,
+					}
+				} else {
+					ch <- llm.StreamEvent{Type: "text", Delta: "Done"}
+				}
+				ch <- llm.StreamEvent{Type: "done"}
+				close(ch)
+			}()
+			return ch, nil
+		},
+	}
+	sess := session.New()
+	reg := tools.NewRegistry()
+	reg.Register(&fakeTool{name: "shell", result: "hi"})
+
+	_, err := RunTurnWithToolsStream(
+		context.Background(), p, sess,
+		"operate", "", "", "test-model", "do it",
+		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
+		func(ev AgentEvent) { events = append(events, ev) },
+		nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 {
+		t.Fatalf("want 2 events, got %d", len(events))
+	}
+	if events[0].Type != "tool-start" {
+		t.Errorf("event[0].Type = %q, want 'tool-start'", events[0].Type)
+	}
+	if events[1].Type != "tool-end" {
+		t.Errorf("event[1].Type = %q, want 'tool-end'", events[1].Type)
+	}
+}
+
+// TestRunTurnWithToolsStream_ShellDisabled checks no tool defs for shell.
+func TestRunTurnWithToolsStream_ShellDisabled(t *testing.T) {
+	p := &fakeStreamProvider{
+		name:     "fake",
+		streamFn: streamTextHelper("Hello"),
+	}
+	sess := session.New()
+	reg := tools.NewRegistry()
+	reg.Register(&fakeTool{name: "shell", result: "ok"})
+
+	_, err := RunTurnWithToolsStream(
+		context.Background(), p, sess,
+		"operate", "", "", "test-model", "hi",
+		reg, 5, false, nil, nil, nil, llm.ModelInfo{},
+		nil, nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Should succeed with no tool calls.
+	msgs := sess.Messages()
+	if len(msgs) != 2 {
+		t.Fatalf("want 2 messages, got %d", len(msgs))
+	}
+}
+
+// TestRunTurnWithToolsStream_PermissionAllowAll_SkipsSubsequent checks
+// allow-all skips subsequent permission checks for same tool.
+func TestRunTurnWithToolsStream_PermissionAllowAll_SkipsSubsequent(t *testing.T) {
+	var permFuncCalls []string
+	p := &fakeStreamProvider{
+		name: "fake",
+		streamFn: func(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamEvent, error) {
+			ch := make(chan llm.StreamEvent)
+			go func() {
+				ch <- llm.StreamEvent{Type: "text", Delta: "Running"}
+				ch <- llm.StreamEvent{
+					Type:    "tool-call",
+					ToolID:  "call_1",
+					Tool:    "shell",
+					Content: `{"command":"cmd1"}`,
+				}
+				ch <- llm.StreamEvent{
+					Type:    "tool-call",
+					ToolID:  "call_2",
+					Tool:    "shell",
+					Content: `{"command":"cmd2"}`,
+				}
+				ch <- llm.StreamEvent{Type: "done"}
+				close(ch)
+			}()
+			return ch, nil
+		},
+		chatFn: func(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
+			return llm.ChatResponse{
+				Message: llm.Message{Role: "assistant", Content: "Both ran"},
+			}, nil
+		},
+	}
+	sess := session.New()
+	reg := tools.NewRegistry()
+	reg.Register(&fakeTool{
+		name: "shell", result: "executed", perm: "ask",
+	})
+
+	permFunc := func(toolName, command, reason string) ToolPermissionResponse {
+		permFuncCalls = append(permFuncCalls, command)
+		return PermAllowAll
+	}
+
+	reply, err := RunTurnWithToolsStream(
+		context.Background(), p, sess,
+		"operate", "", "", "test-model", "run two",
+		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
+		nil, nil, permFunc, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply != "Both ran" {
+		t.Errorf("reply = %q, want %q", reply, "Both ran")
+	}
+	if len(permFuncCalls) != 1 {
+		t.Errorf("want 1 permFunc call, got %d: %v",
+			len(permFuncCalls), permFuncCalls)
+	}
+}
+
+// TestRunTurnWithToolsStream_EmptyStream checks empty stream returns empty.
+func TestRunTurnWithToolsStream_EmptyStream(t *testing.T) {
+	p := &fakeStreamProvider{
+		name: "fake",
+		streamFn: func(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamEvent, error) {
+			ch := make(chan llm.StreamEvent)
+			close(ch)
+			return ch, nil
+		},
+	}
+	sess := session.New()
+
+	reply, err := RunTurnWithToolsStream(
+		context.Background(), p, sess,
+		"operate", "", "", "test-model", "hi",
+		nil, 5, true, nil, nil, nil, llm.ModelInfo{},
+		nil, nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply != "" {
+		t.Errorf("reply = %q, want ''", reply)
+	}
+}
+
+// TestRunTurnWithToolsStream_PermissionAllowAll_SkipsSubsequent checks
 // PermAllowAll adds tool to overrides so subsequent same-tool calls
 // skip permission check.
 func TestRunTurnWithTools_PermissionAllowAll_SkipsSubsequent(t *testing.T) {

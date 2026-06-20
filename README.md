@@ -13,7 +13,7 @@ monitoring, and diagnostics — like a senior SRE you can talk to.
 | Requirement | Notes |
 |-------------|-------|
 | Go 1.24+ | For building from source |
-| Linux/macOS | Tested on Linux; macOS support in progress |
+| Linux/macOS/Windows | Tested on Linux; macOS and Windows support in progress |
 | LLM provider | One of: Ollama (local, free), OpenAI, OpenRouter, OpenCode Zen |
 
 ## Quick start
@@ -42,18 +42,32 @@ go build -o shmorby ./cmd/shmorby
 
 ### With OpenAI
 
+```yaml
+# shmorby.yaml
+provider: openai
+model: gpt-4o
+openai:
+  api_key: sk-proj-...
+```
+
 ```bash
-export OPENAI_API_KEY=sk-...
 go build -o shmorby ./cmd/shmorby
-./shmorby --provider openai --model gpt-4o
+./shmorby
 ```
 
 ### With OpenRouter
 
+```yaml
+# shmorby.yaml
+provider: openrouter
+model: openai/gpt-4o
+openrouter:
+  api_key: sk-or-...
+```
+
 ```bash
-export OPENROUTER_API_KEY=...
 go build -o shmorby ./cmd/shmorby
-./shmorby --provider openrouter --model openai/gpt-4o
+./shmorby
 ```
 
 ## Provider setup
@@ -63,7 +77,7 @@ go build -o shmorby ./cmd/shmorby
 | | |
 |-|-|
 | Config value | `ollama` |
-| Env vars | _none_ (runs locally) |
+| API key | _none_ (runs locally) |
 | Default URL | `http://127.0.0.1:11434` |
 | Default model | `llama3.2` |
 | Note | Ollama must be running (`ollama serve`) |
@@ -73,7 +87,7 @@ go build -o shmorby ./cmd/shmorby
 | | |
 |-|-|
 | Config value | `openai` |
-| Required env | `OPENAI_API_KEY` |
+| API key | `openai.api_key` in YAML |
 | Models | `gpt-4o`, `gpt-4o-mini`, `o1`, `o3-mini` |
 | Azure | Set `openai.base_url` to your Azure endpoint |
 
@@ -81,7 +95,7 @@ go build -o shmorby ./cmd/shmorby
 provider: openai
 model: gpt-4o
 openai:
-  api_key_env: OPENAI_API_KEY
+  api_key: sk-proj-...
   timeout: 120
 ```
 
@@ -90,7 +104,7 @@ openai:
 | | |
 |-|-|
 | Config value | `openrouter` |
-| Required env | `OPENROUTER_API_KEY` |
+| API key | `openrouter.api_key` in YAML |
 | Models | Any [OpenRouter model](https://openrouter.ai/models) |
 
 ### OpenCode Zen
@@ -98,45 +112,27 @@ openai:
 | | |
 |-|-|
 | Config value | `opencode_zen` |
-| Required env | `OPENCODE_ZEN_API_KEY` |
+| API key | `opencode_zen.api_key` in YAML |
 | Default URL | `https://opencode.ai/zen` |
 
 ## Configuration
 
 Shmorby loads config with layered precedence (later wins):
 
-1. `/etc/shmorby/config.yaml` (skipped if missing)
-2. `~/.config/shmorby/config.yaml` or `$XDG_CONFIG_HOME/shmorby/config.yaml`
+1. `/etc/shmorby/config.yaml` (Unix) / `%ProgramData%\shmorby\config.yaml` (Windows) — skipped if missing
+2. `~/.config/shmorby/config.yaml` or `$XDG_CONFIG_HOME/shmorby/config.yaml` (Unix) / `%APPDATA%\shmorby\config.yaml` (Windows)
 3. `--config` flag (error if set but missing)
 4. `./shmorby.yaml` in current directory
-5. Environment variables (`SHMORBY_PROVIDER`, `SHMORBY_MODEL`, etc.)
-6. CLI flags (`--provider`, `--model`, `--agent` — always win)
+5. CLI flags (`--provider`, `--model`, `--agent` — always win)
 
 See [`examples/shmorby.yaml`](examples/shmorby.yaml) for the full reference.
-
-### Environment variables
-
-| Variable | Purpose |
-|----------|---------|
-| `OPENROUTER_API_KEY` | OpenRouter API key |
-| `OPENCODE_ZEN_API_KEY` | OpenCode Zen API key |
-| `OPENCODE_ZEN_BASE_URL` | OpenCode Zen base URL (default `https://opencode.ai/zen`) |
-| `OPENAI_API_KEY` | OpenAI API key |
-| `OPENAI_ORG_ID` | OpenAI organization ID |
-| `OPENAI_BASE_URL` | OpenAI / Azure base URL override |
-| `OPENAI_TIMEOUT` | OpenAI HTTP client timeout in seconds |
-| `OLLAMA_BASE_URL` | Ollama server URL (default `http://127.0.0.1:11434`) |
-| `SHMORBY_PROVIDER` | Override default provider |
-| `SHMORBY_MODEL` | Override default model |
-| `SHMORBY_TOOLS_TIMEOUT` | Default tool timeout in seconds |
-| `SHMORBY_TOOL_OUTPUT_MAX_LINES` | Cap tool output to N lines |
-| `SHMORBY_TOOL_OUTPUT_MAX_BYTES` | Cap tool output to N bytes |
 
 ### CLI flags
 
 ```
 shmorby [flags]
 
+--validate              Validate config and exit
 --provider string       LLM provider: openrouter, opencode_zen, openai, ollama (default "ollama")
 --model string          Model name (default "llama3.2")
 --config string         Config file path
@@ -219,8 +215,8 @@ Permissions gate shell, SSH, sudo, and AWS commands:
 
 | Permission | Default | Effect |
 |------------|---------|--------|
-| `shell` | allow | Runs without confirmation |
-| `ssh` | allow | Runs without confirmation |
+| `shell` | ask | Requires approval |
+| `ssh` | ask | Requires approval |
 | `sudo` | ask | Requires approval; tool disabled by default (`tools.sudo.enabled: false`) |
 | `aws` | ask | Requires approval; tool disabled by default (`tools.aws.enabled: false`) |
 
@@ -228,7 +224,7 @@ Set in the `permission` section of config. Options: `allow`, `ask`, `deny`.
 
 ### Interactive prompts
 
-When `permission.interactive` is `true` (default `false`), tools with `ask`
+When `permission.interactive` is `true` (default `true`), tools with `ask`
 level show an inline y/n/a prompt:
 
 - **y** — allow this tool call

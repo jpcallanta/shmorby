@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/spf13/cobra"
 	"shmorby/internal/agent"
 	"shmorby/internal/config"
 	ctxcomp "shmorby/internal/context"
@@ -18,8 +20,6 @@ import (
 	"shmorby/internal/tools"
 	"shmorby/internal/tui"
 	tuicl "shmorby/internal/tui/clipboard"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/spf13/cobra"
 )
 
 var (
@@ -31,6 +31,7 @@ var (
 	scopeFile    = ""
 	systemPrompt = ""
 	noTuiFlag    = false
+	validateFlag = false
 	rootCmd      = &cobra.Command{
 		Use:           "shmorby",
 		Short:         "AI sysadmin agent harness",
@@ -42,8 +43,7 @@ var (
 
 			// Validates the flag and may reject invalid values.
 			if err != nil {
-
-				return err
+				return fmt.Errorf("parse log level: %w", err)
 			}
 
 			logger := slog.New(
@@ -61,19 +61,32 @@ var (
 				Agent:      agentFlag,
 			})
 			if err != nil {
-				return err
+				if validateFlag {
+					return fmt.Errorf("config invalid:\n%s", err)
+				}
+				return fmt.Errorf("load config: %w", err)
+			}
+
+			if validateFlag {
+				cmd.Println("config valid")
+				return nil
 			}
 
 			scopeResult, err := scope.Load(cfg, scope.Flags{ScopeFile: scopeFile})
 			if err != nil {
-				return err
+				return fmt.Errorf("load scope: %w", err)
+			}
+
+			// Ensure workdir exists for shell tool.
+			if err := os.MkdirAll(cfg.Scope.Workdir, 0o755); err != nil {
+				return fmt.Errorf("create workdir: %w", err)
 			}
 
 			slog.Info("loaded config", "provider", cfg.Provider, "model", cfg.Model)
 
 			provider, err := llm.NewProvider(cfg)
 			if err != nil {
-				return err
+				return fmt.Errorf("init provider: %w", err)
 			}
 
 			reg := tools.NewRegistry()
@@ -116,12 +129,9 @@ var (
 						baseURL, cfg.Memory.Embedding.Model,
 					)
 				case "openai":
-					apiKey := os.Getenv("OPENAI_API_KEY")
-					if apiKey == "" {
-						slog.Warn("openai embedding configured but OPENAI_API_KEY not set")
-					} else {
+					if cfg.OpenAI.APIKey != "" {
 						emb = memory.NewOpenAIEmbedder(
-							apiKey,
+							cfg.OpenAI.APIKey,
 							cfg.Memory.Embedding.BaseURL,
 							cfg.Memory.Embedding.Model,
 						)
@@ -185,6 +195,17 @@ var (
 					} else {
 						memRetriever = memory.NewRetriever(memStore, 5)
 					}
+				}
+			}
+
+			// Build per-tool permission rulesets when interactive mode
+			// is enabled. Nil rules preserves v1 "ask" = silently allow.
+			var toolRules map[string]*tools.RuleSet
+			if cfg.Permission.Interactive {
+				toolRules = make(map[string]*tools.RuleSet)
+				for _, tool := range []string{"shell", "ssh", "sudo", "aws"} {
+					rs := tools.MergeRules(cfg.Permission.Presets, cfg.Permission.Rules)
+					toolRules[tool] = &rs
 				}
 			}
 
@@ -259,21 +280,21 @@ var (
 				}
 
 				m := tui.NewModel(tui.Config{
-					Provider:     provider,
-					Session:      session.New(),
-					Mode:         cfg.Agent.Default,
-					Scope:        scopeResult.Content,
-					Model:        cfg.Model,
-					Override:     systemPrompt,
-					Registry:     reg,
-					MaxToolIter:  cfg.Agent.MaxToolIterations,
-					ShellEnabled: cfg.Tools.Shell.Enabled,
-					Fullscreen:   cfg.TUI.Fullscreen,
+					Provider:       provider,
+					Session:        session.New(),
+					Mode:           cfg.Agent.Default,
+					Scope:          scopeResult.Content,
+					Model:          cfg.Model,
+					Override:       systemPrompt,
+					Registry:       reg,
+					MaxToolIter:    cfg.Agent.MaxToolIterations,
+					ShellEnabled:   cfg.Tools.Shell.Enabled,
+					Fullscreen:     cfg.TUI.Fullscreen,
 					ThemeName:      cfg.TUI.Theme,
 					GlamourEnabled: cfg.TUI.Glamour.Enabled,
 					ScrollLines:    scrollLines,
-					FollowMode:   cfg.TUI.Nav.FollowMode,
-					ToolTimeout:  cfg.Tools.Timeout,
+					FollowMode:     cfg.TUI.Nav.FollowMode,
+					ToolTimeout:    cfg.Tools.Timeout,
 					ScopeInfo: tui.ScopeInfo{
 						PrimaryPath:  scopeResult.PrimaryPath,
 						Instructions: scopeResult.Instructions,
@@ -291,6 +312,7 @@ var (
 					LogCollapseThreshold: cfg.TUI.Logging.CollapseThreshold,
 					LogChan:              logChan,
 					LogHandler:           logHandler,
+					ToolRules:            toolRules,
 				})
 				opts := []tea.ProgramOption{}
 				if cfg.TUI.Fullscreen {
@@ -298,7 +320,7 @@ var (
 				}
 				p := tea.NewProgram(m, opts...)
 				_, err := p.Run()
-				return err
+				return fmt.Errorf("run TUI: %w", err)
 			}
 
 			// Fall back to plain REPL.
@@ -323,6 +345,7 @@ var (
 				Retriever:  memRetriever,
 				Compressor: compressor,
 				ModelInfo:  modelInfo,
+				ToolRules:  toolRules,
 			}
 
 			return repl.Run(cmd.Context())
@@ -343,6 +366,7 @@ Usage:
   shmorby [flags]
 
 Flags:
+  --validate              Validate config and exit
   --provider string       LLM provider: openrouter, opencode_zen, openai, ollama (default "ollama")
   --model string          Model name (default "llama3.2")
   --config string         Config file path
@@ -353,18 +377,10 @@ Flags:
   --log-level string      Log level: debug, info, warn, error (default "info")
   --version               Print version and exit
 
-Environment variables:
-  OPENROUTER_API_KEY      OpenRouter API key
-  OPENCODE_ZEN_API_KEY    OpenCode Zen API key
-  OPENAI_API_KEY          OpenAI API key
-  OLLAMA_BASE_URL         Ollama server URL (default http://127.0.0.1:11434)
-  SHMORBY_PROVIDER        Override default provider
-  SHMORBY_MODEL           Override default model
-
 Config file (shmorby.yaml):
   Loaded from (first match wins):
-    1. /etc/shmorby/config.yaml
-    2. ~/.config/shmorby/config.yaml
+    1. /etc/shmorby/config.yaml (Unix) / %ProgramData%\shmorby\config.yaml (Windows)
+    2. ~/.config/shmorby/config.yaml or $XDG_CONFIG_HOME/shmorby/config.yaml (Unix) / %APPDATA%\shmorby\config.yaml (Windows)
     3. --config flag
     4. ./shmorby.yaml in cwd
   See examples/shmorby.yaml for full reference.
@@ -387,7 +403,6 @@ Quick start:
   3. Type a sysadmin task: "check nginx status on all hosts"
 
   Or with an API provider:
-    export OPENAI_API_KEY=sk-...
     shmorby --provider openai --model gpt-4o
 `)
 	})
@@ -399,7 +414,7 @@ Quick start:
 		"debug|info|warn|error",
 	)
 	rootCmd.Flags().StringVar(
-		&providerFlag, "provider", "", "ollama|openrouter|opencode_zen")
+		&providerFlag, "provider", "", "ollama|openrouter|opencode_zen|openai")
 	rootCmd.Flags().StringVar(
 		&modelFlag, "model", "", "LLM model id")
 	rootCmd.Flags().StringVar(
@@ -412,12 +427,15 @@ Quick start:
 		&systemPrompt, "system-prompt-file", "", "system prompt override file")
 	rootCmd.Flags().BoolVar(
 		&noTuiFlag, "no-tui", false, "disable TUI, use plain REPL")
+	rootCmd.Flags().BoolVar(
+		&validateFlag, "validate", false, "validate config and exit")
 }
 
 // Runs the root command.
 func main() {
 	// Exits non-zero on command execution error.
 	if err := execute(); err != nil {
+		fmt.Fprintf(os.Stderr, "%s\n", err)
 		os.Exit(1)
 	}
 }
