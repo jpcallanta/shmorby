@@ -78,6 +78,9 @@ func (a *AWSTool) Parameters() json.RawMessage { return awsParams }
 // PermLevel returns the configured permission level.
 func (a *AWSTool) PermLevel() string { return a.perm }
 
+// SetPerm updates the permission level at runtime.
+func (a *AWSTool) SetPerm(level string) { a.perm = level }
+
 // Parses args, executes aws CLI with timeout, truncates output, and
 // redacts secrets. Permission is enforced by the agent loop.
 func (a *AWSTool) Run(

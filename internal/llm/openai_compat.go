@@ -185,12 +185,8 @@ func buildOpenAITools(tools []ToolDef) []openaiTool {
 	out := make([]openaiTool, len(tools))
 	for i, t := range tools {
 		out[i] = openaiTool{
-			Type: "function",
-			Function: openaiFunction{
-				Name:        t.Name,
-				Description: t.Description,
-				Parameters:  t.Parameters,
-			},
+			Type:     "function",
+			Function: openaiFunction(t),
 		}
 	}
 	return out
@@ -255,9 +251,8 @@ func parseOpenAIResponse(resp openaiResponse) (ChatResponse, error) {
 // Strips trailing /v1 from a base URL so doOpenAIRequest does not
 // produce a double /v1 path.
 func normalizeBaseURL(baseURL string) string {
-	baseURL = strings.TrimRight(baseURL, "/")
-	if strings.HasSuffix(baseURL, "/v1") {
-		baseURL = strings.TrimSuffix(baseURL, "/v1")
-	}
+	baseURL = strings.TrimSuffix(
+		strings.TrimRight(baseURL, "/"), "/v1",
+	)
 	return baseURL
 }

@@ -266,30 +266,6 @@ func TestMaxEntries_EvictsOldest(t *testing.T) {
 	}
 }
 
-// TestCaptureToolExecution_TruncatesResult checks result is capped.
-func TestCaptureToolExecution_TruncatesResult(t *testing.T) {
-	store := newTestSQLiteStore(t)
-
-	longResult := string(make([]byte, MaxResultLen+1000))
-
-	err := store.CaptureToolExecution("s1", "shell", "echo long", "", longResult, 0)
-	if err != nil {
-		t.Fatalf("CaptureToolExecution: %v", err)
-	}
-
-	entries, err := store.List(1, 0)
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if len(entries) == 0 {
-		t.Fatal("no entries after capture")
-	}
-
-	if len(entries[0].Result) > MaxResultLen {
-		t.Errorf("result length %d exceeds max %d", len(entries[0].Result), MaxResultLen)
-	}
-}
-
 // TestExtractTags_Matches configured patterns.
 func TestExtractTags_Matches(t *testing.T) {
 	rules := []TagRule{
@@ -425,40 +401,6 @@ func TestInsert_ResultTruncation(t *testing.T) {
 
 	if len(got.Result) > MaxResultLen {
 		t.Errorf("stored result length %d exceeds max %d", len(got.Result), MaxResultLen)
-	}
-}
-
-// TestCaptureToolExecution_Tags checks auto-tag extraction during capture.
-func TestCaptureToolExecution_Tags(t *testing.T) {
-	dir := t.TempDir()
-	cfg := defaultConfig()
-	cfg.DBPath = filepath.Join(dir, "mem.db")
-	cfg.Tags = []TagRule{
-		{Pattern: `ssh.*@(.+)`, Tag: "host:$1"},
-	}
-
-	s, err := NewStore(cfg, nil)
-	if err != nil {
-		t.Fatalf("NewStore: %v", err)
-	}
-	defer s.Close()
-
-	store := s.(*sqliteStore)
-
-	if err := store.CaptureToolExecution("s1", "shell", "ssh admin@web01", "", "ok", 0); err != nil {
-		t.Fatalf("CaptureToolExecution: %v", err)
-	}
-
-	entries, err := s.List(10, 0)
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-
-	if len(entries) != 1 {
-		t.Fatalf("want 1 entry, got %d", len(entries))
-	}
-	if len(entries[0].Tags) != 1 || entries[0].Tags[0] != "host:web01" {
-		t.Errorf("want [host:web01], got %v", entries[0].Tags)
 	}
 }
 

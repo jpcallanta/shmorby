@@ -200,8 +200,8 @@ func defaultConfig() Config {
 	return cfg
 }
 
-// Returns an error if provider is not a known value.
-func validateProvider(provider string) error {
+// ValidateProvider returns an error if provider is not a known value.
+func ValidateProvider(provider string) error {
 	switch provider {
 	case "ollama", "openrouter", "opencode_zen", "openai":
 		return nil
@@ -213,8 +213,8 @@ func validateProvider(provider string) error {
 	}
 }
 
-// Returns an error if agent is not operate or diagnose.
-func validateAgent(agent string) error {
+// ValidateAgent returns an error if agent is not operate or diagnose.
+func ValidateAgent(agent string) error {
 	switch agent {
 	case "operate", "diagnose":
 		return nil
@@ -223,8 +223,9 @@ func validateAgent(agent string) error {
 	}
 }
 
-// Returns an error if permission level is not allow, ask, or deny.
-func validatePermissionLevel(field, level string) error {
+// ValidatePermissionLevel returns an error if permission level is not
+// allow, ask, or deny.
+func ValidatePermissionLevel(field, level string) error {
 	switch level {
 	case "allow", "ask", "deny":
 		return nil
@@ -236,8 +237,9 @@ func validatePermissionLevel(field, level string) error {
 	}
 }
 
-// Returns an error if token estimator is not heuristic or tiktoken.
-func validateTokenEstimator(estimator string) error {
+// ValidateTokenEstimator returns an error if token estimator is not
+// heuristic or tiktoken.
+func ValidateTokenEstimator(estimator string) error {
 	switch estimator {
 	case "heuristic", "tiktoken":
 		return nil
@@ -249,8 +251,8 @@ func validateTokenEstimator(estimator string) error {
 	}
 }
 
-// Returns an error if context mode is not a known value.
-func validateContextMode(mode string) error {
+// ValidateContextMode returns an error if context mode is not known.
+func ValidateContextMode(mode string) error {
 	switch mode {
 	case "auto", "aggressive", "conservative", "off":
 		return nil

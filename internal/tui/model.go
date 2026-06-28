@@ -211,6 +211,9 @@ type Model struct {
 	// Phase 26: interactive permission prompts
 	permissionReqChan chan PermissionPrompt
 	toolRules         map[string]*tools.RuleSet
+
+	// Phase 32: runtime config overrides.
+	configOverrider *agent.ConfigOverrider
 }
 
 // CtxStats holds compression and token usage statistics for display.
@@ -1481,6 +1484,9 @@ type Config struct {
 
 	// Phase 26: per-tool permission rule sets
 	ToolRules map[string]*tools.RuleSet
+
+	// Phase 32: runtime config overrides.
+	ConfigOverrider *agent.ConfigOverrider
 }
 
 // NewModel creates a Bubbletea model ready to run.
@@ -1564,6 +1570,9 @@ func NewModel(cfg Config) Model {
 	cp.AddItem(palette.CommandItem{
 		Name: "help", Slash: "/help", Description: "Show help",
 	})
+	cp.AddItem(palette.CommandItem{
+		Name: "set", Slash: "/set", Description: "Override config parameter",
+	})
 
 	// Parse default log level.
 	logLevel := slog.LevelInfo
@@ -1640,6 +1649,7 @@ func NewModel(cfg Config) Model {
 		permissionReqChan:    make(chan PermissionPrompt),
 		toolRules:            cfg.ToolRules,
 		showHelp:             NewHelpModel(),
+		configOverrider:      cfg.ConfigOverrider,
 	}
 }
 
@@ -1789,7 +1799,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.whichKey.Dismiss()
 			} else {
 				return m, tea.Tick(
-					m.leaderKey.Deadline().Sub(time.Now()),
+					time.Until(m.leaderKey.Deadline()),
 					func(_ time.Time) tea.Msg {
 						return leaderTimeoutMsg{}
 					},
@@ -2614,6 +2624,44 @@ func (m *Model) handleCommand(line string) (bool, bool, error) {
 		m.syncViewport()
 		return true, false, nil
 
+	case "/set":
+		if len(parts) < 3 {
+			m.output = append(m.output, outputEntry{
+				kind: "agent",
+				text: "usage: /set <param> <value>\n" +
+					"Try /help for list of overrideable params.",
+			})
+			m.syncViewport()
+
+			return true, false, nil
+		}
+		param := parts[1]
+		value := strings.Join(parts[2:], " ")
+		if m.configOverrider == nil {
+			m.output = append(m.output, outputEntry{
+				kind: "agent",
+				text: "Config override not available.",
+			})
+			m.syncViewport()
+
+			return true, false, nil
+		}
+		msg, err := m.configOverrider.Set(param, value)
+		if err != nil {
+			m.output = append(m.output, outputEntry{
+				kind: "error",
+				text: fmt.Sprintf("error: %v", err),
+			})
+		} else {
+			m.output = append(m.output, outputEntry{
+				kind: "agent",
+				text: fmt.Sprintf("⚙ %s", msg),
+			})
+		}
+		m.syncViewport()
+
+		return true, false, nil
+
 	default:
 		return true, false, fmt.Errorf("unknown command: %s", parts[0])
 	}
@@ -2735,7 +2783,9 @@ func (m Model) consumeStream(
 // toolPermissionFunc implements agent.ToolPermissionFunc for the TUI.
 // Sends a permission prompt to the TUI update loop and blocks until
 // the user responds.
-func (m *Model) toolPermissionFunc(toolName, command, reason string) agent.ToolPermissionResponse {
+func (m *Model) toolPermissionFunc(
+	toolName, command, reason string,
+) agent.ToolPermissionResponse {
 	prompt := NewPermissionPrompt(toolName, command, reason, "tool permission")
 	m.permissionReqChan <- prompt
 
@@ -2885,7 +2935,9 @@ func (m Model) inputLineHeight() int {
 
 // cursorVisualPos returns the visual line and column of the cursor
 // in the word-wrapped output for the given wrapped lines and original text.
-func (m Model) cursorVisualPos(lines []string, text string, width int) (int, int) {
+func (m Model) cursorVisualPos(
+	lines []string, text string, width int,
+) (int, int) {
 	cursorLine := m.textarea.Line()
 	li := m.textarea.LineInfo()
 	colRunes := li.ColumnOffset + li.StartColumn
@@ -2919,7 +2971,9 @@ func (m Model) cursorVisualPos(lines []string, text string, width int) (int, int
 		if origPos < len(text) {
 			if text[origPos] == '\n' {
 				origPos++
-			} else if text[origPos] == ' ' && origPos+1 < len(text) && text[origPos+1] != '\n' {
+			} else if text[origPos] == ' ' &&
+				origPos+1 < len(text) &&
+				text[origPos+1] != '\n' {
 				origPos++
 			}
 		}

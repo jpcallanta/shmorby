@@ -57,6 +57,21 @@ func (r *Registry) Schemas() []ToolSchema {
 	return schemas
 }
 
+// Unregister removes a tool by name. No-op if not found.
+func (r *Registry) Unregister(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.tools[name]; ok {
+		delete(r.tools, name)
+		for i, n := range r.order {
+			if n == name {
+				r.order = append(r.order[:i], r.order[i+1:]...)
+				break
+			}
+		}
+	}
+}
+
 // Lookup returns the tool by name. Returns nil, false if not found.
 func (r *Registry) Lookup(name string) (Tool, bool) {
 	r.mu.RLock()

@@ -152,13 +152,13 @@ func validateConfigFile(b []byte, path string) error {
 	root := doc.Content[0]
 
 	if fileCfg.Provider != "" {
-		if err := validateProvider(fileCfg.Provider); err != nil {
+		if err := ValidateProvider(fileCfg.Provider); err != nil {
 			line := findMappingKeyLine(root, "provider")
 			return fmt.Errorf("%s:%d: %w", path, line, err)
 		}
 	}
 	if fileCfg.Agent.Default != "" {
-		if err := validateAgent(fileCfg.Agent.Default); err != nil {
+		if err := ValidateAgent(fileCfg.Agent.Default); err != nil {
 			line := findNestedKeyLine(root, "agent", "default")
 			return fmt.Errorf("%s:%d: %w", path, line, err)
 		}
@@ -211,36 +211,36 @@ func userConfigPath(dirOverride string) string {
 
 // Validates the merged config including cross-field checks.
 func validateConfig(cfg Config) error {
-	if err := validateProvider(cfg.Provider); err != nil {
+	if err := ValidateProvider(cfg.Provider); err != nil {
 		return fmt.Errorf("provider: %w", err)
 	}
-	if err := validateAgent(cfg.Agent.Default); err != nil {
+	if err := ValidateAgent(cfg.Agent.Default); err != nil {
 		return fmt.Errorf("agent.default: %w", err)
 	}
-	if err := validatePermissionLevel(
+	if err := ValidatePermissionLevel(
 		"permission.shell", cfg.Permission.Shell,
 	); err != nil {
 		return err
 	}
-	if err := validatePermissionLevel(
+	if err := ValidatePermissionLevel(
 		"permission.ssh", cfg.Permission.SSH,
 	); err != nil {
 		return err
 	}
-	if err := validatePermissionLevel(
+	if err := ValidatePermissionLevel(
 		"permission.sudo", cfg.Permission.Sudo,
 	); err != nil {
 		return err
 	}
-	if err := validatePermissionLevel(
+	if err := ValidatePermissionLevel(
 		"permission.aws", cfg.Permission.AWS,
 	); err != nil {
 		return err
 	}
-	if err := validateTokenEstimator(cfg.Context.TokenEstimator); err != nil {
+	if err := ValidateTokenEstimator(cfg.Context.TokenEstimator); err != nil {
 		return fmt.Errorf("context.token_estimator: %w", err)
 	}
-	if err := validateContextMode(cfg.Context.Mode); err != nil {
+	if err := ValidateContextMode(cfg.Context.Mode); err != nil {
 		return fmt.Errorf("context.mode: %w", err)
 	}
 	if cfg.Tools.Timeout < 0 {

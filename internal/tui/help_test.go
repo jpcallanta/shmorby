@@ -122,11 +122,12 @@ func TestHelpModel_ShowHide(t *testing.T) {
 
 // Tests that help content contains all required sections.
 func TestHelpContent_AllSections(t *testing.T) {
-	sections := helpContent("operate")
+	sections := helpContent("operate", nil)
 
 	titles := []string{
 		"AGENT MODES",
 		"SLASH COMMANDS",
+		"CONFIG PARAMETERS",
 		"KEYBOARD SHORTCUTS",
 		"LEADER KEY (ctrl+x)",
 		"PERMISSIONS",
@@ -147,7 +148,7 @@ func TestHelpContent_AllSections(t *testing.T) {
 
 // Tests that help content is non-empty.
 func TestHelpContent_NonEmpty(t *testing.T) {
-	sections := helpContent("operate")
+	sections := helpContent("operate", nil)
 	if len(sections) == 0 {
 		t.Error("helpContent should return non-empty sections")
 	}
@@ -155,7 +156,7 @@ func TestHelpContent_NonEmpty(t *testing.T) {
 
 // Tests that help content shows the current mode.
 func TestHelpContent_ShowsMode(t *testing.T) {
-	sections := helpContent("diagnose")
+	sections := helpContent("diagnose", nil)
 	found := false
 	for _, s := range sections {
 		for _, line := range s.lines {

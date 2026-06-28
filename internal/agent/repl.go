@@ -50,6 +50,9 @@ type REPL struct {
 	thinkingSpinnerDone chan struct{}
 	toolDone            chan struct{}
 	toolSpinnerDone     chan struct{}
+
+	// Phase 32: runtime config overrides.
+	ConfigOverrider *ConfigOverrider
 }
 
 // Starts the interactive REPL loop reading from In and writing to Out.
@@ -320,64 +323,8 @@ func (r *REPL) handleCommand(line string) (bool, bool, error) {
 		return true, false, nil
 
 	case "/help":
-		fmt.Fprint(r.Out, `Shmorby help
-
-AGENT MODES
-  tab / shift+tab    Cycle agent modes
-  operate            Full tool access (default)
-  diagnose           Read-only inspection
-
-SLASH COMMANDS
-  /help              Show this help
-  /quit              Exit shmorby
-  /reset             Clear conversation history
-  /model <name>      Switch LLM model
-  /agent <mode>      Switch agent mode
-  /scope             Show loaded scope context
-  /memory            Memory management
-  /context           Token usage and compression stats
-  /log <level>       Set log verbosity
-  /tui               Toggle fullscreen mode
-
-KEYBOARD SHORTCUTS
-  ctrl+h             Show help
-  ctrl+p             Command palette
-  ctrl+r             Reverse-i-search input history
-  ctrl+c             Quit shmorby
-  ctrl+v             Paste from clipboard
-  ctrl+l             Toggle log section
-  ctrl+t             Toggle thinking block
-  ctrl+x             Leader key
-  tab / shift+tab    Cycle agent modes (empty input)
-  pgup / pgdn        Scroll output by page
-  up / down          Scroll output by line
-  home / end         Top / bottom of output
-
-LEADER KEY (ctrl+x)
-  ctrl+x c           Compact session
-  ctrl+x n           New session
-  ctrl+x l           Session list
-  ctrl+x m           Model list / switch
-  ctrl+x t           Theme list / switch
-  ctrl+x a           Agent list / switch
-  ctrl+x u           Undo last message
-  ctrl+x r           Redo
-  ctrl+x e           Open external editor
-  ctrl+x x           Export session
-  ctrl+x q           Quit
-  ctrl+x s           Status view
-  ctrl+x h           Tips / help
-  ctrl+x b           Toggle sidebar
-  ctrl+x y           Copy selected text
-
-PERMISSIONS
-  shell              allow
-  ssh                allow
-  sudo               ask (default disabled)
-  aws                ask (default disabled)
-
-Current mode: `+r.Mode+`
-`)
+		help := r.buildHelp()
+		fmt.Fprint(r.Out, help)
 
 		return true, false, nil
 
@@ -389,6 +336,33 @@ Current mode: `+r.Mode+`
 
 	case "/log":
 		return r.handleLogCommand(parts)
+
+	case "/set":
+		if len(parts) < 3 {
+			fmt.Fprint(r.Out, "usage: /set <param> <value>\n")
+			fmt.Fprint(r.Out,
+				"Try /help for list of overrideable params.\n",
+			)
+
+			return true, false, nil
+		}
+		param := parts[1]
+		value := strings.Join(parts[2:], " ")
+		if r.ConfigOverrider == nil {
+			fmt.Fprintln(r.Out,
+				"Config override not available.",
+			)
+
+			return true, false, nil
+		}
+		msg, err := r.ConfigOverrider.Set(param, value)
+		if err != nil {
+			fmt.Fprintf(r.Out, "error: %v\n", err)
+		} else {
+			fmt.Fprintf(r.Out, "%s\n", msg)
+		}
+
+		return true, false, nil
 
 	default:
 		// Unknown slash command.
@@ -556,7 +530,9 @@ func (r *REPL) handleContextCommand(parts []string) (bool, bool, error) {
 		fmt.Fprintf(r.Out, "  Context window: %d tokens\n", cw)
 		fmt.Fprintf(r.Out, "  Estimated tokens: %d\n", estimated)
 		fmt.Fprintf(r.Out, "  Compression threshold: %.0f%%\n", cfg.Threshold*100)
-		fmt.Fprintf(r.Out, "  Compressions this session: %d\n", r.Compressor.CompressionCount)
+		fmt.Fprintf(r.Out,
+			"  Compressions this session: %d\n",
+			r.Compressor.CompressionCount)
 		fmt.Fprintf(r.Out, "  Mode: %s\n", cfg.Mode)
 		return true, false, nil
 
@@ -580,7 +556,9 @@ func (r *REPL) handleContextCommand(parts []string) (bool, bool, error) {
 	case "model":
 		fmt.Fprintf(r.Out, "Model: %s\n", r.Model)
 		if r.ModelInfo.ContextWindow > 0 {
-			fmt.Fprintf(r.Out, "  Context window: %d (API-verified)\n", r.ModelInfo.ContextWindow)
+			fmt.Fprintf(r.Out,
+				"  Context window: %d (API-verified)\n",
+				r.ModelInfo.ContextWindow)
 		}
 		if r.ModelInfo.MaxOutputTokens > 0 {
 			fmt.Fprintf(r.Out, "  Max output: %d\n", r.ModelInfo.MaxOutputTokens)
@@ -614,9 +592,107 @@ func (r *REPL) handleLogCommand(parts []string) (bool, bool, error) {
 	return true, false, nil
 }
 
+// buildHelp returns the full help text including config parameters.
+func (r *REPL) buildHelp() string {
+	var b strings.Builder
+
+	b.WriteString(`Shmorby help
+
+AGENT MODES
+  tab / shift+tab    Cycle agent modes
+  operate            Full tool access (default)
+  diagnose           Read-only inspection
+
+SLASH COMMANDS
+  /help              Show this help
+  /set <param> <value>  Override a config parameter (runtime only)
+  /quit              Exit shmorby
+  /reset             Clear conversation history
+  /model <name>      Switch LLM model
+  /agent <mode>      Switch agent mode
+  /scope             Show loaded scope context
+  /memory            Memory management
+  /context           Token usage and compression stats
+  /log <level>       Set log verbosity
+  /tui               Toggle fullscreen mode
+`)
+
+	// CONFIG PARAMETERS section.
+	b.WriteString("CONFIG PARAMETERS (current value - valid options)\n")
+	if r.ConfigOverrider != nil {
+		for _, p := range r.ConfigOverrider.OverrideableParams() {
+			// Pad key to align values.
+			key := p.Key
+			if len(key) < 30 {
+				key += strings.Repeat(" ", 30-len(key))
+			}
+			opt := p.ValidOptions
+			b.WriteString(fmt.Sprintf("  %s %s - %s\n", key, p.CurrentValue, opt))
+		}
+	}
+	b.WriteString("\n")
+
+	b.WriteString(`KEYBOARD SHORTCUTS
+  ctrl+h             Show help
+  ctrl+p             Command palette
+  ctrl+r             Reverse-i-search input history
+  ctrl+c             Quit shmorby
+  ctrl+v             Paste from clipboard
+  ctrl+l             Toggle log section
+  ctrl+t             Toggle thinking block
+  ctrl+x             Leader key
+  tab / shift+tab    Cycle agent modes (empty input)
+  pgup / pgdn        Scroll output by page
+  up / down          Scroll output by line
+  home / end         Top / bottom of output
+
+LEADER KEY (ctrl+x)
+  ctrl+x c           Compact session
+  ctrl+x n           New session
+  ctrl+x l           Session list
+  ctrl+x m           Model list / switch
+  ctrl+x t           Theme list / switch
+  ctrl+x a           Agent list / switch
+  ctrl+x u           Undo last message
+  ctrl+x r           Redo
+  ctrl+x e           Open external editor
+  ctrl+x x           Export session
+  ctrl+x q           Quit
+  ctrl+x s           Status view
+  ctrl+x h           Tips / help
+  ctrl+x b           Toggle sidebar
+  ctrl+x y           Copy selected text
+
+PERMISSIONS
+  shell              ` + r.cfgPermLevel("shell") + `
+  ssh                ` + r.cfgPermLevel("ssh") + `
+  sudo               ` + r.cfgPermLevel("sudo") + ` (default disabled)
+  aws                ` + r.cfgPermLevel("aws") + ` (default disabled)
+
+Current mode: ` + r.Mode + `
+`)
+
+	return b.String()
+}
+
+// cfgPermLevel returns the config permission level for a tool.
+func (r *REPL) cfgPermLevel(tool string) string {
+	if r.ConfigOverrider != nil {
+		// Read from shared config via overrider.
+		for _, p := range r.ConfigOverrider.OverrideableParams() {
+			if p.Key == "permission."+tool {
+				return p.CurrentValue
+			}
+		}
+	}
+	return "ask"
+}
+
 // toolPermissionFunc implements the permission callback for the REPL,
 // prompting the user via a fresh scanner on In.
-func (r *REPL) toolPermissionFunc(toolName, command, reason string) ToolPermissionResponse {
+func (r *REPL) toolPermissionFunc(
+	toolName, command, reason string,
+) ToolPermissionResponse {
 	// Suspend thinking spinner while prompting.
 	if r.thinkingDone != nil {
 		close(r.thinkingDone)

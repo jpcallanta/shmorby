@@ -50,10 +50,15 @@ func TestPaste_BeforeInit(t *testing.T) {
 }
 
 func TestCopy_BeforeInit(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("Copy before Init panicked: %v", r)
+		}
+	}()
+
 	once = sync.Once{}
 	initErr = nil
 
-	// Should not panic
 	Copy("test")
 }
 

@@ -68,27 +68,6 @@ func (h *History) Size() int {
 	return len(h.entries)
 }
 
-// MaxSize returns the capacity.
-func (h *History) MaxSize() int {
-	return h.maxSize
-}
-
-// Cursor returns the current cursor position.
-func (h *History) Cursor() int {
-	return h.cursor
-}
-
-// SetCursor sets the cursor position directly.
-func (h *History) SetCursor(pos int) {
-	if pos < 0 {
-		pos = 0
-	}
-	if pos > len(h.entries) {
-		pos = len(h.entries)
-	}
-	h.cursor = pos
-}
-
 // AtNewest reports whether cursor is at the newest (blank) position.
 func (h *History) AtNewest() bool {
 	return h.cursor >= len(h.entries)

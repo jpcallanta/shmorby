@@ -67,6 +67,16 @@ func (c *Compressor) Config() CompressorConfig {
 	return c.config
 }
 
+// SetMode updates the compression mode at runtime.
+func (c *Compressor) SetMode(mode string) {
+	c.config.Mode = mode
+}
+
+// SetThreshold updates the compression threshold at runtime.
+func (c *Compressor) SetThreshold(t float64) {
+	c.config.Threshold = t
+}
+
 // EstimateMessages returns the estimated token count for a set of messages.
 func (c *Compressor) EstimateMessages(messages []session.Message) int {
 	return c.estimator.EstimateMessages(messages)

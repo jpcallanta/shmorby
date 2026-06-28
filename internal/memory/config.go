@@ -29,16 +29,6 @@ type Config struct {
 	Embedding   EmbeddingConfig `yaml:"embedding"`
 }
 
-// defaultConfig returns a Config with standard defaults.
-func defaultConfig() Config {
-	return Config{
-		Enabled:     true,
-		DBPath:      "~/.local/share/shmorby/memory.db",
-		MaxEntries:  10000,
-		AutoCapture: true,
-	}
-}
-
 // MaxResultLen is the cap for stored result text.
 const MaxResultLen = 4096
 

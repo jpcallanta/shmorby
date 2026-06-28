@@ -146,7 +146,8 @@ func TestLoad_UserConfigFallback(t *testing.T) {
 	userConfigDir := filepath.Join(tmpDir, ".config", "shmorby")
 	writeFile(t, filepath.Join(userConfigDir, "SCOPE.md"), "user scope")
 
-	// Override home dir via env.
+	// Override dirs to avoid env pollution.
+	t.Setenv("XDG_CONFIG_HOME", "")
 	t.Setenv("HOME", tmpDir)
 
 	cfg := config.Config{}

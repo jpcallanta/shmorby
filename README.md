@@ -141,6 +141,7 @@ shmorby [flags]
 --system-prompt-file    Override system prompt file
 --no-tui                Disable TUI, use plain stdin/stdout REPL
 --log-level string      Log level: debug, info, warn, error (default "info")
+--version               Print version and exit
 ```
 
 ### Additional config sections
@@ -159,10 +160,11 @@ See [`examples/shmorby.yaml`](examples/shmorby.yaml) for:
 | Command | Description |
 |---------|-------------|
 | `/help` | Show help overlay with keybindings, commands, modes |
+| `/set <param> <value>` | Override a config parameter at runtime |
 | `/quit` | Exit shmorby |
 | `/reset` | Clear conversation history |
-| `/model` | Show current model |
-| `/agent` | Show or switch agent mode |
+| `/model <name>` | Switch LLM model |
+| `/agent <mode>` | Switch agent mode (operate, diagnose) |
 | `/scope` | Show loaded scope context and size |
 | `/memory` | Memory management (search, forget, clear, stats) |
 | `/context` | Token usage and compression stats |
@@ -236,13 +238,18 @@ Prompts appear in the TUI (inline) or REPL (stdin). When `interactive` is
 
 ### Permission presets
 
-Built-in presets:
+Built-in command-level presets (see `internal/tools/presets.go`):
 
-| Preset | shell | ssh | sudo | aws |
-|--------|-------|-----|------|-----|
-| full | allow | allow | ask | ask |
-| read-only | allow | allow | deny | deny |
-| locked | deny | deny | deny | deny |
+| Preset | Purpose |
+|--------|---------|
+| `destructive` | Blocks `rm -rf`, `mkfs`, `dd`, `shred` |
+| `service` | Gates `systemctl stop/restart/disable` |
+| `package` | Allows install, gates remove |
+| `network` | Gates `iptables`, `ufw`, `netplan` |
+| `user` | Gates user/group add/mod, blocks deletion |
+| `ssh` | Allows `ssh`, `scp`, `rsync` |
+| `aws` | Allows describe/ls, gates S3 delete, blocks instance termination |
+| `sudo` | Gates `sudo` service/user commands, blocks user deletion |
 
 Custom presets can be added in `permission.presets` and override built-ins.
 Custom rules (`permission.rules`) take precedence over presets.

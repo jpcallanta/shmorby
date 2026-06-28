@@ -2,6 +2,7 @@ package llm
 
 import (
 	"fmt"
+	"os"
 
 	"shmorby/internal/config"
 )
@@ -16,7 +17,7 @@ func NewProvider(cfg config.Config) (Provider, error) {
 	case "openrouter":
 		if cfg.OpenRouter.APIKey == "" {
 			return nil, fmt.Errorf(
-				"openrouter: openrouter.api_key is required",
+				"openrouter: OPENROUTER_API_KEY is required",
 			)
 		}
 		return newOpenRouterProvider(
@@ -26,7 +27,7 @@ func NewProvider(cfg config.Config) (Provider, error) {
 	case "opencode_zen":
 		if cfg.OpencodeZen.APIKey == "" {
 			return nil, fmt.Errorf(
-				"opencode_zen: opencode_zen.api_key is required",
+				"opencode_zen: OPENCODE_ZEN_API_KEY is required",
 			)
 		}
 		baseURL := cfg.OpencodeZen.BaseURL
@@ -39,7 +40,14 @@ func NewProvider(cfg config.Config) (Provider, error) {
 		), nil
 	case "openai":
 		if cfg.OpenAI.APIKey == "" {
-			return nil, fmt.Errorf("openai: api_key is required")
+			if cfg.OpenAI.APIKeyEnv != "" {
+				if k := os.Getenv(cfg.OpenAI.APIKeyEnv); k != "" {
+					cfg.OpenAI.APIKey = k
+				}
+			}
+		}
+		if cfg.OpenAI.APIKey == "" {
+			return nil, fmt.Errorf("openai: API key is required (set OPENAI_API_KEY)")
 		}
 		baseURL := cfg.OpenAI.BaseURL
 		if baseURL == "" {

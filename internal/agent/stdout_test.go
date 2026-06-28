@@ -1,16 +1,10 @@
 package agent
 
 import (
-	"os"
 	"strings"
 	"testing"
 	"time"
 )
-
-// Helper to restore stdoutIsTerminal after test manipulation.
-func restoreTerminal() {
-	stdoutIsTerminal.Store(checkTerminal(os.Stdout))
-}
 
 func TestColorize_Terminal_AddsANSI(t *testing.T) {
 	defer SetTerminalForTest(true)()

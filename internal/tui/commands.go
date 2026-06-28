@@ -354,7 +354,7 @@ func (m *Model) contextInfoCmd() {
 	thresholdPct := int(m.compressor.Config().Threshold * 100)
 
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("Context status:\n"))
+	b.WriteString("Context status:\n")
 	b.WriteString(fmt.Sprintf("  Model: %s (%s)\n", m.model, providerName))
 	b.WriteString(fmt.Sprintf("  Context window: %s tokens", formatTokens(m.ctxStats.ContextWindow)))
 	if m.ctxStats.Fallback {

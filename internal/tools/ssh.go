@@ -90,6 +90,9 @@ func (s *SSHTool) Parameters() json.RawMessage { return sshParams }
 // PermLevel returns the configured permission level.
 func (s *SSHTool) PermLevel() string { return s.perm }
 
+// SetPerm updates the permission level at runtime.
+func (s *SSHTool) SetPerm(level string) { s.perm = level }
+
 // Parses args, executes SSH with timeout, truncates output, and
 // redacts secrets. Permission is enforced by the agent loop.
 func (s *SSHTool) Run(

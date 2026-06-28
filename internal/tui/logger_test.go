@@ -71,8 +71,13 @@ func TestTUILogHandler_DropsOnFullChannel(t *testing.T) {
 	}
 }
 
-// Tests that TUILogHandler sends to nil channel without panicking.
 func TestTUILogHandler_NilChannel(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("TUILogHandler with nil channel panicked: %v", r)
+		}
+	}()
+
 	inner := slog.NewTextHandler(&bytes.Buffer{}, nil)
 	h := NewTUILogHandler(inner, nil)
 

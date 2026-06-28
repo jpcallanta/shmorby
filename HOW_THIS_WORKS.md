@@ -47,7 +47,7 @@ or OpenCode Zen with a config change.
 | `internal/config` | Layered YAML merge |
 | `internal/xdg` | Cross-platform path resolution |
 | `internal/llm` | Provider interface + backends |
-| `internal/agent` | Loop, modes, prompts, step cap |
+| `internal/agent` | Loop, modes, prompts, step cap, runtime config overrides (`/set`), no-TUI stdout formatting |
 | `internal/tools` | Registry, schemas, permissions |
 | `internal/session` | Message history |
 | `internal/scope` | Load SCOPE.md + instructions |
@@ -89,6 +89,12 @@ Switch via `/agent operate`, `/agent diagnose`, or Tab/Shift+Tab in TUI.
 **Read-only guard**: blocks `rm`, `mv`, `dd`, `mkfs`, package
 install/remove, systemctl start/stop, and redirects to `/etc`.
 
+**Runtime config overrides**: the `/set` command modifies config at runtime
+and propagates changes to affected components (provider, model, memory
+auto-capture, tool timeouts, logging level, TUI theme, permission
+presets/rules, context compression mode). Changes are applied
+immediately and reflected in the `/help` parameter listing.
+
 ---
 
 ## 5. Sysadmin Workflow (prompt guidance)
@@ -112,7 +118,7 @@ Three layers, evaluated in order:
 |-------|---------|
 | Tool-level | `shell: allow`, `sudo: ask`, `aws: ask` |
 | Command rules (glob) | `match: "rm -rf /" ⇒ deny` |
-| Built-in presets | `destructive`, `service`, `package`, `user` |
+| Built-in presets | `destructive`, `service`, `package`, `network`, `user`, `ssh`, `aws`, `sudo` |
 
 **Interactive prompts**: tools with `ask` level show inline `y/n/a` in
 TUI. `a` allows all for this turn. Configurable
@@ -199,7 +205,46 @@ Secrets via `api_key` fields in YAML.
 
 ---
 
-## 11. TUI Design (bubbletea)
+## 11. Runtime Config Overrides (`/set`)
+
+The `/set <param> <value>` command modifies config at runtime and
+propagates changes to live components without restarting.
+
+**Overrideable parameters:**
+
+| Param | Type | Example |
+|-------|------|---------|
+| `provider` | string | `/set provider openai` |
+| `model` | string | `/set model gpt-4o` |
+| `agent.default` | string | `/set agent.default diagnose` |
+| `tools.timeout` | int | `/set tools.timeout 60` |
+| `tools.sudo.enabled` | bool | `/set tools.sudo.enabled true` |
+| `tools.aws.enabled` | bool | `/set tools.aws.enabled true` |
+| `permission.shell` | string | `/set permission.shell deny` |
+| `permission.ssh` | string | `/set permission.ssh allow` |
+| `permission.sudo` | string | `/set permission.sudo deny` |
+| `permission.aws` | string | `/set permission.aws deny` |
+| `permission.interactive` | bool | `/set permission.interactive false` |
+| `permission.presets` | string list | `/set permission.presets destructive,service` |
+| `memory.auto_capture` | bool | `/set memory.auto_capture false` |
+| `context.mode` | string | `/set context.mode aggressive` |
+| `log.level` | string | `/set log.level debug` |
+| `tui.fullscreen` | bool | `/set tui.fullscreen true` |
+| `tui.theme` | string | `/set tui.theme catppuccin-latte` |
+
+**Propagation**: `ConfigOverrider` (in `internal/agent/setter.go`) writes
+the new value into the shared `config.Config` struct and calls component
+setters (provider swap, log level, memory toggle, etc.) so changes take
+effect immediately. The updated state is reflected in the `/help` overlay's
+CONFIG PARAMETERS section.
+
+**Restart-required**: some changes (e.g. switching between API-based
+providers and Ollama) recreate the LLM provider on the fly; others like
+TUI theme are purely cosmetic and apply instantly.
+
+---
+
+## 12. TUI Design (bubbletea)
 
 Bottom-anchored layout, inspired by Claude Code CLI and OpenCode:
 
@@ -227,10 +272,12 @@ Bottom-anchored layout, inspired by Claude Code CLI and OpenCode:
 - Scroll acceleration, selection copy/paste
 - Catppuccin themes (mocha, latte, frappe, macchiato, minimal)
 - Fullscreen mode (no flicker) vs `--no-tui` plain REPL
+- `--no-tui` REPL features ANSI markdown rendering, streaming
+  spinners, and structured permission prompts via `internal/agent/stdout.go`
 
 ---
 
-## 12. Tools
+## 13. Tools
 
 Ops-oriented only — no read/edit/write/grep:
 
@@ -241,7 +288,7 @@ Ops-oriented only — no read/edit/write/grep:
 | sudo | command | Requires `sudo -n`, gated by config |
 | aws | args array | Respects AWS env, gated by config |
 
-## 13. Key Design Decisions
+## 14. Key Design Decisions
 
 - **Go over Python/Node**: performance for shell execution, single
   binary, stdlib-first

@@ -254,6 +254,23 @@ var (
 				)
 			}
 
+			// Phase 32: Build runtime config overrider.
+			sess := session.New()
+			overrider := agent.NewConfigOverrider(
+				&cfg,
+				&provider,
+				reg,
+				compressor,
+				sess,
+				agent.WithLogLevelSetter(func(level string) {
+					l, err := parseLogLevel(level)
+					if err == nil {
+						slog.SetLogLoggerLevel(l)
+					}
+				}),
+				agent.WithMemoryStore(memStore), // propagates auto_capture at runtime
+			)
+
 			// Use TUI when terminal and --no-tui not set.
 			if !noTuiFlag && isTerminal() {
 				if err := tuicl.Init(); err != nil {
@@ -281,7 +298,7 @@ var (
 
 				m := tui.NewModel(tui.Config{
 					Provider:       provider,
-					Session:        session.New(),
+					Session:        sess,
 					Mode:           cfg.Agent.Default,
 					Scope:          scopeResult.Content,
 					Model:          cfg.Model,
@@ -313,6 +330,7 @@ var (
 					LogChan:              logChan,
 					LogHandler:           logHandler,
 					ToolRules:            toolRules,
+					ConfigOverrider:      overrider,
 				})
 				opts := []tea.ProgramOption{}
 				if cfg.TUI.Fullscreen {
@@ -326,7 +344,7 @@ var (
 			// Fall back to plain REPL.
 			repl := &agent.REPL{
 				Provider:     provider,
-				Session:      session.New(),
+				Session:      sess,
 				Mode:         cfg.Agent.Default,
 				Model:        cfg.Model,
 				Scope:        scopeResult.Content,
@@ -341,11 +359,12 @@ var (
 					Instructions: scopeResult.Instructions,
 					TotalBytes:   scopeResult.TotalBytes,
 				},
-				Store:      memStore,
-				Retriever:  memRetriever,
-				Compressor: compressor,
-				ModelInfo:  modelInfo,
-				ToolRules:  toolRules,
+				Store:           memStore,
+				Retriever:       memRetriever,
+				Compressor:      compressor,
+				ModelInfo:       modelInfo,
+				ToolRules:       toolRules,
+				ConfigOverrider: overrider,
 			}
 
 			return repl.Run(cmd.Context())
@@ -367,7 +386,8 @@ Usage:
 
 Flags:
   --validate              Validate config and exit
-  --provider string       LLM provider: openrouter, opencode_zen, openai, ollama (default "ollama")
+  --provider string       LLM provider: openrouter, opencode_zen,
+                          openai, ollama (default "ollama")
   --model string          Model name (default "llama3.2")
   --config string         Config file path
   --scope-file string     Operational context markdown (SCOPE.md)
@@ -379,8 +399,11 @@ Flags:
 
 Config file (shmorby.yaml):
   Loaded from (first match wins):
-    1. /etc/shmorby/config.yaml (Unix) / %ProgramData%\shmorby\config.yaml (Windows)
-    2. ~/.config/shmorby/config.yaml or $XDG_CONFIG_HOME/shmorby/config.yaml (Unix) / %APPDATA%\shmorby\config.yaml (Windows)
+    1. /etc/shmorby/config.yaml (Unix) /
+       %ProgramData%\shmorby\config.yaml (Windows)
+    2. ~/.config/shmorby/config.yaml or
+       $XDG_CONFIG_HOME/shmorby/config.yaml (Unix) /
+       %APPDATA%\shmorby\config.yaml (Windows)
     3. --config flag
     4. ./shmorby.yaml in cwd
   See examples/shmorby.yaml for full reference.

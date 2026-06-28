@@ -151,12 +151,8 @@ func buildTools(tools []ToolDef) []ollamaTool {
 	out := make([]ollamaTool, len(tools))
 	for i, t := range tools {
 		out[i] = ollamaTool{
-			Type: "function",
-			Function: ollamaFunction{
-				Name:        t.Name,
-				Description: t.Description,
-				Parameters:  t.Parameters,
-			},
+			Type:     "function",
+			Function: ollamaFunction(t),
 		}
 	}
 	return out

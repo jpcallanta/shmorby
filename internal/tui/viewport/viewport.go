@@ -3,8 +3,6 @@
 package viewport
 
 import (
-	"strings"
-
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -185,37 +183,6 @@ func (m Model) SelectionEnd() int {
 	return m.selectionEnd
 }
 
-// MoveSelection moves the selection end by delta lines.
-func (m *Model) MoveSelection(delta int) {
-	m.selectionEnd += delta
-	if m.selectionEnd < 0 {
-		m.selectionEnd = 0
-	}
-}
-
-// SelectedText returns the currently selected text range from lines.
-func (m *Model) SelectedText(lines []string) string {
-	start := m.selectionStart
-	end := m.selectionEnd
-	if start > end {
-		start, end = end, start
-	}
-	if start >= len(lines) {
-		return ""
-	}
-	if end > len(lines) {
-		end = len(lines)
-	}
-	var sb strings.Builder
-	for i := start; i < end; i++ {
-		if i > start {
-			sb.WriteString("\n")
-		}
-		sb.WriteString(lines[i])
-	}
-	return sb.String()
-}
-
 // MouseMsg handles mouse events for selection when mouse tracking is enabled.
 func (m *Model) MouseMsg(msg tea.MouseMsg) {
 	// Dragging in selection mode: track mouse position.
@@ -263,9 +230,4 @@ func (m *Model) handleDrag(msg tea.MouseMsg) {
 		return
 	}
 	m.sel.EndLine = msg.Y + m.vp.YOffset
-}
-
-// KeyMap returns the underlying viewport keymap for customization.
-func (m *Model) KeyMap() *viewport.KeyMap {
-	return &m.vp.KeyMap
 }

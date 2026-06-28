@@ -1,55 +1,89 @@
-# ── Required (no default) ──────────
-
-# provider:  Choose one: ollama, openrouter, opencode_zen, openai
-#            Default: ollama (no API key needed for local LLM)
-#            If you pick openai/openrouter/opencode_zen, you
-#            MUST set the corresponding api_key below.
+# ── Provider ────────────────────
+# Choose one: ollama | openai | openrouter | opencode_zen
+# Default: ollama (no API key needed for local LLM)
 provider: ollama
 
-# ── Required for remote providers ───────────
-
-# When provider is "openai", set your key here:
+# ── Remote provider keys ────────
+# Uncomment and fill for your chosen provider:
 # openai:
-#   api_key: sk-proj-...
-
-# When provider is "openrouter", set your key here:
+#   api_key: sk-...
 # openrouter:
 #   api_key: sk-or-...
-
-# When provider is "opencode_zen", set your key here:
 # opencode_zen:
 #   api_key: oz-...
 
-# ── Optional (sensible defaults) ────────────
-
+# ── Model ───────────────────────
 model: llama3.2
 
+# ── Agent ───────────────────────
 agent:
   default: operate          # operate | diagnose
   max_tool_iterations: 20
   shell: bash
 
+# ── Provider-specific options ──
 ollama:
   base_url: http://127.0.0.1:11434
 
 openai:
+  api_key: ""
+  api_key_env: ""           # optional: read key from env var
   base_url: ""
   organization: ""
   timeout: 120
 
+openrouter:
+  api_key: ""
+
+opencode_zen:
+  api_key: ""
+  base_url: ""
+
+# ── Scope ──────────────────────
 scope:
-  workdir: /home/admin/infra
+  # On Windows, use e.g.: workdir: C:/Users/admin/infra (use forward slashes)
+  workdir: /home/user/shmorby               
   instructions:
     - ./SCOPE.md
     - ./runbooks/*.md
 
+# ── Tools ──────────────────────
+tools:
+  timeout: 120
+  shell:
+    enabled: true
+  sudo:
+    enabled: false
+  aws:
+    enabled: false
+
+# ── Permission ─────────────────
+permission:
+  shell: ask
+  ssh: ask
+  sudo: ask
+  aws: ask
+  interactive: true
+  presets: []
+  rules: []
+
+# ── Model overrides ────────────
+models: {}
+
+# ── TUI ────────────────────────
 tui:
-  enabled: true
   fullscreen: false
   theme: catppuccin-mocha
-  history_size: 100
   glamour:
     enabled: true
+  nav:
+    follow_mode: true
+    scroll_lines_per_tick: 5
+    leader_timeout: 2000
+    history_size: 100
+    keybinds:
+      leader: ctrl+x
+    references: []
   logging:
     enabled: true
     default_level: info
@@ -58,44 +92,29 @@ tui:
     collapse: true
     collapse_threshold: 5
 
+# ── Memory ─────────────────────
 memory:
   enabled: true
-  db_path: ~/.local/share/shmorby/memory.db
+  # On Windows, use e.g.: db_path: C:/Users/you/.local/share/shmorby/memory.db
+  db_path: ~/.local/share/shmorby/memory.db 
   max_entries: 10000
   auto_capture: true
   embedding:
     provider: ollama
     model: nomic-embed-text
+    base_url: ""
 
+# ── Context compression ────────
 context:
-  compression:
-    enabled: true
-    mode: auto
-    threshold: 0.8
-    max_tool_output_tokens: 4096
-    summary_model: ""
-    summary_provider: ""
-    offload_to_memory: true
-    min_messages_to_compress: 6
-    fallback_context_window: 8192
-  token_estimator: heuristic
-
-models: {}
-
-tools:
-  shell:
-    enabled: true
-  sudo:
-    enabled: false
-  aws:
-    enabled: false
-
-permission:
-  shell: ask
-  ssh: ask
-  sudo: ask
-  aws: ask
-  interactive: true
-  session_overrides: true
-  presets: []
-  rules: []
+  token_estimator: heuristic   # heuristic | tiktoken
+  enabled: true
+  mode: auto                   # auto | aggressive | conservative | off
+  threshold: 0.8
+  max_tool_output_tokens: 4096
+  max_tool_output_lines: 0     # 0 = unlimited
+  max_tool_output_bytes: 0     # 0 = unlimited
+  summary_model: ""
+  summary_provider: ""
+  offload_to_memory: true
+  min_messages_to_compress: 6
+  fallback_context_window: 128000

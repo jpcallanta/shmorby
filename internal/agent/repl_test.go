@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"shmorby/internal/config"
+	ctxcomp "shmorby/internal/context"
 	"shmorby/internal/llm"
 	"shmorby/internal/memory"
 	"shmorby/internal/session"
@@ -289,7 +291,9 @@ func TestREPL_ThinkingSpinner_Shown(t *testing.T) {
 
 	p := &fakeStreamProvider{
 		name: "fake",
-		streamFn: func(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamEvent, error) {
+		streamFn: func(
+			ctx context.Context, req llm.ChatRequest,
+		) (<-chan llm.StreamEvent, error) {
 			ch := make(chan llm.StreamEvent)
 			go func() {
 				<-done
@@ -329,7 +333,9 @@ func TestREPL_ToolStart_RendersHeader(t *testing.T) {
 
 	p := &fakeStreamProvider{
 		name: "fake",
-		streamFn: func(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamEvent, error) {
+		streamFn: func(
+			ctx context.Context, req llm.ChatRequest,
+		) (<-chan llm.StreamEvent, error) {
 			ch := make(chan llm.StreamEvent)
 			go func() {
 				ch <- llm.StreamEvent{Type: "text", Delta: "Running"}
@@ -344,7 +350,9 @@ func TestREPL_ToolStart_RendersHeader(t *testing.T) {
 			}()
 			return ch, nil
 		},
-		chatFn: func(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
+		chatFn: func(
+			ctx context.Context, req llm.ChatRequest,
+		) (llm.ChatResponse, error) {
 			return llm.ChatResponse{
 				Message: llm.Message{Role: "assistant", Content: "Done"},
 			}, nil
@@ -383,7 +391,9 @@ func TestREPL_ToolEnd_Success_RendersStatus(t *testing.T) {
 
 	p := &fakeStreamProvider{
 		name: "fake",
-		streamFn: func(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamEvent, error) {
+		streamFn: func(
+			ctx context.Context, req llm.ChatRequest,
+		) (<-chan llm.StreamEvent, error) {
 			ch := make(chan llm.StreamEvent)
 			go func() {
 				ch <- llm.StreamEvent{Type: "text", Delta: "Running"}
@@ -398,7 +408,9 @@ func TestREPL_ToolEnd_Success_RendersStatus(t *testing.T) {
 			}()
 			return ch, nil
 		},
-		chatFn: func(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
+		chatFn: func(
+			ctx context.Context, req llm.ChatRequest,
+		) (llm.ChatResponse, error) {
 			return llm.ChatResponse{
 				Message: llm.Message{Role: "assistant", Content: "Done"},
 			}, nil
@@ -442,7 +454,9 @@ func TestREPL_MultipleTools_EachRendered(t *testing.T) {
 
 	p := &fakeStreamProvider{
 		name: "fake",
-		streamFn: func(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamEvent, error) {
+		streamFn: func(
+			ctx context.Context, req llm.ChatRequest,
+		) (<-chan llm.StreamEvent, error) {
 			ch := make(chan llm.StreamEvent)
 			go func() {
 				mu.Lock()
@@ -616,7 +630,9 @@ func TestREPL_ThinkingSpinner_KilledOnDelta(t *testing.T) {
 
 	p := &fakeStreamProvider{
 		name: "fake",
-		streamFn: func(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamEvent, error) {
+		streamFn: func(
+			ctx context.Context, req llm.ChatRequest,
+		) (<-chan llm.StreamEvent, error) {
 			ch := make(chan llm.StreamEvent)
 			go func() {
 				mu.Lock()
@@ -663,7 +679,9 @@ func TestREPL_StreamingText_DeltasPrinted(t *testing.T) {
 
 	p := &fakeStreamProvider{
 		name: "fake",
-		streamFn: func(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamEvent, error) {
+		streamFn: func(
+			ctx context.Context, req llm.ChatRequest,
+		) (<-chan llm.StreamEvent, error) {
 			ch := make(chan llm.StreamEvent)
 			go func() {
 				ch <- llm.StreamEvent{Type: "text", Delta: "Hello"}
@@ -705,7 +723,9 @@ func TestREPL_ToolEnd_Error_RendersError(t *testing.T) {
 
 	p := &fakeStreamProvider{
 		name: "fake",
-		streamFn: func(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamEvent, error) {
+		streamFn: func(
+			ctx context.Context, req llm.ChatRequest,
+		) (<-chan llm.StreamEvent, error) {
 			ch := make(chan llm.StreamEvent)
 			go func() {
 				mu.Lock()
@@ -768,7 +788,9 @@ func TestREPL_ToolSpinner_Shown(t *testing.T) {
 
 	p := &fakeStreamProvider{
 		name: "fake",
-		streamFn: func(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamEvent, error) {
+		streamFn: func(
+			ctx context.Context, req llm.ChatRequest,
+		) (<-chan llm.StreamEvent, error) {
 			ch := make(chan llm.StreamEvent)
 			go func() {
 				mu.Lock()
@@ -795,7 +817,9 @@ func TestREPL_ToolSpinner_Shown(t *testing.T) {
 	sess := session.New()
 	reg := tools.NewRegistry()
 	// Use sleepy tool so spinner has time to tick.
-	reg.Register(&sleepyTool{name: "shell", result: "ok", sleep: 200 * time.Millisecond})
+	reg.Register(&sleepyTool{
+		name: "shell", result: "ok", sleep: 200 * time.Millisecond,
+	})
 
 	r := &REPL{
 		Provider:     p,
@@ -826,7 +850,9 @@ func TestREPL_ToolSpinner_KilledOnEnd(t *testing.T) {
 
 	p := &fakeStreamProvider{
 		name: "fake",
-		streamFn: func(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamEvent, error) {
+		streamFn: func(
+			ctx context.Context, req llm.ChatRequest,
+		) (<-chan llm.StreamEvent, error) {
 			ch := make(chan llm.StreamEvent)
 			go func() {
 				ch <- llm.StreamEvent{Type: "text", Delta: "Running"}
@@ -841,7 +867,9 @@ func TestREPL_ToolSpinner_KilledOnEnd(t *testing.T) {
 			}()
 			return ch, nil
 		},
-		chatFn: func(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
+		chatFn: func(
+			ctx context.Context, req llm.ChatRequest,
+		) (llm.ChatResponse, error) {
 			return llm.ChatResponse{
 				Message: llm.Message{Role: "assistant", Content: "Result"},
 			}, nil
@@ -908,12 +936,24 @@ func (f *fakeMemStore) Insert(_ memory.MemoryEntry) error { return nil }
 func (f *fakeMemStore) Get(_ string) (memory.MemoryEntry, error) {
 	return memory.MemoryEntry{}, fmt.Errorf("not found")
 }
-func (f *fakeMemStore) Delete(_ string) error                           { return nil }
-func (f *fakeMemStore) List(_ int, _ int) ([]memory.MemoryEntry, error) { return f.entries, nil }
-func (f *fakeMemStore) Count() (int, error)                             { return len(f.entries), nil }
-func (f *fakeMemStore) Close() error                                    { return nil }
-func (f *fakeMemStore) AutoCaptureEnabled() bool                        { return false }
-func (f *fakeMemStore) TagRules() []memory.TagRule                      { return nil }
+func (f *fakeMemStore) Delete(_ string) error {
+	return nil
+}
+func (f *fakeMemStore) List(_ int, _ int) ([]memory.MemoryEntry, error) {
+	return f.entries, nil
+}
+func (f *fakeMemStore) Count() (int, error) {
+	return len(f.entries), nil
+}
+func (f *fakeMemStore) Close() error {
+	return nil
+}
+func (f *fakeMemStore) AutoCaptureEnabled() bool {
+	return false
+}
+func (f *fakeMemStore) TagRules() []memory.TagRule {
+	return nil
+}
 
 // TestREPL_MemoryIndicator_Shown checks memory indicator in output.
 func TestREPL_MemoryIndicator_Shown(t *testing.T) {
@@ -1025,7 +1065,9 @@ func TestREPL_PermissionPrompt_Streaming(t *testing.T) {
 	callCount := 0
 	p := &fakeStreamProvider{
 		name: "fake",
-		streamFn: func(ctx context.Context, req llm.ChatRequest) (<-chan llm.StreamEvent, error) {
+		streamFn: func(
+			ctx context.Context, req llm.ChatRequest,
+		) (<-chan llm.StreamEvent, error) {
 			ch := make(chan llm.StreamEvent)
 			go func() {
 				mu.Lock()
@@ -1082,5 +1124,172 @@ func TestREPL_PermissionPrompt_Streaming(t *testing.T) {
 	}
 	if !strings.Contains(output, "Allow?") {
 		t.Errorf("want 'Allow?' prompt visible in output, got:\n%s", output)
+	}
+}
+
+// Tests that /set with a valid param prints confirmation.
+func TestREPL_SetCommand_Valid(t *testing.T) {
+	var out bytes.Buffer
+	cfg := config.Config{Model: "test-model"}
+	cfg.Agent.Default = "operate"
+	var prov llm.Provider = &fakeProvider{name: "test"}
+	reg := tools.NewRegistry()
+	comp := ctxcomp.NewCompressor(ctxcomp.CompressorConfig{}, nil, nil, nil)
+	sess := session.New()
+	co := NewConfigOverrider(&cfg, &prov, reg, comp, sess)
+
+	r := &REPL{
+		Provider:        prov,
+		Session:         sess,
+		Mode:            "operate",
+		Model:           "test-model",
+		In:              strings.NewReader("/set model gpt-4\n/quit\n"),
+		Out:             &out,
+		ConfigOverrider: co,
+	}
+
+	err := r.Run(t.Context())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	output := out.String()
+	if !strings.Contains(output, "model set to") {
+		t.Errorf("want confirmation in output, got:\n%s", output)
+	}
+}
+
+// Tests that /set with invalid value prints error.
+func TestREPL_SetCommand_Invalid(t *testing.T) {
+	var out bytes.Buffer
+	cfg := config.Config{Model: "test-model"}
+	cfg.Agent.Default = "operate"
+	var prov llm.Provider = &fakeProvider{name: "test"}
+	reg := tools.NewRegistry()
+	comp := ctxcomp.NewCompressor(ctxcomp.CompressorConfig{}, nil, nil, nil)
+	sess := session.New()
+	co := NewConfigOverrider(&cfg, &prov, reg, comp, sess)
+
+	r := &REPL{
+		Provider:        prov,
+		Session:         sess,
+		Mode:            "operate",
+		Model:           "test-model",
+		In:              strings.NewReader("/set permission.shell maybe\n/quit\n"),
+		Out:             &out,
+		ConfigOverrider: co,
+	}
+
+	err := r.Run(t.Context())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	output := out.String()
+	if !strings.Contains(output, "error:") {
+		t.Errorf("want error in output, got:\n%s", output)
+	}
+}
+
+// Tests that /set with missing value shows usage.
+func TestREPL_SetCommand_NoValue(t *testing.T) {
+	var out bytes.Buffer
+	cfg := config.Config{Model: "test-model"}
+	cfg.Agent.Default = "operate"
+	var prov llm.Provider = &fakeProvider{name: "test"}
+	reg := tools.NewRegistry()
+	comp := ctxcomp.NewCompressor(ctxcomp.CompressorConfig{}, nil, nil, nil)
+	sess := session.New()
+	co := NewConfigOverrider(&cfg, &prov, reg, comp, sess)
+
+	r := &REPL{
+		Provider:        prov,
+		Session:         sess,
+		Mode:            "operate",
+		Model:           "test-model",
+		In:              strings.NewReader("/set model\n/quit\n"),
+		Out:             &out,
+		ConfigOverrider: co,
+	}
+
+	err := r.Run(t.Context())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	output := out.String()
+	if !strings.Contains(output, "usage: /set") {
+		t.Errorf("want usage hint in output, got:\n%s", output)
+	}
+}
+
+// Tests that /help output includes CONFIG PARAMETERS section.
+func TestREPL_Help_ShowsParams(t *testing.T) {
+	var out bytes.Buffer
+	cfg := config.Config{Model: "test-model"}
+	cfg.Agent.Default = "operate"
+	var prov llm.Provider = &fakeProvider{name: "test"}
+	reg := tools.NewRegistry()
+	comp := ctxcomp.NewCompressor(ctxcomp.CompressorConfig{}, nil, nil, nil)
+	sess := session.New()
+	co := NewConfigOverrider(&cfg, &prov, reg, comp, sess)
+
+	r := &REPL{
+		Provider:        prov,
+		Session:         sess,
+		Mode:            "operate",
+		Model:           "test-model",
+		In:              strings.NewReader("/help\n/quit\n"),
+		Out:             &out,
+		ConfigOverrider: co,
+	}
+
+	err := r.Run(t.Context())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	output := out.String()
+	if !strings.Contains(output, "CONFIG PARAMETERS") {
+		t.Errorf("want CONFIG PARAMETERS section in help, got:\n%s", output)
+	}
+	if !strings.Contains(output, "model") {
+		t.Errorf("want model param in help, got:\n%s", output)
+	}
+}
+
+// Tests that /set with a quoted multi-word value works.
+func TestREPL_SetCommand_QuotedValue(t *testing.T) {
+	var out bytes.Buffer
+	cfg := config.Config{Model: "test-model"}
+	cfg.Agent.Default = "operate"
+	var prov llm.Provider = &fakeProvider{name: "test"}
+	reg := tools.NewRegistry()
+	comp := ctxcomp.NewCompressor(
+		ctxcomp.CompressorConfig{}, nil, nil, nil,
+	)
+	sess := session.New()
+	co := NewConfigOverrider(&cfg, &prov, reg, comp, sess)
+
+	r := &REPL{
+		Provider: prov,
+		Session:  sess,
+		Mode:     "operate",
+		Model:    "test-model",
+		In: strings.NewReader(
+			`/set agent.shell "/usr/bin/zsh"` + "\n/quit\n",
+		),
+		Out:             &out,
+		ConfigOverrider: co,
+	}
+
+	err := r.Run(t.Context())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	output := out.String()
+	if !strings.Contains(output, "agent.shell") {
+		t.Errorf("want confirmation with agent.shell, got:\n%s", output)
 	}
 }

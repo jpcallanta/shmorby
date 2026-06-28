@@ -91,6 +91,12 @@ func (s *ShellTool) Parameters() json.RawMessage { return shellParams }
 // PermLevel returns the configured permission level.
 func (s *ShellTool) PermLevel() string { return s.perm }
 
+// SetPerm updates the permission level at runtime.
+func (s *ShellTool) SetPerm(level string) { s.perm = level }
+
+// SetShell updates the shell binary path at runtime.
+func (s *ShellTool) SetShell(path string) { s.shell = path }
+
 // Parses args, executes with timeout, truncates output, and redacts
 // secrets. Permission is enforced by the agent loop.
 // Non-zero exits are returned as output text with appended exit code

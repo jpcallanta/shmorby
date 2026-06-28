@@ -1,9 +1,11 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"shmorby/internal/agent"
 	"shmorby/internal/tui/styles"
 )
 
@@ -64,7 +66,7 @@ type helpSection struct {
 }
 
 // helpContent returns the full help content as sections.
-func helpContent(mode string) []helpSection {
+func helpContent(mode string, params []agent.ParamInfo) []helpSection {
 	sections := []helpSection{
 		{
 			title: "AGENT MODES",
@@ -78,6 +80,7 @@ func helpContent(mode string) []helpSection {
 			title: "SLASH COMMANDS",
 			lines: []string{
 				"  /help              Show this screen",
+				"  /set <param> <value>  Override a config parameter",
 				"  /quit              Exit shmorby",
 				"  /reset             Clear conversation history",
 				"  /model <name>      Switch LLM model",
@@ -89,6 +92,8 @@ func helpContent(mode string) []helpSection {
 				"  /tui               Toggle fullscreen mode",
 			},
 		},
+		// Build CONFIG PARAMETERS section dynamically.
+		buildConfigParamsSection(params),
 		{
 			title: "KEYBOARD SHORTCUTS",
 			lines: []string{
@@ -140,9 +145,28 @@ func helpContent(mode string) []helpSection {
 	return sections
 }
 
+// buildConfigParamsSection creates a help section from ParamInfo.
+func buildConfigParamsSection(params []agent.ParamInfo) helpSection {
+	lines := make([]string, 0, len(params)+1)
+	lines = append(lines, "  (key · current value · valid options)")
+	for _, p := range params {
+		line := fmt.Sprintf("  %-28s %-14s · %s",
+			p.Key, p.CurrentValue, p.ValidOptions)
+		lines = append(lines, line)
+	}
+	return helpSection{
+		title: "CONFIG PARAMETERS",
+		lines: lines,
+	}
+}
+
 // renderHelpOverlay renders the full-screen help overlay.
 func (m Model) renderHelpOverlay() string {
-	sections := helpContent(m.mode)
+	var params []agent.ParamInfo
+	if m.configOverrider != nil {
+		params = m.configOverrider.OverrideableParams()
+	}
+	sections := helpContent(m.mode, params)
 	theme := m.theme
 
 	var sb strings.Builder
@@ -155,15 +179,51 @@ func (m Model) renderHelpOverlay() string {
 	for _, s := range sections {
 		sectionStyle := lipgloss.NewStyle().Foreground(styles.Mauve).Bold(true)
 		sb.WriteString(sectionStyle.Render("  "+s.title) + "\n")
-		for _, line := range s.lines {
-			// Split into key and description for styling.
-			if idx := strings.Index(line, "  "); idx >= 0 {
-				key := line[:idx+2]
-				desc := strings.TrimLeft(line[idx+2:], " ")
-				sb.WriteString(theme.PopupItem.Render(key) +
-					theme.PopupDesc.Render(desc) + "\n")
-			} else {
-				sb.WriteString(theme.PopupItem.Render(line) + "\n")
+
+		if s.title == "CONFIG PARAMETERS" {
+			paramKeyStyle := theme.PopupItem.Bold(true)
+			paramValStyle := lipgloss.NewStyle().
+				Foreground(styles.Teal)
+			paramOptStyle := lipgloss.NewStyle().
+				Foreground(styles.Overlay2)
+			for _, line := range s.lines {
+				// Header line: "(key · current value · valid options)"
+				if strings.HasPrefix(strings.TrimSpace(line), "(key") {
+					sb.WriteString(
+						theme.PopupDesc.Render(line) + "\n",
+					)
+					continue
+				}
+				// Format: "  %-28s %-14s · %s"
+				if len(line) >= 48 {
+					keyPart := strings.TrimSpace(line[2:30])
+					valPart := strings.TrimSpace(line[31:45])
+					optPart := strings.TrimSpace(line[48:])
+					sb.WriteString(
+						paramKeyStyle.Render("  "+keyPart) +
+							paramValStyle.Render(" "+valPart) +
+							paramOptStyle.Render(" · "+optPart) +
+							"\n",
+					)
+				} else {
+					sb.WriteString(
+						theme.PopupDesc.Render(line) + "\n",
+					)
+				}
+			}
+		} else {
+			for _, line := range s.lines {
+				// Split into key and description for styling.
+				if idx := strings.Index(line, "  "); idx >= 0 {
+					key := line[:idx+2]
+					desc := strings.TrimLeft(line[idx+2:], " ")
+					sb.WriteString(theme.PopupItem.Render(key) +
+						theme.PopupDesc.Render(desc) + "\n")
+				} else {
+					sb.WriteString(
+						theme.PopupItem.Render(line) + "\n",
+					)
+				}
 			}
 		}
 		sb.WriteString("\n")

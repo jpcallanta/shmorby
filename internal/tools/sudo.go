@@ -75,6 +75,9 @@ func (s *SudoTool) Parameters() json.RawMessage { return sudoParams }
 // PermLevel returns the configured permission level.
 func (s *SudoTool) PermLevel() string { return s.perm }
 
+// SetPerm updates the permission level at runtime.
+func (s *SudoTool) SetPerm(level string) { s.perm = level }
+
 // Parses args, executes sudo -n with timeout, truncates output, and
 // redacts secrets. Permission is enforced by the agent loop.
 func (s *SudoTool) Run(

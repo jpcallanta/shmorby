@@ -46,9 +46,7 @@ func (e *ReferenceEngine) Complete(query string) []RefItem {
 				Value: src.Alias,
 				Kind:  "source",
 			})
-			for _, item := range src.Items {
-				all = append(all, item)
-			}
+			all = append(all, src.Items...)
 		}
 		return all
 	}

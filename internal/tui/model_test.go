@@ -1,12 +1,19 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"shmorby/internal/agent"
+	"shmorby/internal/config"
+	ctxcomp "shmorby/internal/context"
+	"shmorby/internal/llm"
+	"shmorby/internal/session"
+	"shmorby/internal/tools"
 	"shmorby/internal/tui/navigation"
 )
 
@@ -68,13 +75,16 @@ func TestModelUpdate_Enter(t *testing.T) {
 	}
 }
 
-// Tests that Ctrl+C returns a quit message.
+// Tests that Ctrl+C handles copy to clipboard without panic.
 func TestModelUpdate_CtrlC(t *testing.T) {
 	m := NewModel(Config{})
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
-	m = updated.(Model)
-	_ = m
+	// Ctrl+C is intercepted by the "ctrl+c" text copy handler
+	// before it reaches the tea.KeyCtrlC quit handler.
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if cmd != nil {
+		t.Error("expected nil command (copied to clipboard)")
+	}
 }
 
 // Tests input history navigation.
@@ -903,7 +913,9 @@ func TestModelUpdate_PermissionReqMsg_SetsPermission(t *testing.T) {
 		t.Fatal("expected nil permission initially")
 	}
 
-	prompt := NewPermissionPrompt("shell", "reboot", "service restart", "tool permission")
+	prompt := NewPermissionPrompt(
+		"shell", "reboot", "service restart", "tool permission",
+	)
 
 	updated, cmd := m.Update(permissionReqMsg{prompt: prompt})
 	m = updated.(Model)
@@ -1083,4 +1095,178 @@ func TestModelView_PermissionPromptVisible(t *testing.T) {
 	if !strings.Contains(view, "[a] allow all") {
 		t.Error("view should contain allow-all option")
 	}
+}
+
+// Tests that /set command in TUI produces confirmation output.
+func TestTUI_SetCommand_Valid(t *testing.T) {
+	cfg := config.Config{Model: "test-model"}
+	cfg.Agent.Default = "operate"
+	var prov llm.Provider = &fakeProvider{name: "test"}
+	reg := tools.NewRegistry()
+	comp := ctxcomp.NewCompressor(
+		ctxcomp.CompressorConfig{}, nil, nil, nil,
+	)
+	sess := session.New()
+	co := agent.NewConfigOverrider(
+		&cfg, &prov, reg, comp, sess,
+	)
+
+	m := NewModel(Config{
+		ConfigOverrider: co,
+	})
+	m.width = 80
+	m.height = 24
+
+	cmd, done, err := m.handleCommand("/set model gpt-4")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cmd {
+		t.Error("expected command handled")
+	}
+	if done {
+		t.Error("should not quit")
+	}
+	if len(m.output) == 0 {
+		t.Fatal("expected output entries")
+	}
+	last := m.output[len(m.output)-1]
+	if !strings.Contains(last.text, "model") {
+		t.Errorf("want model confirmation, got %q", last.text)
+	}
+}
+
+// Tests that /set with invalid value in TUI shows error.
+func TestTUI_SetCommand_Invalid(t *testing.T) {
+	cfg := config.Config{Model: "test-model"}
+	cfg.Agent.Default = "operate"
+	var prov llm.Provider = &fakeProvider{name: "test"}
+	reg := tools.NewRegistry()
+	comp := ctxcomp.NewCompressor(
+		ctxcomp.CompressorConfig{}, nil, nil, nil,
+	)
+	sess := session.New()
+	co := agent.NewConfigOverrider(
+		&cfg, &prov, reg, comp, sess,
+	)
+
+	m := NewModel(Config{
+		ConfigOverrider: co,
+	})
+	m.width = 80
+	m.height = 24
+
+	cmd, done, err := m.handleCommand("/set bogus.value 1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cmd {
+		t.Error("expected command handled")
+	}
+	if done {
+		t.Error("should not quit")
+	}
+	if len(m.output) == 0 {
+		t.Fatal("expected output entries")
+	}
+	last := m.output[len(m.output)-1]
+	if !strings.Contains(last.text, "unknown config parameter") {
+		t.Errorf("want error about unknown param, got %q", last.text)
+	}
+}
+
+// Tests that /set with only a param and no value shows usage.
+func TestTUI_SetCommand_MissingValue(t *testing.T) {
+	cfg := config.Config{Model: "test-model"}
+	cfg.Agent.Default = "operate"
+	var prov llm.Provider = &fakeProvider{name: "test"}
+	reg := tools.NewRegistry()
+	comp := ctxcomp.NewCompressor(
+		ctxcomp.CompressorConfig{}, nil, nil, nil,
+	)
+	sess := session.New()
+	co := agent.NewConfigOverrider(
+		&cfg, &prov, reg, comp, sess,
+	)
+
+	m := NewModel(Config{
+		ConfigOverrider: co,
+	})
+	m.width = 80
+	m.height = 24
+
+	cmd, done, err := m.handleCommand("/set model")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cmd {
+		t.Error("expected command handled")
+	}
+	if done {
+		t.Error("should not quit")
+	}
+	if len(m.output) == 0 {
+		t.Fatal("expected output entries")
+	}
+	last := m.output[len(m.output)-1]
+	if !strings.Contains(last.text, "usage") {
+		t.Errorf("want usage message, got %q", last.text)
+	}
+}
+
+// Tests that help overlay shows CONFIG PARAMETERS when configOverrider set.
+func TestTUI_HelpOverlay_ShowsParams(t *testing.T) {
+	cfg := config.Config{Model: "test-model"}
+	cfg.Agent.Default = "operate"
+	var prov llm.Provider = &fakeProvider{name: "test"}
+	reg := tools.NewRegistry()
+	comp := ctxcomp.NewCompressor(
+		ctxcomp.CompressorConfig{}, nil, nil, nil,
+	)
+	sess := session.New()
+	co := agent.NewConfigOverrider(
+		&cfg, &prov, reg, comp, sess,
+	)
+
+	m := NewModel(Config{
+		ThemeName:       "catppuccin-mocha",
+		ConfigOverrider: co,
+	})
+	m.width = 80
+	m.height = 24
+	m.showHelp.Show()
+
+	view := m.View()
+
+	if !strings.Contains(view, "CONFIG PARAMETERS") {
+		t.Error("help overlay should contain CONFIG PARAMETERS section")
+	}
+	if !strings.Contains(view, "model") {
+		t.Error("help overlay should contain model param")
+	}
+}
+
+// fakeProvider is a minimal llm.Provider for testing.
+type fakeProvider struct {
+	name string
+}
+
+func (f *fakeProvider) Name() string { return f.name }
+
+func (f *fakeProvider) Chat(
+	_ context.Context, _ llm.ChatRequest,
+) (llm.ChatResponse, error) {
+	return llm.ChatResponse{}, nil
+}
+
+func (f *fakeProvider) ChatStream(
+	_ context.Context, _ llm.ChatRequest,
+) (<-chan llm.StreamEvent, error) {
+	return nil, fmt.Errorf("streaming not supported")
+}
+
+func (f *fakeProvider) ModelInfo(
+	_ context.Context, _ string,
+) (llm.ModelInfo, error) {
+	return llm.ModelInfo{}, nil
 }

@@ -171,7 +171,10 @@ func TestMessages_SafeConcurrentAccess(t *testing.T) {
 	}
 
 	// Should not panic; count may vary due to concurrency.
-	_ = s.Messages()
+	msgs := s.Messages()
+	if len(msgs) == 0 {
+		t.Error("expected at least one message after concurrent writes")
+	}
 }
 
 // TestAppendTool_SetsCorrelationFields verifies AppendTool stores tool

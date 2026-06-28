@@ -243,12 +243,14 @@ func TestCaptureToolResult_RespectsAutoCapture(t *testing.T) {
 	}
 }
 
-// TestCaptureToolResult_NilStore does nothing.
 func TestCaptureToolResult_NilStore(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Errorf("CaptureToolResult with nil store panicked: %v", r)
+		}
+	}()
 	CaptureToolResult(nil, "s1", "shell",
 		"echo", `{}`, "output", 0)
-
-	// Should not panic.
 }
 
 // TestCaptureToolResult_TruncatesLongResults.

@@ -94,50 +94,6 @@ func TestSelectionMode_Disable(t *testing.T) {
 	}
 }
 
-func TestSelectedText(t *testing.T) {
-	vp := New(80, 20)
-	lines := []string{"line a", "line b", "line c"}
-	vp.selectionStart = 0
-	vp.selectionEnd = 2
-	selected := vp.SelectedText(lines)
-	if selected != "line a\nline b" {
-		t.Errorf("want %q, got %q", "line a\nline b", selected)
-	}
-}
-
-func TestSelectedText_Swapped(t *testing.T) {
-	vp := New(80, 20)
-	lines := []string{"a", "b", "c"}
-	vp.selectionStart = 2
-	vp.selectionEnd = 0
-	selected := vp.SelectedText(lines)
-	if selected != "a\nb" {
-		t.Errorf("want %q, got %q", "a\nb", selected)
-	}
-}
-
-func TestSelectedText_OutOfRange(t *testing.T) {
-	vp := New(80, 20)
-	vp.selectionStart = 0
-	vp.selectionEnd = 99
-	lines := []string{"a", "b"}
-	selected := vp.SelectedText(lines)
-	if selected != "a\nb" {
-		t.Errorf("want %q, got %q", "a\nb", selected)
-	}
-}
-
-func TestSelectedText_Empty(t *testing.T) {
-	vp := New(80, 20)
-	vp.selectionStart = 0
-	vp.selectionEnd = 0
-	lines := []string{"a", "b"}
-	selected := vp.SelectedText(lines)
-	if selected != "" {
-		t.Errorf("want empty, got %q", selected)
-	}
-}
-
 func TestGotoTop(t *testing.T) {
 	vp := New(80, 20)
 	vp.SetContent(strings.Repeat("line\n", 100))
@@ -153,19 +109,6 @@ func TestScrollPercent(t *testing.T) {
 	pct := vp.ScrollPercent()
 	if pct < 0 || pct > 1.0 {
 		t.Errorf("scroll percent out of range: %f", pct)
-	}
-}
-
-func TestMoveSelection(t *testing.T) {
-	vp := New(80, 20)
-	vp.selectionEnd = 5
-	vp.MoveSelection(3)
-	if vp.SelectionEnd() != 8 {
-		t.Errorf("want end 8, got %d", vp.SelectionEnd())
-	}
-	vp.MoveSelection(-10)
-	if vp.SelectionEnd() != 0 {
-		t.Errorf("want end 0, got %d", vp.SelectionEnd())
 	}
 }
 

@@ -6,7 +6,8 @@
 - One comment per top-level `if` (what it checks); none for nested `if`
 
 ## Formatting
-- Max 80 columns per line; break into multiline style when needed
+- Max 80 columns per line; break into multiline style when needed, this appiles
+  to any text based file generated or edited (markdown, source files, yaml, etc)
 - Blank line before/after: assignment groups, var decl groups,
   top-level `if` blocks, every `return`
 

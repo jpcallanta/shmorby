@@ -344,28 +344,12 @@ func (s *sqliteStore) AutoCaptureEnabled() bool {
 	return s.config.AutoCapture
 }
 
-func (s *sqliteStore) TagRules() []TagRule {
-	return s.config.Tags
+func (s *sqliteStore) SetAutoCapture(enabled bool) {
+	s.config.AutoCapture = enabled
 }
 
-// Captures a tool execution as a memory entry with auto-tagging.
-func (s *sqliteStore) CaptureToolExecution(
-	sessionID, tool, command, args, result string,
-	exitCode int,
-) error {
-	entry := MemoryEntry{
-		ID:        newUUID(),
-		Timestamp: time.Now(),
-		SessionID: sessionID,
-		Tool:      tool,
-		Command:   command,
-		Args:      args,
-		Result:    truncateResult(result),
-		ExitCode:  exitCode,
-		Tags:      extractTags(command, s.config.Tags),
-	}
-
-	return s.Insert(entry)
+func (s *sqliteStore) TagRules() []TagRule {
+	return s.config.Tags
 }
 
 // MigrateToVectors re-indexes existing SQLite entries into the

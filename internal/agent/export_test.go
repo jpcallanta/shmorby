@@ -7,6 +7,3 @@ func SetTerminalForTest(v bool) func() {
 	stdoutIsTerminal.Store(v)
 	return func() { stdoutIsTerminal.Store(old) }
 }
-
-// ExposeTerminalWidth exposes terminalWidth for testing.
-func ExposeTerminalWidth() int { return terminalWidth() }

@@ -74,7 +74,7 @@ func TestHistory_Newer(t *testing.T) {
 		t.Errorf("want empty, got %q", entry)
 	}
 	// Now truly at end
-	entry, ok = h.Newer()
+	_, ok = h.Newer()
 	if ok {
 		t.Fatal("Newer at absolute end should return false")
 	}
