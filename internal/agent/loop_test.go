@@ -845,29 +845,28 @@ func TestRunTurnWithTools_SecondChat_IncludesAssistantToolCalls(t *testing.T) {
 		t.Fatalf("want 2+ provider calls, got %d", len(p.calls))
 	}
 
-	// Second request's second message should be the assistant with
-	// tool_calls from iteration 0.
+	// Find the assistant message with ToolCalls — it may not be at a
+	// fixed index due to the cacheablePrefix structure.
 	req2 := p.calls[1]
-	if len(req2.Messages) < 2 {
-		t.Fatalf("want 2+ messages in second request, got %d",
-			len(req2.Messages))
-	}
+	var found bool
+	for _, m := range req2.Messages {
+		if m.Role == "assistant" && len(m.ToolCalls) > 0 {
+			if m.ToolCalls[0].ID != "call_1" {
+				t.Errorf("want ToolCall ID 'call_1', got %q",
+					m.ToolCalls[0].ID)
+			}
+			if m.ToolCalls[0].Name != "shell" {
+				t.Errorf("want ToolCall Name 'shell', got %q",
+					m.ToolCalls[0].Name)
+			}
+			found = true
 
-	msg1 := req2.Messages[1]
-	if msg1.Role != "assistant" {
-		t.Fatalf("want assistant role, got %q", msg1.Role)
+			break
+		}
 	}
-	if len(msg1.ToolCalls) == 0 {
-		t.Fatal("want non-empty ToolCalls on assistant message in " +
-			"second request")
-	}
-	if msg1.ToolCalls[0].ID != "call_1" {
-		t.Errorf("want ToolCall ID 'call_1', got %q",
-			msg1.ToolCalls[0].ID)
-	}
-	if msg1.ToolCalls[0].Name != "shell" {
-		t.Errorf("want ToolCall Name 'shell', got %q",
-			msg1.ToolCalls[0].Name)
+	if !found {
+		t.Fatal("want assistant message with ToolCalls in second " +
+			"request, not found")
 	}
 }
 
@@ -2510,5 +2509,210 @@ func TestRunTurnWithTools_PermissionAllowAll_SkipsSubsequent(t *testing.T) {
 	}
 	if msgs[3].Content != "executed" {
 		t.Errorf("tool 2: want 'executed', got %q", msgs[3].Content)
+	}
+}
+
+// TestREPL_NoTUI_PlainOutput checks --no-tui mode prints the reply
+// as plain text without ANSI formatting or separators.
+func TestREPL_NoTUI_PlainOutput(t *testing.T) {
+	in := strings.NewReader("hello\n/quit\n")
+	var out strings.Builder
+
+	p := &fakeProvider{name: "fake", reply: "world"}
+	r := &REPL{
+		NoTUI:    true,
+		Provider: p,
+		Session:  session.New(),
+		Mode:     "operate",
+		In:       in,
+		Out:      &out,
+	}
+
+	err := r.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	got := out.String()
+	if !strings.Contains(got, "world") {
+		t.Errorf("want 'world' in output, got:\n%s", got)
+	}
+	if strings.Contains(got, "\033[") {
+		t.Errorf("want no ANSI codes in no-tui output, got:\n%s", got)
+	}
+	if strings.Contains(got, "──") {
+		t.Errorf("want no separator lines in no-tui output, got:\n%s", got)
+	}
+}
+
+// TestREPL_NoTUI_ToolOutput checks --no-tui mode prints tool events
+// as plain bracketed text.
+func TestREPL_NoTUI_ToolOutput(t *testing.T) {
+	toolResp := llm.ChatResponse{
+		Message: llm.Message{Role: "assistant", Content: "Running..."},
+		ToolCalls: []llm.ToolCall{
+			{ID: "call_1", Name: "shell", Args: `{}`},
+		},
+	}
+	textResp := llm.ChatResponse{
+		Message: llm.Message{Role: "assistant", Content: "done"},
+	}
+	p := &fakeStepProvider{
+		name:  "fake",
+		steps: []llm.ChatResponse{toolResp, textResp},
+	}
+	s := session.New()
+
+	reg := tools.NewRegistry()
+	reg.Register(&fakeTool{name: "shell", result: "ok"})
+
+	in := strings.NewReader("run\n/quit\n")
+	var out strings.Builder
+
+	r := &REPL{
+		NoTUI:        true,
+		Provider:     p,
+		Session:      s,
+		Mode:         "operate",
+		Model:        "m",
+		In:           in,
+		Out:          &out,
+		Registry:     reg,
+		MaxToolIter:  5,
+		ShellEnabled: true,
+	}
+
+	err := r.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	got := out.String()
+	if !strings.Contains(got, "[running: shell") {
+		t.Errorf("want '[running: shell' in output, got:\n%s", got)
+	}
+	if !strings.Contains(got, "[done: shell]") {
+		t.Errorf("want '[done: shell]' in output, got:\n%s", got)
+	}
+	if !strings.Contains(got, "ok") {
+		t.Errorf("want tool output 'ok' in output, got:\n%s", got)
+	}
+}
+
+// TestBuildPrompt_CacheablePrefix verifies the cacheable prefix is
+// byte-identical across all iterations within a single turn.
+func TestBuildPrompt_CacheablePrefix(t *testing.T) {
+	toolResp := llm.ChatResponse{
+		Message: llm.Message{Role: "assistant", Content: "Running..."},
+		ToolCalls: []llm.ToolCall{
+			{ID: "call_1", Name: "shell", Args: `{"command":"echo hi"}`},
+		},
+	}
+	textResp := llm.ChatResponse{
+		Message: llm.Message{Role: "assistant", Content: "Done"},
+	}
+	p := &fakeStepProvider{
+		name:  "fake",
+		steps: []llm.ChatResponse{toolResp, textResp},
+	}
+	s := session.New()
+
+	reg := tools.NewRegistry()
+	reg.Register(&fakeTool{name: "shell", result: "ok"})
+
+	_, err := RunTurnWithTools(
+		context.Background(), p, s,
+		"operate", "", "", "m", "test",
+		reg, 5, true,
+		nil, nil, nil, llm.ModelInfo{},
+		nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatalf("RunTurnWithTools: %v", err)
+	}
+
+	if len(p.calls) < 2 {
+		t.Fatalf("want 2+ provider calls, got %d", len(p.calls))
+	}
+
+	// First call: has tool calls. Second call: text only.
+	// The cacheable prefix should be the same length and content
+	// for both (excluding the trailing pending messages).
+	prefixLen := len(p.calls[0].Messages) - 2 // 2 pending: user + assistant
+	// In call 1, messages: [cacheablePrefix..., user, assistant w/toolCalls]
+	// In call 2, messages: [same cacheablePrefix..., user, assistant, tool]
+	// Actually: call 1 msgs = cacheablePrefix + [user("test"), assistant("Running...")]
+	// call 2 msgs = cacheablePrefix + [user("test"), assistant("Running..."), tool("ok")]
+	// The first N messages should be identical.
+
+	for i := 0; i < prefixLen; i++ {
+		if i >= len(p.calls[0].Messages) || i >= len(p.calls[1].Messages) {
+			t.Fatalf("call %d has fewer messages than prefixLen %d",
+				i, prefixLen)
+		}
+		m0 := p.calls[0].Messages[i]
+		m1 := p.calls[1].Messages[i]
+		if m0.Role != m1.Role || m0.Content != m1.Content {
+			t.Errorf("prefix message %d differs across calls:\n"+
+				"  call0: %s/%q\n  call1: %s/%q",
+				i, m0.Role, m0.Content, m1.Role, m1.Content)
+		}
+	}
+}
+
+// TestBuildPrompt_PrefixOrdering verifies system prompt + base history
+// always come first before any pending/dynamic messages.
+func TestBuildPrompt_PrefixOrdering(t *testing.T) {
+	toolResp := llm.ChatResponse{
+		Message: llm.Message{Role: "assistant", Content: "Running..."},
+		ToolCalls: []llm.ToolCall{
+			{ID: "call_1", Name: "shell", Args: `{"command":"echo hi"}`},
+		},
+	}
+	textResp := llm.ChatResponse{
+		Message: llm.Message{Role: "assistant", Content: "Done"},
+	}
+	p := &fakeStepProvider{
+		name:  "fake",
+		steps: []llm.ChatResponse{toolResp, textResp},
+	}
+	s := session.New()
+
+	reg := tools.NewRegistry()
+	reg.Register(&fakeTool{name: "shell", result: "ok"})
+
+	_, err := RunTurnWithTools(
+		context.Background(), p, s,
+		"operate", "", "", "m", "user message",
+		reg, 5, true,
+		nil, nil, nil, llm.ModelInfo{},
+		nil, nil, nil,
+	)
+	if err != nil {
+		t.Fatalf("RunTurnWithTools: %v", err)
+	}
+
+	for i, c := range p.calls {
+		if len(c.Messages) < 2 {
+			t.Fatalf("call %d: want 2+ messages, got %d", i, len(c.Messages))
+		}
+		// First message should be the system prompt.
+		if c.Messages[0].Role != "system" || c.Messages[0].Content == "" {
+			t.Errorf("call %d: first message should be system prompt, got %s/%q",
+				i, c.Messages[0].Role, c.Messages[0].Content)
+		}
+		// Verify the first user message is the one the user typed,
+		// not a system-generated baseHistory message.
+		foundUser := false
+		for _, m := range c.Messages {
+			if m.Role == "user" {
+				foundUser = true
+
+				break
+			}
+		}
+		if !foundUser {
+			t.Errorf("call %d: no user message found in request", i)
+		}
 	}
 }

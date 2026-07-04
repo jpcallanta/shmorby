@@ -34,7 +34,6 @@ func overriderForTest(t *testing.T) *ConfigOverrider {
 	cfg.Memory.AutoCapture = true
 	cfg.Context.Mode = "auto"
 	cfg.Context.Enabled = true
-	cfg.Context.TokenEstimator = "heuristic"
 	cfg.Context.Threshold = 0.8
 	cfg.Context.OffloadToMemory = true
 
@@ -369,31 +368,6 @@ func TestSet_RequiresRestart_Error(t *testing.T) {
 	}
 }
 
-// TestSet_TokenEstimator_Valid verifies context.token_estimator update.
-func TestSet_TokenEstimator_Valid(t *testing.T) {
-	co := overriderForTest(t)
-	msg, err := co.Set("context.token_estimator", "tiktoken")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if co.cfg.Context.TokenEstimator != "tiktoken" {
-		t.Errorf("TokenEstimator = %q, want %q",
-			co.cfg.Context.TokenEstimator, "tiktoken")
-	}
-	if msg == "" {
-		t.Error("expected non-empty confirmation")
-	}
-}
-
-// TestSet_TokenEstimator_Invalid verifies invalid estimator is rejected.
-func TestSet_TokenEstimator_Invalid(t *testing.T) {
-	co := overriderForTest(t)
-	_, err := co.Set("context.token_estimator", "gpt3")
-	if err == nil {
-		t.Fatal("expected error for invalid token estimator")
-	}
-}
-
 // TestSet_OffloadToMemory_Bool verifies offload_to_memory toggle.
 func TestSet_OffloadToMemory_Bool(t *testing.T) {
 	co := overriderForTest(t)
@@ -522,15 +496,15 @@ func TestSet_RequiresRestart_Nested(t *testing.T) {
 	}
 }
 
-// TestOverrideableParams_ReturnsAll verifies all 26 params are returned.
+// TestOverrideableParams_ReturnsAll verifies all params are returned.
 func TestOverrideableParams_ReturnsAll(t *testing.T) {
 	co := overriderForTest(t)
 	params := co.OverrideableParams()
 	if len(params) == 0 {
 		t.Fatal("OverrideableParams returned empty slice")
 	}
-	if len(params) < 25 {
-		t.Errorf("expected at least 25 params, got %d", len(params))
+	if len(params) < 24 {
+		t.Errorf("expected at least 24 params, got %d", len(params))
 	}
 	// Verify each param has key, current, and options.
 	for _, p := range params {

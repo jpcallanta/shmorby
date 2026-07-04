@@ -3,22 +3,13 @@
 # Default: ollama (no API key needed for local LLM)
 provider: ollama
 
-# ── Remote provider keys ────────
-# Uncomment and fill for your chosen provider:
-# openai:
-#   api_key: sk-...
-# openrouter:
-#   api_key: sk-or-...
-# opencode_zen:
-#   api_key: oz-...
-
 # ── Model ───────────────────────
 model: llama3.2
 
 # ── Agent ───────────────────────
 agent:
   default: operate          # operate | diagnose
-  max_tool_iterations: 20
+  max_tool_iterations: 25
   shell: bash
 
 # ── Provider-specific options ──
@@ -49,7 +40,7 @@ scope:
 
 # ── Tools ──────────────────────
 tools:
-  timeout: 120
+  timeout: 1800
   shell:
     enabled: true
   sudo:
@@ -105,8 +96,9 @@ memory:
     base_url: ""
 
 # ── Context compression ────────
+# Message ordering is optimized for OpenAI automatic prefix
+# caching — no config needed.
 context:
-  token_estimator: heuristic   # heuristic | tiktoken
   enabled: true
   mode: auto                   # auto | aggressive | conservative | off
   threshold: 0.8

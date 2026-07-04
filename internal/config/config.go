@@ -105,9 +105,8 @@ type ModelOverride struct {
 	TokenizerModel  string `yaml:"tokenizer_model"`
 }
 
-// ContextConfig holds compression and token estimation settings.
+// ContextConfig holds compression settings.
 type ContextConfig struct {
-	TokenEstimator        string  `yaml:"token_estimator"`
 	Enabled               bool    `yaml:"enabled"`
 	Mode                  string  `yaml:"mode"`
 	Threshold             float64 `yaml:"threshold"`
@@ -189,7 +188,6 @@ func defaultConfig() Config {
 	cfg.Memory.AutoCapture = true
 	cfg.Memory.DBPath = filepath.Join(xdg.UserDataDir(), "memory.db")
 
-	cfg.Context.TokenEstimator = "heuristic"
 	cfg.Context.Enabled = true
 	cfg.Context.Mode = "auto"
 	cfg.Context.Threshold = 0.8
@@ -233,20 +231,6 @@ func ValidatePermissionLevel(field, level string) error {
 		return fmt.Errorf(
 			"%s: invalid level %q (want allow|ask|deny)",
 			field, level,
-		)
-	}
-}
-
-// ValidateTokenEstimator returns an error if token estimator is not
-// heuristic or tiktoken.
-func ValidateTokenEstimator(estimator string) error {
-	switch estimator {
-	case "heuristic", "tiktoken":
-		return nil
-	default:
-		return fmt.Errorf(
-			"invalid token_estimator %q (want heuristic|tiktoken)",
-			estimator,
 		)
 	}
 }

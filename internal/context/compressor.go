@@ -3,6 +3,7 @@ package context
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"shmorby/internal/llm"
@@ -26,7 +27,7 @@ type CompressorConfig struct {
 type Compressor struct {
 	config           CompressorConfig
 	store            memory.Store
-	estimator        Estimator
+	estimator        *TiktokenEstimator
 	summaryFunc      func(ctx context.Context, text string) (string, error)
 	CompressionCount int
 	OffloadCount     int
@@ -35,7 +36,7 @@ type Compressor struct {
 func NewCompressor(
 	config CompressorConfig,
 	store memory.Store,
-	estimator Estimator,
+	estimator *TiktokenEstimator,
 	summaryFunc func(ctx context.Context, text string) (string, error),
 ) *Compressor {
 	if config.Threshold == 0 {
@@ -50,8 +51,9 @@ func NewCompressor(
 	if config.FallbackContextWindow == 0 {
 		config.FallbackContextWindow = 8192
 	}
+
 	if estimator == nil {
-		estimator = &HeuristicEstimator{}
+		estimator = NewEstimator("gpt-4")
 	}
 
 	return &Compressor{
@@ -149,23 +151,26 @@ func (c *Compressor) compressToolOutput(output string) string {
 func (c *Compressor) summarizeMessages(
 	ctx context.Context, messages []session.Message,
 ) (string, error) {
-	if c.summaryFunc == nil {
-		return summarizeByTruncation(messages)
+	if c.summaryFunc != nil {
+		var buf strings.Builder
+		for _, m := range messages {
+			fmt.Fprintf(&buf, "[%s] %s\n", m.Role, m.Content)
+		}
+
+		prompt := fmt.Sprintf(
+			"Summarize this conversation segment, keeping key decisions "+
+				"and results:\n\n%s", buf.String())
+
+		return c.summaryFunc(ctx, prompt)
 	}
 
-	var buf strings.Builder
-	for _, m := range messages {
-		fmt.Fprintf(&buf, "[%s] %s\n", m.Role, m.Content)
-	}
-
-	prompt := fmt.Sprintf(
-		"Summarize this conversation segment, keeping key decisions "+
-			"and results:\n\n%s", buf.String())
-
-	return c.summaryFunc(ctx, prompt)
+	return summarizeExtractive(messages)
 }
 
-func summarizeByTruncation(messages []session.Message) (string, error) {
+// Collapses messages into [compressed] format: keeps first 300 chars
+// per message, preserving the tail when it contains important signal
+// (exit codes, errors, status markers).
+func summarizeExtractive(messages []session.Message) (string, error) {
 	if len(messages) == 0 {
 		return "", nil
 	}
@@ -177,10 +182,44 @@ func summarizeByTruncation(messages []session.Message) (string, error) {
 		if i > 0 {
 			b.WriteString("; ")
 		}
-		b.WriteString(fmt.Sprintf("%s: %s", m.Role, truncate(m.Content, 200)))
+		b.WriteString(m.Role)
+		b.WriteString(": ")
+		content := m.Content
+		if len(content) > 300 {
+			head := content[:300]
+			tail := content[len(content)-100:]
+			if hasImportantSuffix(tail) {
+				b.WriteString(head)
+				b.WriteString("... (")
+				b.WriteString(strconv.Itoa(len(content) - 300))
+				b.WriteString(" chars) ...")
+				b.WriteString(tail)
+			} else {
+				b.WriteString(head)
+				b.WriteString("...")
+			}
+		} else {
+			b.WriteString(content)
+		}
 	}
 
 	return b.String(), nil
+}
+
+// Returns true if the tail of a message contains patterns worth
+// preserving beyond the head-truncation boundary (errors, exit codes,
+// status markers).
+func hasImportantSuffix(s string) bool {
+	lower := strings.ToLower(s)
+	patterns := []string{"error:", "exit code", "✓", "✗", "result:",
+		"success", "failed", "warning:", "status:"}
+	for _, p := range patterns {
+		if strings.Contains(lower, p) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func truncate(s string, maxLen int) string {

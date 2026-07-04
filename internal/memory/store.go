@@ -56,8 +56,13 @@ CREATE TABLE IF NOT EXISTS memory (
     result TEXT,
     exit_code INTEGER,
     summary TEXT,
-    tags TEXT
+    tags TEXT,
+    accessed INTEGER NOT NULL DEFAULT 0
 );
+`
+
+const migrationAddAccessed = `
+    ALTER TABLE memory ADD COLUMN accessed INTEGER NOT NULL DEFAULT 0;
 `
 
 // Creates or opens the store at the configured path.
@@ -78,6 +83,10 @@ func NewStore(cfg Config, embedder Embedder) (Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("create schema: %w", err)
 	}
+
+	// Run migration to add accessed column if missing (ignore error
+	// if column already exists).
+	_, _ = db.Exec(migrationAddAccessed)
 
 	s := &sqliteStore{
 		db:       db,
@@ -227,11 +236,21 @@ func (s *sqliteStore) evictIfNeededLocked() error {
 		excess = 1
 	}
 
+	// Prefer to evict entries older than 7 days first, then low-access
+	// entries, then oldest as fallback.
+	sevenDaysAgo := time.Now().Add(-7 * 24 * time.Hour).UTC().Format(
+		time.RFC3339,
+	)
 	result, err := s.db.Exec(`
 		DELETE FROM memory WHERE rowid IN (
-			SELECT rowid FROM memory ORDER BY timestamp ASC LIMIT ?
+			SELECT rowid FROM memory
+			ORDER BY
+				CASE WHEN timestamp < ? THEN 0 ELSE 1 END,
+				accessed ASC,
+				timestamp ASC
+			LIMIT ?
 		)
-	`, excess)
+	`, sevenDaysAgo, excess)
 	if err != nil {
 		return fmt.Errorf("evict entries: %w", err)
 	}
@@ -242,6 +261,14 @@ func (s *sqliteStore) evictIfNeededLocked() error {
 	return nil
 }
 
+// IncrementAccess bumps the access counter for an entry. Best-effort:
+// errors are swallowed.
+func (s *sqliteStore) IncrementAccess(id string) {
+	_, _ = s.db.Exec(
+		"UPDATE memory SET accessed = accessed + 1 WHERE id = ?", id,
+	)
+}
+
 func (s *sqliteStore) Get(id string) (MemoryEntry, error) {
 	row := s.db.QueryRow(`
 		SELECT id, timestamp, session_id, tool, command, args, result,
@@ -249,7 +276,12 @@ func (s *sqliteStore) Get(id string) (MemoryEntry, error) {
 		FROM memory WHERE id = ?
 	`, id)
 
-	return s.scanEntry(row)
+	entry, err := s.scanEntry(row)
+	if err == nil {
+		s.IncrementAccess(id)
+	}
+
+	return entry, err
 }
 
 func (s *sqliteStore) Delete(id string) error {

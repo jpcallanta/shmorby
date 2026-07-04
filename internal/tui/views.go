@@ -90,11 +90,11 @@ func (m Model) renderStatus() string {
 // renderLogSection renders expanded log entries.
 func (m Model) renderLogSection() string {
 	var b strings.Builder
-	width := m.width
-	if width <= 0 {
-		width = 60
+	vpWidth := m.viewport.Width()
+	if vpWidth <= 0 {
+		vpWidth = 60
 	}
-	b.WriteString(logSep(width, fmt.Sprintf(
+	b.WriteString(logSep(vpWidth, fmt.Sprintf(
 		"log (%d)", len(m.logEntries),
 	)))
 
@@ -106,16 +106,20 @@ func (m Model) renderLogSection() string {
 		b.WriteString(m.renderLogEntry(entry))
 	}
 
-	b.WriteString(logEndSep(width, "log"))
+	b.WriteString(logEndSep(vpWidth, "log"))
 	return b.String()
 }
 
 // renderLogEntry formats a single log entry with level icon and color.
 func (m Model) renderLogEntry(entry LogEntry) string {
+	vpWidth := m.viewport.Width()
+	if vpWidth < 1 {
+		vpWidth = 1
+	}
 	icon, style := logLevelStyle(entry.Level)
 	ts := entry.Time.Format("15:04:05")
 	text := fmt.Sprintf("  %s %s — %s", icon, ts, entry.Message)
-	return style.Render(text) + "\n"
+	return style.Width(vpWidth).Render(text) + "\n"
 }
 
 // logLevelStyle returns the icon and lipgloss style for a log level.
@@ -135,27 +139,27 @@ func logLevelStyle(l slog.Level) (string, lipgloss.Style) {
 // renderThinkingBlock renders the expanded thinking section.
 func (m Model) renderThinkingBlock() string {
 	var b strings.Builder
-	width := m.width
-	if width <= 0 {
-		width = 60
+	vpWidth := m.viewport.Width()
+	if vpWidth <= 0 {
+		vpWidth = 60
 	}
 	elapsed := m.thinking.Elapsed().Round(time.Second)
 	tokens := m.thinking.Tokens()
-	b.WriteString(logSep(width, fmt.Sprintf(
+	b.WriteString(logSep(vpWidth, fmt.Sprintf(
 		"💭 thinking (%s · %d tokens)", elapsed, tokens,
 	)))
 	for _, line := range m.thinking.Lines() {
-		b.WriteString(m.theme.AgentReply.Render("  "+line) + "\n")
+		b.WriteString(m.theme.AgentReply.Width(vpWidth).Render("  "+line) + "\n")
 	}
-	b.WriteString(logEndSep(width, "thinking"))
+	b.WriteString(logEndSep(vpWidth, "thinking"))
 	return b.String()
 }
 
 // renderThinkingPreview renders a single-line thinking preview.
 func (m Model) renderThinkingPreview() string {
-	width := m.width
-	if width <= 0 {
-		width = 60
+	vpWidth := m.viewport.Width()
+	if vpWidth <= 0 {
+		vpWidth = 60
 	}
 	elapsed := m.thinking.Elapsed().Round(time.Second)
 	tokens := m.thinking.Tokens()
@@ -167,7 +171,7 @@ func (m Model) renderThinkingPreview() string {
 			preview = preview[:40] + "…"
 		}
 	}
-	return logSep(width, fmt.Sprintf(
+	return logSep(vpWidth, fmt.Sprintf(
 		"💭 thinking (%s · %d tokens) %s",
 		elapsed, tokens, preview,
 	))

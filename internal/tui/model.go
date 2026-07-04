@@ -88,6 +88,11 @@ type agentEventMsg struct {
 	event agent.AgentEvent
 }
 
+// subagentEventMsg notifies the TUI about subagent lifecycle events.
+type subagentEventMsg struct {
+	event tools.SubagentEvent
+}
+
 // outputEntry is a single line in the scrollable output pane.
 type outputEntry struct {
 	kind string // "user", "agent", "tool", "error"
@@ -205,6 +210,9 @@ type Model struct {
 	// Agent event channel (tool status from agent loop).
 	agentEventChan chan agent.AgentEvent
 
+	// Subagent event channel (child session lifecycle from orchestrator).
+	subagentEventChan chan tools.SubagentEvent
+
 	// Phase 21: help overlay
 	showHelp *HelpModel
 
@@ -214,6 +222,12 @@ type Model struct {
 
 	// Phase 32: runtime config overrides.
 	configOverrider *agent.ConfigOverrider
+
+	// Phase 34: child subagent sessions keyed by session ID.
+	childSessions map[string]*session.Session
+
+	// Backup of parent output entries for tab switching.
+	parentOutput []outputEntry
 }
 
 // CtxStats holds compression and token usage statistics for display.
@@ -1487,6 +1501,9 @@ type Config struct {
 
 	// Phase 32: runtime config overrides.
 	ConfigOverrider *agent.ConfigOverrider
+
+	// Phase 34: subagent lifecycle events channel (nil = no TUI tracking).
+	SubagentEventChan chan tools.SubagentEvent
 }
 
 // NewModel creates a Bubbletea model ready to run.
@@ -1543,6 +1560,8 @@ func NewModel(cfg Config) Model {
 	lk.RegisterBinding("b", keybinds.ActionSidebar)
 	lk.RegisterBinding("h", keybinds.ActionTips)
 	lk.RegisterBinding("y", keybinds.ActionCopy)
+	lk.RegisterBinding("j", keybinds.ActionSessionChild)
+	lk.RegisterBinding("k", keybinds.ActionSessionParent)
 
 	h := history.New(histSize)
 	cp := palette.New()
@@ -1646,10 +1665,12 @@ func NewModel(cfg Config) Model {
 		logCollapseThreshold: logThreshold,
 		logHandler:           cfg.LogHandler,
 		agentEventChan:       make(chan agent.AgentEvent, 20),
+		subagentEventChan:    cfg.SubagentEventChan,
 		permissionReqChan:    make(chan PermissionPrompt),
 		toolRules:            cfg.ToolRules,
 		showHelp:             NewHelpModel(),
 		configOverrider:      cfg.ConfigOverrider,
+		childSessions:        make(map[string]*session.Session),
 	}
 }
 
@@ -1662,6 +1683,9 @@ func (m Model) Init() tea.Cmd {
 		cmds = append(cmds, m.listenLogChan())
 	}
 	cmds = append(cmds, m.listenAgentEvents())
+	if m.subagentEventChan != nil {
+		cmds = append(cmds, m.listenSubagentEvents())
+	}
 	cmds = append(cmds, m.listenPermissionReqs())
 	return tea.Batch(cmds...)
 }
@@ -1687,6 +1711,18 @@ func (m Model) listenAgentEvents() tea.Cmd {
 			return nil
 		}
 		return agentEventMsg{event: ev}
+	}
+}
+
+// listenSubagentEvents reads from the subagent event channel and
+// returns events as bubbletea messages. Returns a follow-up command.
+func (m Model) listenSubagentEvents() tea.Cmd {
+	return func() tea.Msg {
+		ev, ok := <-m.subagentEventChan
+		if !ok {
+			return nil
+		}
+		return subagentEventMsg{event: ev}
 	}
 }
 
@@ -1844,6 +1880,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case permissionReqMsg:
 		m.permission = &msg.prompt
 		return m, m.listenPermissionReqs()
+
+	case subagentEventMsg:
+		ev := msg.event
+		switch ev.Status {
+		case "":
+			if sess, ok := ev.Session.(*session.Session); ok && sess != nil {
+				m.childSessions[ev.SessionID] = sess
+			}
+			m.tabBar.AddTab(sessiontab.Tab{
+				ID: ev.SessionID, Label: ev.Label,
+				Active: false, Spinning: true,
+				IsSubagent: true, ParentID: ev.ParentID,
+			})
+		default:
+			m.tabBar.UpdateTabStatus(ev.SessionID, ev.Status)
+		}
+
+		return m, m.listenSubagentEvents()
 
 	case agentEventMsg:
 		switch msg.event.Type {
@@ -2137,12 +2191,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.showCompletion && len(m.complMatches) > 0 {
-			sel := m.complMatches[m.complIdx]
-			m.textarea.SetValue(sel.Name + " ")
-			m.textarea.SetCursor(len(sel.Name) + 1)
-			m.showCompletion = false
-			m.complMatches = nil
-			return m, nil
+			text := strings.TrimSpace(m.textarea.Value())
+			if text == m.complMatches[m.complIdx].Name {
+				m.showCompletion = false
+				m.complMatches = nil
+			} else {
+				sel := m.complMatches[m.complIdx]
+				m.textarea.SetValue(sel.Name + " ")
+				m.textarea.SetCursor(len(sel.Name) + 1)
+				m.showCompletion = false
+				m.complMatches = nil
+				return m, nil
+			}
 		}
 		text := strings.TrimSpace(m.textarea.Value())
 		if text == "" {
@@ -2154,6 +2214,24 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.complMatches = nil
 		return m, func() tea.Msg { return submitMsg{text: text} }
 
+	case tea.KeyRight:
+		if m.textarea.Value() == "" && m.tabBar.Visible() {
+			m.nextChildTab()
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.textarea, cmd = m.textarea.Update(msg)
+		return m, cmd
+
+	case tea.KeyLeft:
+		if m.textarea.Value() == "" && m.tabBar.Visible() {
+			m.prevChildTab()
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.textarea, cmd = m.textarea.Update(msg)
+		return m, cmd
+
 	case tea.KeyUp:
 		if m.showCompletion && len(m.complMatches) > 0 {
 			m.complIdx--
@@ -2162,7 +2240,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		if m.textarea.Value() != "" || m.inputHistory.Size() == 0 {
+		if m.textarea.Value() == "" && m.tabBar.Visible() {
+			m.parentTab()
+			return m, nil
+		}
+		if (m.textarea.Value() != "" && m.inputHistory.AtNewest()) || m.inputHistory.Size() == 0 {
 			var cmd tea.Cmd
 			m.textarea, cmd = m.textarea.Update(msg)
 			return m, cmd
@@ -2388,6 +2470,15 @@ func (m Model) dispatchLeaderAction(
 		return m, func() tea.Msg {
 			return submitMsg{text: "/scope"}
 		}
+	case keybinds.ActionSessionChild:
+		m.nextChildTab()
+		return m, nil
+	case keybinds.ActionSessionParent:
+		m.parentTab()
+		return m, nil
+	case keybinds.ActionChild:
+		m.firstChildTab()
+		return m, nil
 	default:
 		return m, nil
 	}
@@ -2473,6 +2564,10 @@ func (m Model) handleSubmit(text string) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Clear completed subagent tabs from previous turn before
+	// starting a new one.
+	m.clearSubagentTabs()
+
 	// Prepend resolved reference content as context for the agent.
 	if refContent != "" {
 		text = refContent + "\n\n" + text
@@ -2511,6 +2606,8 @@ func (m *Model) handleCommand(line string) (bool, bool, error) {
 
 	case "/reset":
 		m.session.Reset()
+		m.output = m.output[:0]
+		m.syncViewport()
 		return true, false, nil
 
 	case "/model":
@@ -2857,6 +2954,10 @@ func (m Model) handleSettle() (tea.Model, tea.Cmd) {
 // syncViewport updates the viewport with current output.
 func (m *Model) syncViewport() {
 	m.ensureLayout()
+	vpWidth := m.viewport.Width()
+	if vpWidth < 1 {
+		vpWidth = 1
+	}
 	var sb strings.Builder
 	for i, entry := range m.output {
 		selected := m.selectionMode &&
@@ -2866,15 +2967,15 @@ func (m *Model) syncViewport() {
 		var rendered string
 		switch entry.kind {
 		case "user":
-			rendered = m.theme.UserInput.Render("❯ " + text)
+			rendered = m.theme.UserInput.Width(vpWidth).Render("❯ " + text)
 		case "agent":
-			rendered = m.theme.AgentReply.Render(text)
+			rendered = m.theme.AgentReply.Width(vpWidth).Render(text)
 		case "tool":
-			rendered = m.theme.ToolRunning.Render("⟳ " + text)
+			rendered = m.theme.ToolRunning.Width(vpWidth).Render("⟳ " + text)
 		case "error":
-			rendered = m.theme.Error.Render("✗ " + text)
+			rendered = m.theme.Error.Width(vpWidth).Render("✗ " + text)
 		case "memory":
-			rendered = m.theme.StatusKey.Render("  " + text)
+			rendered = m.theme.StatusKey.Width(vpWidth).Render("  " + text)
 		}
 		if selected {
 			rendered = m.theme.Selection.Render(rendered)
@@ -3237,19 +3338,141 @@ func (m Model) renderTabBar() string {
 	tabs := m.tabBar.Tabs()
 	var b strings.Builder
 	for i, t := range tabs {
+		label := t.Label
+		switch {
+		case t.Status == "ok":
+			label += " ✓"
+		case t.Status == "error":
+			label += " ✗"
+		}
 		if i == m.tabBar.ActiveIndex() {
 			b.WriteString(m.theme.TabActive.Render(
-				" " + t.Label + " ",
+				" " + label + " ",
 			))
 		} else {
 			style := m.theme.TabInactive
 			if t.Spinning {
 				style = m.theme.TabSpin
 			}
-			b.WriteString(style.Render(" " + t.Label + " "))
+			b.WriteString(style.Render(" " + label + " "))
 		}
 	}
 	return b.String()
+}
+
+// switchSessionTab switches to the tab with the given ID, swapping
+// viewport content between parent and child sessions.
+func (m *Model) switchSessionTab(id string) {
+	activeID := m.tabBar.ActiveID()
+	if activeID == id {
+		return
+	}
+	// Save parent output when leaving parent tab.
+	isParent := true
+	for _, t := range m.tabBar.Tabs() {
+		if t.ID == activeID && t.IsSubagent {
+			isParent = false
+			break
+		}
+	}
+	if activeID == m.session.ID() || isParent {
+		m.parentOutput = m.output
+	}
+	m.tabBar.Activate(id)
+	m.loadTabOutput(id)
+}
+
+// loadTabOutput renders the active tab's session messages into m.output.
+func (m *Model) loadTabOutput(id string) {
+	if id == m.session.ID() && m.parentOutput != nil {
+		m.output = m.parentOutput
+		m.syncViewport()
+		return
+	}
+	sess, ok := m.childSessions[id]
+	if !ok {
+		return
+	}
+	msgs := sess.Messages()
+	out := make([]outputEntry, 0, len(msgs))
+	for _, msg := range msgs {
+		kind := "agent"
+		switch msg.Role {
+		case "user":
+			kind = "user"
+		case "tool":
+			kind = "tool"
+		}
+		text := msg.Content
+		if text == "" && len(msg.ToolCalls) > 0 {
+			for _, tc := range msg.ToolCalls {
+				if text != "" {
+					text += "\n"
+				}
+				text += fmt.Sprintf("tool: %s(%s)", tc.Name, tc.Args)
+			}
+		}
+		for _, line := range strings.Split(text, "\n") {
+			out = append(out, outputEntry{kind: kind, text: line})
+		}
+	}
+	m.output = out
+	m.syncViewport()
+}
+
+// nextChildTab activates the next tab to the right.
+func (m *Model) nextChildTab() {
+	tabs := m.tabBar.Tabs()
+	active := m.tabBar.ActiveIndex()
+	if active < len(tabs)-1 {
+		m.switchSessionTab(tabs[active+1].ID)
+	}
+}
+
+// prevChildTab activates the previous tab to the left.
+func (m *Model) prevChildTab() {
+	tabs := m.tabBar.Tabs()
+	active := m.tabBar.ActiveIndex()
+	if active > 0 {
+		m.switchSessionTab(tabs[active-1].ID)
+	}
+}
+
+// parentTab activates the first non-subagent (parent) tab.
+func (m *Model) parentTab() {
+	for _, t := range m.tabBar.Tabs() {
+		if !t.IsSubagent {
+			m.switchSessionTab(t.ID)
+			return
+		}
+	}
+}
+
+// firstChildTab activates the first subagent (child) tab.
+func (m *Model) firstChildTab() {
+	for _, t := range m.tabBar.Tabs() {
+		if t.IsSubagent {
+			m.switchSessionTab(t.ID)
+			return
+		}
+	}
+}
+
+// clearSubagentTabs removes all subagent tabs and resets to parent
+// session output.
+func (m *Model) clearSubagentTabs() {
+	for _, t := range m.tabBar.Tabs() {
+		if t.IsSubagent {
+			m.tabBar.RemoveTab(t.ID)
+			delete(m.childSessions, t.ID)
+		}
+	}
+	m.childSessions = make(map[string]*session.Session)
+	if m.parentOutput != nil {
+		m.output = m.parentOutput
+		m.parentOutput = nil
+		m.syncViewport()
+	}
 }
 
 // resolveReferences finds @-refs in text, resolves them, and returns the

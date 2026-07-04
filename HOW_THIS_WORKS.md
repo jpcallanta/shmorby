@@ -155,16 +155,26 @@ entries and inject as context. Reduces calls for repeated tasks.
 Evaluated before every LLM call:
 
 1. Get model's `ContextWindow` (API-fetched at startup)
-2. Estimate token count (tiktoken or heuristic)
+2. Estimate token count (tiktoken, model-resolved — always tokenizer-based)
 3. If over `ContextWindow × threshold` (default 80%): compress
 
 **Two-phase compression**:
 - Phase 1: Summarize large tool outputs (keep exit code, first/last N
   lines, errors)
 - Phase 2: Collapse old message pairs into `[compressed]` summaries
+  using an extractive default summarizer that preserves important tail
+  content (exit codes, error messages, status markers).
 
 **Offloading**: before summarization, full messages are saved to SQLite
-memory for RAG retrieval.
+memory for RAG retrieval. Offloaded messages use a sliding-window summary
+(head 250 + tail 250 chars) instead of head-only truncation.
+
+**Memory dedup**: memory context is deduplicated against session content
+before injection to avoid overlap with `[compressed]` entries.
+
+**Prompt caching**: messages are ordered with stable prefix first (system
+prompt + memory context + tool schemas) for OpenAI automatic prompt
+caching. The prefix is byte-identical across all iterations within a turn.
 
 **Modes**: `auto`, `aggressive` (60%), `conservative` (90%), `off`.
 `auto` adapts to model size.
@@ -228,6 +238,7 @@ propagates changes to live components without restarting.
 | `permission.presets` | string list | `/set permission.presets destructive,service` |
 | `memory.auto_capture` | bool | `/set memory.auto_capture false` |
 | `context.mode` | string | `/set context.mode aggressive` |
+| `context.enabled` | bool | `/set context.enabled false` |
 | `log.level` | string | `/set log.level debug` |
 | `tui.fullscreen` | bool | `/set tui.fullscreen true` |
 | `tui.theme` | string | `/set tui.theme catppuccin-latte` |

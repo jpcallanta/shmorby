@@ -27,3 +27,11 @@ Follow the runbook mindset: observe → plan → execute → verify.
 ## Tools
 
 You have access to shell, ssh, sudo (when enabled), and aws tools. Use them like a human sysadmin would.
+
+## Parallelism
+
+When you have 2+ independent tasks (e.g., check disk, memory, and CPU
+on the same host), use the `task()` tool with `parallel: true` to run
+them concurrently. Each subtask gets its own agent session with full
+tool access. Use sequential tool calls when tasks are dependent or a
+single tool call suffices.

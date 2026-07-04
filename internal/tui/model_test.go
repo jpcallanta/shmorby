@@ -8,6 +8,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"shmorby/internal/agent"
 	"shmorby/internal/config"
 	ctxcomp "shmorby/internal/context"
@@ -124,6 +125,60 @@ func TestModelUpdate_History(t *testing.T) {
 	}
 }
 
+func TestModelUpdate_HistoryCycle(t *testing.T) {
+	m := NewModel(Config{})
+	m.inputHistory.Add("first")
+	m.inputHistory.Add("second")
+	m.inputHistory.Add("third")
+
+	// Up twice without clearing should go third → second.
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = updated.(Model)
+	if m.textarea.Value() != "third" {
+		t.Fatalf("want %q, got %q", "third", m.textarea.Value())
+	}
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = updated.(Model)
+	if m.textarea.Value() != "second" {
+		t.Fatalf("want %q, got %q", "second", m.textarea.Value())
+	}
+
+	// Third Up should go to "first".
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = updated.(Model)
+	if m.textarea.Value() != "first" {
+		t.Fatalf("want %q, got %q", "first", m.textarea.Value())
+	}
+
+	// Fourth Up should stay at oldest.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	m = updated.(Model)
+	if m.textarea.Value() != "first" {
+		t.Fatalf("want oldest %q, got %q", "first", m.textarea.Value())
+	}
+
+	// Down should go back to "second".
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	if m.textarea.Value() != "second" {
+		t.Fatalf("want %q, got %q", "second", m.textarea.Value())
+	}
+
+	// Down again → "third".
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	if m.textarea.Value() != "third" {
+		t.Fatalf("want %q, got %q", "third", m.textarea.Value())
+	}
+
+	// Down at end should blank the input.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = updated.(Model)
+	if m.textarea.Value() != "" {
+		t.Errorf("want empty, got %q", m.textarea.Value())
+	}
+}
+
 // Tests that agentReplyMsg appends to output and stops spinner.
 func TestModelUpdate_AgentReply(t *testing.T) {
 	m := NewModel(Config{})
@@ -191,6 +246,120 @@ func TestModelView_OutputEntries(t *testing.T) {
 	view := m.View()
 	if !strings.Contains(view, "test input") {
 		t.Error("view missing user input")
+	}
+}
+
+// Tests that syncViewport word-wraps long text at viewport width for all entry kinds.
+func TestSyncViewport_WrapsAllEntryKinds(t *testing.T) {
+	vpWidth := 30
+	longText := "this is a very long line that absolutely must wrap at word boundaries"
+	for _, kind := range []string{"user", "agent", "tool", "error", "memory"} {
+		m := NewModel(Config{ThemeName: "minimal"})
+		m.width = vpWidth
+		m.height = 24
+		m.viewport.SetWidth(vpWidth)
+		m.output = append(m.output, outputEntry{
+			kind: kind,
+			text: longText,
+		})
+		m.syncViewport()
+
+		plain := StripANSI(m.View())
+		for _, line := range strings.Split(plain, "\n") {
+			if !strings.Contains(line, "agent:") &&
+				!strings.Contains(line, "mode:") &&
+				!strings.Contains(line, "new content") {
+				if w := lipgloss.Width(line); w > vpWidth {
+					t.Errorf("[%s] line width %d exceeds viewport width %d: %q", kind, w, vpWidth, line)
+				}
+			}
+		}
+	}
+}
+
+// Tests that syncViewport does not modify output entry text.
+func TestSyncViewport_PreservesEntryText(t *testing.T) {
+	m := NewModel(Config{ThemeName: "minimal"})
+	m.width = 40
+	m.height = 24
+	m.viewport.SetWidth(40)
+	original := "some entry text"
+	m.output = append(m.output, outputEntry{kind: "user", text: original})
+	m.syncViewport()
+
+	if m.output[0].text != original {
+		t.Errorf("syncViewport modified entry text: got %q, want %q", m.output[0].text, original)
+	}
+}
+
+// Tests that short text is not wrapped to multiple lines.
+func TestSyncViewport_ShortTextNotWrapped(t *testing.T) {
+	m := NewModel(Config{ThemeName: "minimal"})
+	m.width = 80
+	m.height = 24
+	m.viewport.SetWidth(80)
+	shortText := "short"
+	m.output = append(m.output, outputEntry{kind: "agent", text: shortText})
+	m.syncViewport()
+
+	plain := StripANSI(m.View())
+	if !strings.Contains(plain, shortText) {
+		t.Error("short text not found in viewport")
+	}
+}
+
+// Tests that text with embedded ANSI codes (from glamour) is wrapped correctly.
+func TestSyncViewport_WrapsANSIText(t *testing.T) {
+	m := NewModel(Config{ThemeName: "minimal"})
+	vpWidth := 30
+	m.width = vpWidth
+	m.height = 24
+	m.viewport.SetWidth(vpWidth)
+	ansiText := "\x1b[32mgreen long text that should wrap at the viewport width properly\x1b[0m"
+	m.output = append(m.output, outputEntry{kind: "agent", text: ansiText})
+	m.syncViewport()
+
+	plain := StripANSI(m.View())
+	for _, line := range strings.Split(plain, "\n") {
+		if !strings.Contains(line, "agent:") &&
+			!strings.Contains(line, "mode:") &&
+			!strings.Contains(line, "new content") {
+			if w := lipgloss.Width(line); w > vpWidth {
+				t.Errorf("line width %d exceeds viewport width %d: %q", w, vpWidth, line)
+			}
+		}
+	}
+}
+
+// Tests that selection highlighting still works with wrapped content.
+func TestSyncViewport_SelectionWithWrappedText(t *testing.T) {
+	m := NewModel(Config{ThemeName: "minimal"})
+	vpWidth := 30
+	m.width = vpWidth
+	m.height = 24
+	m.viewport.SetWidth(vpWidth)
+	m.output = append(m.output, outputEntry{kind: "user", text: "short"})
+	m.output = append(m.output, outputEntry{kind: "agent", text: "a long text that should wrap at the viewport width correctly"})
+	m.selectionMode = true
+	m.selectionStart = 0
+	m.selectionEnd = 1
+	m.syncViewport()
+
+	plain := StripANSI(m.View())
+	if !strings.Contains(plain, "short") {
+		t.Error("selected entry text missing from viewport")
+	}
+	if !strings.Contains(plain, "long text") {
+		t.Error("wrapped entry text missing from viewport")
+	}
+	for _, line := range strings.Split(plain, "\n") {
+		if !strings.Contains(line, "agent:") &&
+			!strings.Contains(line, "mode:") &&
+			!strings.Contains(line, "new content") {
+			if w := lipgloss.Width(line); w > vpWidth {
+				t.Errorf("line width %d exceeds viewport width %d: %q", w, vpWidth, line)
+			}
+		}
 	}
 }
 

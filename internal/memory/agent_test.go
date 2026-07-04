@@ -280,3 +280,116 @@ func TestCaptureToolResult_TruncatesLongResults(t *testing.T) {
 			len(entries[0].Result), MaxResultLen)
 	}
 }
+
+func TestFormatMemoryContext_WithSummary(t *testing.T) {
+	entries := []MemoryEntry{
+		{
+			Timestamp: time.Date(2026, 6, 10, 0, 0, 0, 0, time.UTC),
+			Tool:      "shell",
+			Command:   "systemctl restart nginx",
+			ExitCode:  0,
+			Summary:   "nginx restarted successfully",
+		},
+	}
+
+	got := FormatMemoryContext(entries)
+
+	if !strings.Contains(got, "nginx restarted successfully") {
+		t.Errorf("want summary in output, got %q", got)
+	}
+}
+
+func TestFormatMemoryContext_SummaryEmpty(t *testing.T) {
+	entries := []MemoryEntry{
+		{
+			Timestamp: time.Date(2026, 6, 10, 0, 0, 0, 0, time.UTC),
+			Tool:      "shell",
+			Command:   "ls -la",
+			ExitCode:  0,
+		},
+	}
+
+	got := FormatMemoryContext(entries)
+
+	if strings.Count(got, "\n  ") > 0 {
+		t.Errorf("want no summary line, got %q", got)
+	}
+}
+
+func TestDedupMemoryContext_Basic(t *testing.T) {
+	entries := []MemoryEntry{
+		{Tool: "shell", Command: "systemctl restart nginx"},
+	}
+	sessionMessages := []session.Message{
+		{Role: "assistant",
+			Content: "[compressed] shell systemctl restart nginx"},
+	}
+
+	result := DedupMemoryContext(entries, sessionMessages)
+
+	if len(result) != 0 {
+		t.Errorf("want 0 entries (deduped), got %d", len(result))
+	}
+}
+
+func TestDedupMemoryContext_NotInSession(t *testing.T) {
+	entries := []MemoryEntry{
+		{Tool: "shell", Command: "apt update"},
+	}
+	sessionMessages := []session.Message{
+		{Role: "assistant",
+			Content: "[compressed] shell systemctl restart nginx"},
+	}
+
+	result := DedupMemoryContext(entries, sessionMessages)
+
+	if len(result) != 1 {
+		t.Errorf("want 1 entry kept, got %d", len(result))
+	}
+}
+
+func TestDedupMemoryContext_EmptyEntries(t *testing.T) {
+	result := DedupMemoryContext(nil,
+		[]session.Message{{Role: "user", Content: "hello"}})
+	if result != nil {
+		t.Errorf("want nil, got %v", result)
+	}
+
+	result = DedupMemoryContext([]MemoryEntry{}, nil)
+	if len(result) != 0 {
+		t.Errorf("want empty, got %d", len(result))
+	}
+}
+
+func TestDedupMemoryContext_PartialMatch(t *testing.T) {
+	entries := []MemoryEntry{
+		{Tool: "shell", Command: "echo hello"},
+	}
+	sessionMessages := []session.Message{
+		{Role: "assistant",
+			Content: "ran shell echo hello and got hello back"},
+	}
+
+	result := DedupMemoryContext(entries, sessionMessages)
+
+	if len(result) != 0 {
+		t.Errorf("want 0 entries (substring match), got %d", len(result))
+	}
+}
+
+func TestDedupMemoryContext_CompressedMatch(t *testing.T) {
+	entries := []MemoryEntry{
+		{Tool: "shell", Command: "systemctl restart nginx"},
+	}
+	sessionMessages := []session.Message{
+		{Role: "assistant",
+			Content: "[compressed] shell systemctl restart nginx success"},
+	}
+
+	result := DedupMemoryContext(entries, sessionMessages)
+
+	if len(result) != 0 {
+		t.Errorf("want 0 entries (matched compressed text), got %d",
+			len(result))
+	}
+}

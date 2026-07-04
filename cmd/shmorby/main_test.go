@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -119,6 +122,98 @@ func TestRootCmd_ValidateFlag_ValidConfig_ExitsZero(t *testing.T) {
 	err := rootCmd.Execute()
 	if err != nil {
 		t.Fatalf("expected no error for valid config, got: %v", err)
+	}
+}
+
+// Checks that tilde-prefixed workdir is expanded to the user's home
+// directory instead of creating a literal ~/ directory in CWD.
+func TestRootCmd_WorkdirTildeExpansion(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	// Pre-create log dir so xdg.UserDataDir()/shmorby.log doesn't fail.
+	logDir := filepath.Join(home, ".local", "share", "shmorby")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		t.Fatalf("mkdir log dir: %v", err)
+	}
+
+	cfgDir := t.TempDir()
+	cfgPath := filepath.Join(cfgDir, "shmorby.yaml")
+	workdirRel := "test-shmorby-expand-" + t.Name()
+	cfgContent := fmt.Sprintf(
+		"memory:\n  enabled: false\nscope:\n  workdir: \"~/%s\"\n",
+		workdirRel)
+	if err := os.WriteFile(cfgPath, []byte(cfgContent), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	expectedDir := filepath.Join(home, workdirRel)
+	literalDir := filepath.Join("~", workdirRel)
+
+	// Redirect stdin to /dev/null so REPL exits immediately.
+	oldStdin := os.Stdin
+	devNull, err := os.Open("/dev/null")
+	if err != nil {
+		t.Fatalf("open /dev/null: %v", err)
+	}
+	os.Stdin = devNull
+
+	// Save all flag vars that might be polluted by previous tests.
+	saveValidate := validateFlag
+	saveNoTUI := noTuiFlag
+	saveProvider := providerFlag
+	saveModel := modelFlag
+	saveConfig := configFile
+	saveAgent := agentFlag
+	saveScope := scopeFile
+	saveSysPrompt := systemPrompt
+	saveLogLevel := logLevelFlag
+	t.Cleanup(func() {
+		os.Stdin = oldStdin
+		devNull.Close()
+		validateFlag = saveValidate
+		noTuiFlag = saveNoTUI
+		providerFlag = saveProvider
+		modelFlag = saveModel
+		configFile = saveConfig
+		agentFlag = saveAgent
+		scopeFile = saveScope
+		systemPrompt = saveSysPrompt
+		logLevelFlag = saveLogLevel
+		os.RemoveAll(expectedDir)
+	})
+
+	// Reset flag vars to defaults (they may have been set by previous
+	// tests and cobra does NOT reset them between runs).
+	validateFlag = false
+	noTuiFlag = false
+	providerFlag = ""
+	modelFlag = ""
+	configFile = ""
+	agentFlag = ""
+	scopeFile = ""
+	systemPrompt = ""
+	logLevelFlag = "info"
+
+	rootCmd.InitDefaultHelpFlag()
+	rootCmd.Flags().Set("help", "false")
+	rootCmd.SetArgs([]string{
+		"--provider", "ollama", "--config", cfgPath, "--no-tui",
+	})
+
+	err = rootCmd.Execute()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// The literal ~/ directory should NOT exist.
+	if _, err := os.Stat(literalDir); !os.IsNotExist(err) {
+		t.Errorf("literal tilde dir %s should not exist", literalDir)
+	}
+
+	// The expanded home-relative directory should exist.
+	if _, err := os.Stat(expectedDir); os.IsNotExist(err) {
+		t.Errorf("expanded workdir %s should exist", expectedDir)
 	}
 }
 

@@ -383,7 +383,7 @@ func newModelWithContext(t *testing.T) *Model {
 			OffloadToMemory:       true,
 		},
 		store,
-		&ctxcomp.HeuristicEstimator{},
+		ctxcomp.NewEstimator("gpt-4"),
 		nil,
 	)
 

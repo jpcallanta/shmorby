@@ -375,15 +375,6 @@ func (co *ConfigOverrider) Set(param, value string) (string, error) {
 		co.cfg.Context.Enabled = b
 		return fmt.Sprintf("context.enabled set to %v", b), nil
 
-	case "context.token_estimator":
-		if err := config.ValidateTokenEstimator(value); err != nil {
-			return "", err
-		}
-		co.cfg.Context.TokenEstimator = value
-		return fmt.Sprintf(
-			"context.token_estimator set to %q", value,
-		), nil
-
 	case "context.threshold":
 		f, err := strconv.ParseFloat(value, 64)
 		if err != nil {
@@ -628,11 +619,6 @@ func (co *ConfigOverrider) OverrideableParams() []ParamInfo {
 			Key:          "context.enabled",
 			CurrentValue: boolVal(co.cfg.Context.Enabled),
 			ValidOptions: "true|false", Type: "bool",
-		},
-		{
-			Key:          "context.token_estimator",
-			CurrentValue: strVal(co.cfg.Context.TokenEstimator),
-			ValidOptions: "heuristic|tiktoken", Type: "string",
 		},
 		{
 			Key: "context.threshold",

@@ -747,15 +747,6 @@ func TestValidateConfig_InvalidPermission_ReturnsError(t *testing.T) {
 	}
 }
 
-// TestValidateConfig_InvalidTokenEstimator_ReturnsError checks token estimator validation.
-func TestValidateConfig_InvalidTokenEstimator_ReturnsError(t *testing.T) {
-	cfg := defaultConfig()
-	cfg.Context.TokenEstimator = "gpt3"
-	if err := validateConfig(cfg); err == nil {
-		t.Fatal("expected error for invalid token_estimator, got nil")
-	}
-}
-
 // TestValidateConfig_InvalidContextMode_ReturnsError checks context mode validation.
 func TestValidateConfig_InvalidContextMode_ReturnsError(t *testing.T) {
 	cfg := defaultConfig()

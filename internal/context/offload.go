@@ -30,7 +30,7 @@ func (c *Compressor) Offload(
 			Timestamp: time.Now(),
 			SessionID: sessionID,
 			Tool:      "offload",
-			Summary:   fmt.Sprintf("[%s] %s", msg.Role, truncate(msg.Content, 500)),
+			Summary:   fmt.Sprintf("[%s] %s", msg.Role, offloadSummary(msg.Content)),
 			Tags:      []string{"offloaded", string(msg.Role)},
 		}
 
@@ -40,6 +40,28 @@ func (c *Compressor) Offload(
 	}
 
 	return nil
+}
+
+// Returns a compact summary preserving head (250 chars) and tail
+// (250 chars) of long content. Returns as-is when ≤ 500 chars.
+func offloadSummary(content string) string {
+	const maxLen = 500
+	if len(content) <= maxLen {
+		return content
+	}
+
+	head := 250
+	tail := 250
+	if head+tail >= len(content) {
+		head = len(content) / 2
+		tail = len(content) - head
+	}
+
+	omitted := len(content) - head - tail
+
+	return content[:head] + fmt.Sprintf(
+		"... (%d chars omitted) ...", omitted,
+	) + content[len(content)-tail:]
 }
 
 func newUUID() (string, error) {

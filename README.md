@@ -151,7 +151,7 @@ See [`examples/shmorby.yaml`](examples/shmorby.yaml) for:
 | Section | Purpose |
 |---------|---------|
 | `memory` | SQLite-backed memory with vector search, embedding (ollama/openai), auto-capture, tag rules |
-| `context` | Token estimation and compression (heuristic/tiktoken), threshold-based, offload-to-memory |
+| `context` | Token estimation (tiktoken, model-resolved) and compression, threshold-based, offload-to-memory |
 | `models` | Per-model context window and max output token overrides |
 | `tui` | Theme, glamour markdown rendering, logging panel, navigation keybinds |
 

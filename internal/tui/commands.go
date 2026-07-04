@@ -452,7 +452,7 @@ func (m *Model) contextModelCmd() {
 		toolSupport = "no"
 	}
 
-	tokenizerInfo := "heuristic (no tiktoken mapping)"
+	tokenizerInfo := "tiktoken (model-resolved)"
 
 	var b strings.Builder
 	b.WriteString("Model info:\n")

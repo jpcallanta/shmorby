@@ -237,9 +237,6 @@ func validateConfig(cfg Config) error {
 	); err != nil {
 		return err
 	}
-	if err := ValidateTokenEstimator(cfg.Context.TokenEstimator); err != nil {
-		return fmt.Errorf("context.token_estimator: %w", err)
-	}
 	if err := ValidateContextMode(cfg.Context.Mode); err != nil {
 		return fmt.Errorf("context.mode: %w", err)
 	}

@@ -3,16 +3,21 @@ package agent
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
+
+	"golang.org/x/term"
 
 	ctxcomp "shmorby/internal/context"
 	"shmorby/internal/llm"
 	"shmorby/internal/memory"
 	"shmorby/internal/session"
 	"shmorby/internal/tools"
+	"shmorby/internal/tui/history"
 )
 
 // Holds scope metadata for the /scope command.
@@ -43,6 +48,9 @@ type REPL struct {
 	ToolPermFunc ToolPermissionFunc
 	ToolRules    map[string]*tools.RuleSet
 	scanner      *bufio.Scanner
+	history      *history.History
+	oldState     *term.State
+	inRaw        bool
 
 	// Streaming support for non-TUI mode.
 	streamEnabled       bool
@@ -51,6 +59,9 @@ type REPL struct {
 	toolDone            chan struct{}
 	toolSpinnerDone     chan struct{}
 
+	// NoTUI disables raw mode, spinners, and ANSI formatting.
+	NoTUI bool
+
 	// Phase 32: runtime config overrides.
 	ConfigOverrider *ConfigOverrider
 }
@@ -58,23 +69,58 @@ type REPL struct {
 // Starts the interactive REPL loop reading from In and writing to Out.
 // Runs until /quit, ctx cancellation, or EOF.
 func (r *REPL) Run(ctx context.Context) error {
-	r.streamEnabled = stdoutIsTerminal.Load()
+	r.streamEnabled = !r.NoTUI && stdoutIsTerminal.Load()
+
 	fmt.Fprint(r.Out, Prompt())
+	r.history = history.New(1000)
 
-	r.scanner = bufio.NewScanner(r.In)
+	// Only enter raw mode for the interactive TUI-like REPL.
+	if !r.NoTUI {
+		fi, err := os.Stdin.Stat()
+		if err == nil && fi.Mode()&os.ModeCharDevice != 0 {
+			oldState, termErr := term.MakeRaw(int(os.Stdin.Fd()))
+			if termErr == nil {
+				r.oldState = oldState
+				r.inRaw = true
+			}
+		}
+	}
 
-	for r.scanner.Scan() {
-		// Check for context cancellation.
+	defer func() {
+		r.killSpinners()
+		if r.inRaw {
+			term.Restore(int(os.Stdin.Fd()), r.oldState)
+		}
+		if r.streamEnabled {
+			fmt.Fprint(r.Out, ansiReset)
+		}
+	}()
+
+	if !r.inRaw {
+		r.scanner = bufio.NewScanner(r.In)
+	}
+
+	for {
 		if err := ctx.Err(); err != nil {
+
 			return err
 		}
 
-		line := strings.TrimSpace(r.scanner.Text())
+		line, err := r.readLine()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				fmt.Fprintln(r.Out)
 
-		// Check for empty input.
+				return nil
+			}
+
+			return err
+		}
+
+		line = strings.TrimSpace(line)
+
 		if line == "" {
 			fmt.Fprint(r.Out, Prompt())
-
 			continue
 		}
 
@@ -94,14 +140,202 @@ func (r *REPL) Run(ctx context.Context) error {
 
 		// Normal chat turn.
 		var reply string
-		var err error
 
-		// Start thinking spinner for all paths.
-		if r.streamEnabled {
-			r.thinkingDone = make(chan struct{})
-			r.thinkingSpinnerDone = make(chan struct{})
-			td := r.thinkingDone
-			tsd := r.thinkingSpinnerDone
+		if r.NoTUI {
+			// Plain output: no spinners, no streaming, no ANSI.
+			reply, err = r.runPlainTurn(ctx, line)
+		} else {
+			reply, err = r.runStreamTurn(ctx, line)
+		}
+
+		if err != nil {
+			fmt.Fprintf(r.Out, "Error: %v\n", err)
+			fmt.Fprint(r.Out, Prompt())
+
+			continue
+		}
+
+		if r.NoTUI {
+			fmt.Fprintln(r.Out, reply)
+		} else {
+			// Render separator + markdown reply + footer separator.
+			fmt.Fprintln(r.Out)
+			fmt.Fprintln(r.Out, Separator("agent"))
+			fmt.Fprintln(r.Out, FormatMarkdown(reply))
+			fmt.Fprintln(r.Out, Separator(""))
+
+			// Show memory retrieval indicator when memory was used.
+			if r.Retriever != nil && r.Retriever.Stats().LastCount > 0 {
+				fmt.Fprintln(r.Out, MemoryIndicator(r.Retriever.Stats().LastCount))
+			}
+		}
+
+		fmt.Fprint(r.Out, Prompt())
+	}
+}
+
+// killSpinners stops all running spinner goroutines and waits for them
+// to drain so no ANSI sequences are written after terminal restore.
+func (r *REPL) killSpinners() {
+	if r.thinkingDone != nil {
+		close(r.thinkingDone)
+		r.thinkingDone = nil
+	}
+	if r.thinkingSpinnerDone != nil {
+		<-r.thinkingSpinnerDone
+		r.thinkingSpinnerDone = nil
+	}
+	if r.toolDone != nil {
+		close(r.toolDone)
+		r.toolDone = nil
+	}
+	if r.toolSpinnerDone != nil {
+		<-r.toolSpinnerDone
+		r.toolSpinnerDone = nil
+	}
+	if r.streamEnabled {
+		fmt.Fprint(r.Out, ClearLine())
+	}
+}
+
+// runPlainTurn executes a turn with plain text output — no spinners,
+// no streaming, no ANSI. Used in --no-tui mode.
+// In terminal mode a dot progress indicator replaces the spinner.
+func (r *REPL) runPlainTurn(ctx context.Context, line string) (string, error) {
+	var onEvent func(AgentEvent)
+	dotDone := make(chan struct{})
+	defer func() {
+		select {
+		case <-dotDone:
+		default:
+			close(dotDone)
+		}
+	}()
+
+	if stdoutIsTerminal.Load() {
+		go func() {
+			ticker := time.NewTicker(500 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					fmt.Fprint(r.Out, ".")
+				case <-dotDone:
+					return
+				}
+			}
+		}()
+
+		onEvent = func(ev AgentEvent) {
+			switch ev.Type {
+			case "tool-start":
+				select {
+				case <-dotDone:
+				default:
+					close(dotDone)
+				}
+			case "tool-end":
+				if ev.Output != "" {
+					fmt.Fprintln(r.Out)
+					fmt.Fprintln(r.Out, ev.Output)
+				}
+			}
+		}
+	} else {
+		onEvent = func(ev AgentEvent) {
+			switch ev.Type {
+			case "tool-start":
+				fmt.Fprintf(r.Out, "[running: %s %s]\n", ev.Name, ev.Info)
+			case "tool-end":
+				fmt.Fprintf(r.Out, "[done: %s]\n", ev.Name)
+				if ev.Output != "" {
+					fmt.Fprintln(r.Out, ev.Output)
+				}
+			}
+		}
+	}
+
+	permFunc := r.ToolPermFunc
+	if permFunc == nil && r.ToolRules != nil {
+		permFunc = r.toolPermissionFunc
+	}
+
+	var reply string
+	var err error
+	if r.Registry != nil {
+		reply, err = RunTurnWithTools(
+			ctx, r.Provider, r.Session,
+			r.Mode, r.Scope, r.Override, r.Model, line,
+			r.Registry, r.MaxToolIter, r.ShellEnabled,
+			r.Store, r.Retriever,
+			r.Compressor, r.ModelInfo,
+			onEvent, permFunc, r.ToolRules,
+		)
+	} else {
+		reply, err = RunTurn(
+			ctx, r.Provider, r.Session,
+			r.Mode, r.Scope, r.Override, r.Model, line,
+			r.Store, r.Retriever,
+			r.Compressor, r.ModelInfo,
+		)
+	}
+
+	if stdoutIsTerminal.Load() {
+		select {
+		case <-dotDone:
+		default:
+			close(dotDone)
+		}
+		fmt.Fprintln(r.Out)
+	}
+
+	return reply, err
+}
+
+// runStreamTurn executes a turn with streaming output, spinners,
+// and ANSI formatting. Used in interactive terminal mode.
+func (r *REPL) runStreamTurn(
+	ctx context.Context, line string,
+) (string, error) {
+	var reply string
+	var err error
+
+	// Start thinking spinner.
+	r.thinkingDone = make(chan struct{})
+	r.thinkingSpinnerDone = make(chan struct{})
+	td := r.thinkingDone
+	tsd := r.thinkingSpinnerDone
+	go func(done chan struct{}, sd chan struct{}) {
+		defer close(sd)
+		ticker := time.NewTicker(100 * time.Millisecond)
+		start := time.Now()
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				fmt.Fprint(r.Out, ThinkingLine(time.Since(start)))
+			case <-done:
+				fmt.Fprint(r.Out, ClearLine())
+				return
+			}
+		}
+	}(td, tsd)
+
+	onEvent := func(ev AgentEvent) {
+		switch ev.Type {
+		case "tool-start":
+			if r.thinkingDone != nil {
+				close(r.thinkingDone)
+				r.thinkingDone = nil
+			}
+			fmt.Fprintln(r.Out)
+			fmt.Fprintln(r.Out, ToolStart(ev.Name, ev.Info))
+
+			// Start tool spinner.
+			r.toolDone = make(chan struct{})
+			r.toolSpinnerDone = make(chan struct{})
+			td := r.toolDone
+			tsd := r.toolSpinnerDone
 			go func(done chan struct{}, sd chan struct{}) {
 				defer close(sd)
 				ticker := time.NewTicker(100 * time.Millisecond)
@@ -110,153 +344,185 @@ func (r *REPL) Run(ctx context.Context) error {
 				for {
 					select {
 					case <-ticker.C:
-						fmt.Fprint(r.Out, ThinkingLine(time.Since(start)))
+						fmt.Fprint(r.Out, RunningLine(time.Since(start)))
 					case <-done:
 						fmt.Fprint(r.Out, ClearLine())
 						return
 					}
 				}
 			}(td, tsd)
+
+		case "tool-end":
+			if r.toolDone != nil {
+				close(r.toolDone)
+				r.toolDone = nil
+			}
+			fmt.Fprintln(r.Out, ToolEnd(ev.Name, ev.Info, ev.Output))
+			fmt.Fprintln(r.Out)
 		}
+	}
 
-		if r.Registry != nil {
-			// Build onEvent closure for tool visibility.
-			onEvent := func(ev AgentEvent) {
-				switch ev.Type {
-				case "tool-start":
-					if r.thinkingDone != nil {
-						close(r.thinkingDone)
-						r.thinkingDone = nil
-					}
-					fmt.Fprintln(r.Out)
-					fmt.Fprintln(r.Out, ToolStart(ev.Name, ev.Info))
+	permFunc := r.ToolPermFunc
+	if permFunc == nil && r.ToolRules != nil {
+		permFunc = r.toolPermissionFunc
+	}
 
-					if r.streamEnabled {
-						// Start tool spinner.
-						r.toolDone = make(chan struct{})
-						r.toolSpinnerDone = make(chan struct{})
-						td := r.toolDone
-						tsd := r.toolSpinnerDone
-						go func(done chan struct{}, sd chan struct{}) {
-							defer close(sd)
-							ticker := time.NewTicker(100 * time.Millisecond)
-							start := time.Now()
-							defer ticker.Stop()
-							for {
-								select {
-								case <-ticker.C:
-									fmt.Fprint(r.Out, RunningLine(time.Since(start)))
-								case <-done:
-									fmt.Fprint(r.Out, ClearLine())
-									return
-								}
-							}
-						}(td, tsd)
-					}
-
-				case "tool-end":
-					if r.toolDone != nil {
-						close(r.toolDone)
-						r.toolDone = nil
-					}
-					fmt.Fprintln(r.Out, ToolEnd(ev.Name, ev.Info, ev.Output))
-					fmt.Fprintln(r.Out)
-				}
+	if r.Registry != nil {
+		onDelta := func(delta string) {
+			if r.thinkingDone != nil {
+				close(r.thinkingDone)
+				r.thinkingDone = nil
 			}
+			fmt.Fprint(r.Out, delta)
+		}
+		reply, err = RunTurnWithToolsStream(
+			ctx, r.Provider, r.Session,
+			r.Mode, r.Scope, r.Override, r.Model, line,
+			r.Registry, r.MaxToolIter, r.ShellEnabled,
+			r.Store, r.Retriever,
+			r.Compressor, r.ModelInfo,
+			onEvent, onDelta, permFunc, r.ToolRules,
+		)
 
-			permFunc := r.ToolPermFunc
-			if permFunc == nil && r.ToolRules != nil {
-				permFunc = r.toolPermissionFunc
-			}
-
-			if r.streamEnabled {
-				// Streaming path with progressive text output.
-				onDelta := func(delta string) {
-					// Kill thinking spinner on first delta.
-					if r.thinkingDone != nil {
-						close(r.thinkingDone)
-						r.thinkingDone = nil
-					}
-					fmt.Fprint(r.Out, delta)
-				}
-				reply, err = RunTurnWithToolsStream(
-					ctx, r.Provider, r.Session,
-					r.Mode, r.Scope, r.Override, r.Model, line,
-					r.Registry, r.MaxToolIter, r.ShellEnabled,
-					r.Store, r.Retriever,
-					r.Compressor, r.ModelInfo,
-					onEvent, onDelta, permFunc, r.ToolRules,
-				)
-
-				// Fall back to non-streaming when provider doesn't
-				// support it (e.g. opencode_zen).
-				if err != nil && strings.Contains(
-					err.Error(), "streaming not",
-				) {
-					reply, err = RunTurnWithTools(
-						ctx, r.Provider, r.Session,
-						r.Mode, r.Scope, r.Override,
-						r.Model, line,
-						r.Registry, r.MaxToolIter,
-						r.ShellEnabled,
-						r.Store, r.Retriever,
-						r.Compressor, r.ModelInfo,
-						onEvent, permFunc, r.ToolRules,
-					)
-				}
-			} else {
-				// Non-streaming fallback (piped / CI).
-				reply, err = RunTurnWithTools(
-					ctx, r.Provider, r.Session,
-					r.Mode, r.Scope, r.Override, r.Model, line,
-					r.Registry, r.MaxToolIter, r.ShellEnabled,
-					r.Store, r.Retriever,
-					r.Compressor, r.ModelInfo,
-					onEvent, permFunc, r.ToolRules,
-				)
-			}
-		} else {
-			// No tools path.
-			reply, err = RunTurn(
+		if err != nil && strings.Contains(err.Error(), "streaming not") {
+			reply, err = RunTurnWithTools(
 				ctx, r.Provider, r.Session,
 				r.Mode, r.Scope, r.Override, r.Model, line,
+				r.Registry, r.MaxToolIter, r.ShellEnabled,
 				r.Store, r.Retriever,
 				r.Compressor, r.ModelInfo,
+				onEvent, permFunc, r.ToolRules,
 			)
 		}
+	} else {
+		reply, err = RunTurn(
+			ctx, r.Provider, r.Session,
+			r.Mode, r.Scope, r.Override, r.Model, line,
+			r.Store, r.Retriever,
+			r.Compressor, r.ModelInfo,
+		)
+	}
 
-		// Ensure spinner is killed after any path completes.
-		if r.thinkingDone != nil {
-			close(r.thinkingDone)
-			r.thinkingDone = nil
+	// Ensure spinners are killed and drained.
+	if r.thinkingDone != nil {
+		close(r.thinkingDone)
+		r.thinkingDone = nil
+	}
+	if r.thinkingSpinnerDone != nil {
+		<-r.thinkingSpinnerDone
+		r.thinkingSpinnerDone = nil
+	}
+	if r.toolDone != nil {
+		close(r.toolDone)
+		r.toolDone = nil
+	}
+	if r.toolSpinnerDone != nil {
+		<-r.toolSpinnerDone
+		r.toolSpinnerDone = nil
+	}
+
+	return reply, err
+}
+
+// readLine reads one line of input. In raw mode (terminal) it reads
+// character-by-character with history navigation via up/down arrows.
+// In non-raw mode (piped stdin) it falls back to bufio.Scanner.
+func (r *REPL) readLine() (string, error) {
+	if !r.inRaw {
+		if r.scanner.Scan() {
+
+			return r.scanner.Text(), nil
 		}
 
-		if err != nil {
-			fmt.Fprintf(r.Out, "\n%s\n", colorize(ansiRed, "Error: "+err.Error()))
-			fmt.Fprint(r.Out, Prompt())
+		if r.scanner.Err() != nil {
+			return "", r.scanner.Err()
+		}
 
+		return "", io.EOF
+	}
+
+	line := make([]byte, 0, 256)
+	buf := make([]byte, 1)
+
+	for {
+		n, err := os.Stdin.Read(buf)
+		if err != nil {
+
+			return "", err
+		}
+		if n == 0 {
 			continue
 		}
 
-		// Render separator + markdown reply + footer separator.
-		fmt.Fprintln(r.Out)
-		fmt.Fprintln(r.Out, Separator("agent"))
-		fmt.Fprintln(r.Out, FormatMarkdown(reply))
-		fmt.Fprintln(r.Out, Separator(""))
+		c := buf[0]
+		switch {
+		case c == '\r' || c == '\n':
+			fmt.Fprint(r.Out, "\r\n")
+			result := string(line)
+			if result != "" {
+				r.history.Add(result)
+			}
 
-		// Show memory retrieval indicator when memory was used.
-		if r.Retriever != nil && r.Retriever.Stats().LastCount > 0 {
-			fmt.Fprintln(r.Out, MemoryIndicator(r.Retriever.Stats().LastCount))
+			return result, nil
+
+		case c == '\x7f' || c == '\b':
+			if len(line) > 0 {
+				line = line[:len(line)-1]
+				fmt.Fprint(r.Out, "\b \b")
+			}
+
+		case c == '\x03':
+
+			return "", fmt.Errorf("interrupted")
+
+		case c == '\x04':
+			if len(line) == 0 {
+
+				return "", io.EOF
+			}
+
+		case c == '\x1b':
+			seq := make([]byte, 1)
+			if _, err := os.Stdin.Read(seq); err != nil {
+				continue
+			}
+			if seq[0] != '[' {
+				continue
+			}
+			cmd := make([]byte, 1)
+			if _, err := os.Stdin.Read(cmd); err != nil {
+				continue
+			}
+			switch cmd[0] {
+			case 'A':
+				if entry, ok := r.history.Older(); ok {
+					for range line {
+						fmt.Fprint(r.Out, "\b \b")
+					}
+					line = append(line[:0], entry...)
+					fmt.Fprint(r.Out, entry)
+				}
+			case 'B':
+				if entry, ok := r.history.Newer(); ok {
+					for range line {
+						fmt.Fprint(r.Out, "\b \b")
+					}
+					line = append(line[:0], entry...)
+					fmt.Fprint(r.Out, entry)
+				}
+			}
+
+		case c == '\t':
+			line = append(line, c)
+			fmt.Fprint(r.Out, "\t")
+
+		default:
+			if c >= 32 {
+				line = append(line, c)
+				fmt.Fprint(r.Out, string(c))
+			}
 		}
-
-		fmt.Fprint(r.Out, Prompt())
 	}
-
-	if err := r.scanner.Err(); err != nil {
-		return fmt.Errorf("scanner: %w", err)
-	}
-
-	return nil
 }
 
 // Handles slash commands. Returns (handled, shouldQuit, error).
@@ -279,6 +545,7 @@ func (r *REPL) handleCommand(line string) (bool, bool, error) {
 
 	case "/reset":
 		r.Session.Reset()
+		fmt.Fprint(r.Out, ClearScreen())
 		fmt.Fprintln(r.Out, "Session reset.")
 
 		return true, false, nil
@@ -643,7 +910,7 @@ SLASH COMMANDS
   ctrl+x             Leader key
   tab / shift+tab    Cycle agent modes (empty input)
   pgup / pgdn        Scroll output by page
-  up / down          Scroll output by line
+  up / down          Scroll output / input history
   home / end         Top / bottom of output
 
 LEADER KEY (ctrl+x)
@@ -713,20 +980,49 @@ func (r *REPL) toolPermissionFunc(
 	}
 	fmt.Fprint(r.Out, "Allow? [y]es / [n]o / [a]llow all like this: ")
 
-	// Use a fresh scanner to avoid racing with the main loop's scanner.
+	if r.inRaw {
+		buf := make([]byte, 1)
+		for {
+			n, err := os.Stdin.Read(buf)
+			if err != nil || n == 0 {
+
+				return PermDeny
+			}
+			switch buf[0] {
+			case 'y', 'Y':
+				fmt.Fprintln(r.Out, "y")
+
+				return PermAllow
+			case 'n', 'N':
+				fmt.Fprintln(r.Out, "n")
+
+				return PermDeny
+			case 'a', 'A':
+				fmt.Fprintln(r.Out, "a")
+
+				return PermAllowAll
+			}
+		}
+	}
+
+	// Use a fresh scanner for non-raw mode.
 	s := bufio.NewScanner(r.In)
 	for s.Scan() {
 		line := strings.TrimSpace(s.Text())
 		switch strings.ToLower(line) {
 		case "y", "yes":
+
 			return PermAllow
 		case "n", "no":
+
 			return PermDeny
 		case "a", "all":
+
 			return PermAllowAll
 		default:
 			fmt.Fprint(r.Out, "y/n/a: ")
 		}
 	}
+
 	return PermDeny
 }

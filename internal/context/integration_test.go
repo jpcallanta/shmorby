@@ -36,7 +36,7 @@ func TestCompressorIntegration(t *testing.T) {
 			OffloadToMemory:       true,
 		},
 		store,
-		&HeuristicEstimator{},
+		NewEstimator("gpt-4"),
 		nil,
 	)
 

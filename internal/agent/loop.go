@@ -181,8 +181,37 @@ func RunTurnWithTools(
 	if retriever != nil {
 		result, rErr := retriever.Retrieve(ctx, userText)
 		if rErr == nil && len(result.Entries) > 0 {
-			memoryCtx = memory.FormatMemoryContext(result.Entries)
+			deduped := memory.DedupMemoryContext(
+				result.Entries, sess.Messages(),
+			)
+			memoryCtx = memory.FormatMemoryContext(deduped)
 		}
+	}
+
+	// Build base history once: session with memory context injected.
+	baseHistory := sess.Messages()
+	if memoryCtx != "" {
+		baseHistory = memory.InjectMemoryContext(
+			baseHistory, memoryCtx,
+		)
+	}
+
+	// Build cacheable prefix once: system + base history (with memory)
+	// + tool schemas. Byte-identical across iterations for provider
+	// prompt caching.
+	var cacheablePrefix []llm.Message
+	cacheablePrefix = append(cacheablePrefix, llm.Message{
+		Role:    "system",
+		Content: sys,
+	})
+	for _, m := range baseHistory {
+		cacheablePrefix = append(cacheablePrefix, llm.Message{
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolName:   m.ToolName,
+			ToolCallID: m.ToolCallID,
+			ToolCalls:  m.ToolCalls,
+		})
 	}
 
 	// Session-level overrides persist across iterations within one turn.
@@ -196,21 +225,10 @@ func RunTurnWithTools(
 			}
 		}
 
-		// Build request from persisted session history + pending messages.
-		history := sess.Messages()
-		if memoryCtx != "" {
-			history = memory.InjectMemoryContext(history, memoryCtx)
-		}
-		msgs := make([]llm.Message, 0, len(history)+len(pending))
-		for _, m := range history {
-			msgs = append(msgs, llm.Message{
-				Role:       m.Role,
-				Content:    m.Content,
-				ToolName:   m.ToolName,
-				ToolCallID: m.ToolCallID,
-				ToolCalls:  m.ToolCalls,
-			})
-		}
+		// Build messages: cacheable prefix + pending.
+		msgs := make([]llm.Message, len(cacheablePrefix),
+			len(cacheablePrefix)+len(pending))
+		copy(msgs, cacheablePrefix)
 		for _, m := range pending {
 			msgs = append(msgs, llm.Message{
 				Role:       m.Role,
@@ -398,20 +416,9 @@ func RunTurnWithTools(
 		Content: MaxStepsPrompt,
 	})
 
-	history := sess.Messages()
-	if memoryCtx != "" {
-		history = memory.InjectMemoryContext(history, memoryCtx)
-	}
-	msgs := make([]llm.Message, 0, len(history)+len(pending))
-	for _, m := range history {
-		msgs = append(msgs, llm.Message{
-			Role:       m.Role,
-			Content:    m.Content,
-			ToolName:   m.ToolName,
-			ToolCallID: m.ToolCallID,
-			ToolCalls:  m.ToolCalls,
-		})
-	}
+	msgs := make([]llm.Message, len(cacheablePrefix),
+		len(cacheablePrefix)+len(pending))
+	copy(msgs, cacheablePrefix)
 	for _, m := range pending {
 		msgs = append(msgs, llm.Message{
 			Role:       m.Role,
@@ -517,8 +524,33 @@ func RunTurnWithToolsStream(
 	if retriever != nil {
 		result, rErr := retriever.Retrieve(ctx, userText)
 		if rErr == nil && len(result.Entries) > 0 {
-			memoryCtx = memory.FormatMemoryContext(result.Entries)
+			deduped := memory.DedupMemoryContext(
+				result.Entries, sess.Messages(),
+			)
+			memoryCtx = memory.FormatMemoryContext(deduped)
 		}
+	}
+
+	baseHistory := sess.Messages()
+	if memoryCtx != "" {
+		baseHistory = memory.InjectMemoryContext(
+			baseHistory, memoryCtx,
+		)
+	}
+
+	var cacheablePrefix []llm.Message
+	cacheablePrefix = append(cacheablePrefix, llm.Message{
+		Role:    "system",
+		Content: sys,
+	})
+	for _, m := range baseHistory {
+		cacheablePrefix = append(cacheablePrefix, llm.Message{
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolName:   m.ToolName,
+			ToolCallID: m.ToolCallID,
+			ToolCalls:  m.ToolCalls,
+		})
 	}
 
 	toolOverrides := make(map[string]bool)
@@ -530,20 +562,9 @@ func RunTurnWithToolsStream(
 			}
 		}
 
-		history := sess.Messages()
-		if memoryCtx != "" {
-			history = memory.InjectMemoryContext(history, memoryCtx)
-		}
-		msgs := make([]llm.Message, 0, len(history)+len(pending))
-		for _, m := range history {
-			msgs = append(msgs, llm.Message{
-				Role:       m.Role,
-				Content:    m.Content,
-				ToolName:   m.ToolName,
-				ToolCallID: m.ToolCallID,
-				ToolCalls:  m.ToolCalls,
-			})
-		}
+		msgs := make([]llm.Message, len(cacheablePrefix),
+			len(cacheablePrefix)+len(pending))
+		copy(msgs, cacheablePrefix)
 		for _, m := range pending {
 			msgs = append(msgs, llm.Message{
 				Role:       m.Role,
@@ -737,20 +758,9 @@ func RunTurnWithToolsStream(
 		Content: MaxStepsPrompt,
 	})
 
-	history := sess.Messages()
-	if memoryCtx != "" {
-		history = memory.InjectMemoryContext(history, memoryCtx)
-	}
-	msgs := make([]llm.Message, 0, len(history)+len(pending))
-	for _, m := range history {
-		msgs = append(msgs, llm.Message{
-			Role:       m.Role,
-			Content:    m.Content,
-			ToolName:   m.ToolName,
-			ToolCallID: m.ToolCallID,
-			ToolCalls:  m.ToolCalls,
-		})
-	}
+	msgs := make([]llm.Message, len(cacheablePrefix),
+		len(cacheablePrefix)+len(pending))
+	copy(msgs, cacheablePrefix)
 	for _, m := range pending {
 		msgs = append(msgs, llm.Message{
 			Role:       m.Role,

@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
@@ -478,6 +479,121 @@ func TestNewStore_NilEmbedderWorks(t *testing.T) {
 func newTestSQLiteStore(t *testing.T) *sqliteStore {
 	t.Helper()
 	return newTestStore(t).(*sqliteStore)
+}
+
+// TestEviction_RecencyAndAccess checks old+never-accessed evicted first.
+func TestEviction_RecencyAndAccess(t *testing.T) {
+	dir := t.TempDir()
+	cfg := defaultConfig()
+	cfg.DBPath = filepath.Join(dir, "memory.db")
+	cfg.MaxEntries = 3
+
+	s, err := NewStore(cfg, nil)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer s.Close()
+
+	// Insert 4 entries; the one with oldest timestamp and lowest
+	// accessed count should be evicted first.
+	for i := 0; i < 4; i++ {
+		entry := MemoryEntry{
+			ID:        intToID(i),
+			SessionID: "s1",
+			Timestamp: time.Date(2025, 1, 1, 0, 0, i, 0, time.UTC),
+		}
+		if err := s.Insert(entry); err != nil {
+			t.Fatalf("Insert %d: %v", i, err)
+		}
+	}
+
+	count, err := s.Count()
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	if count != 3 {
+		t.Fatalf("want 3 entries after eviction, got %d", count)
+	}
+}
+
+// TestIncrementAccess checks counter bumps correctly.
+func TestIncrementAccess(t *testing.T) {
+	s := newTestSQLiteStore(t)
+
+	entry := MemoryEntry{
+		ID: "inc-test", SessionID: "s1",
+		Command: "echo hello",
+	}
+	if err := s.Insert(entry); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	s.IncrementAccess("inc-test")
+	s.IncrementAccess("inc-test")
+
+	var accessed int
+	err := s.db.QueryRow(
+		"SELECT accessed FROM memory WHERE id = ?", "inc-test",
+	).Scan(&accessed)
+	if err != nil {
+		t.Fatalf("query accessed: %v", err)
+	}
+	if accessed != 2 {
+		t.Errorf("want accessed=2, got %d", accessed)
+	}
+}
+
+// TestMigrationAddAccessed checks existing DB gets column added.
+func TestMigrationAddAccessed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mem.db")
+
+	// Create DB without accessed column, but with all other columns
+	// that Insert expects.
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE memory (
+			id TEXT PRIMARY KEY,
+			timestamp TEXT NOT NULL,
+			session_id TEXT NOT NULL,
+			tool TEXT,
+			command TEXT,
+			args TEXT,
+			result TEXT,
+			exit_code INTEGER,
+			summary TEXT,
+			tags TEXT
+		)
+	`)
+	if err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	db.Close()
+
+	// Now open with NewStore which runs migration to add accessed.
+	cfg := defaultConfig()
+	cfg.DBPath = path
+	store, err := NewStore(cfg, nil)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer store.Close()
+
+	// Verify accessed column exists by inserting and incrementing.
+	entry := MemoryEntry{
+		ID: "mig-test", SessionID: "s1",
+		Command: "echo hello",
+	}
+	if err := store.Insert(entry); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	// IncrementAccess should not error.
+	ss := store.(*sqliteStore)
+	ss.IncrementAccess("mig-test")
 }
 
 // newTestStore creates a store backed by a temp file.

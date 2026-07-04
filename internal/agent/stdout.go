@@ -6,19 +6,20 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 const (
-	ansiCyan    = "\033[36m"
-	ansiGreen   = "\033[32m"
-	ansiRed     = "\033[31m"
-	ansiYellow  = "\033[33m"
-	ansiMagenta = "\033[35m"
-	ansiDim     = "\033[2m"
-	ansiItalic  = "\033[3m"
-	ansiBold    = "\033[1m"
-	ansiClearLn = "\033[2K"
-	ansiReset   = "\033[0m"
+	ansiCyan        = "\033[36m"
+	ansiGreen       = "\033[32m"
+	ansiRed         = "\033[31m"
+	ansiMagenta     = "\033[35m"
+	ansiDim         = "\033[2m"
+	ansiItalic      = "\033[3m"
+	ansiBold        = "\033[1m"
+	ansiClearLn     = "\033[2K"
+	ansiClearScreen = "\033[2J\033[H"
+	ansiReset       = "\033[0m"
 )
 
 var stdoutIsTerminal atomic.Bool
@@ -67,7 +68,7 @@ func Separator(label string) string {
 		return colorize(ansiDim, strings.Repeat("─", w))
 	}
 	mid := "── " + label + " ──"
-	n := w - len(mid)
+	n := w - utf8.RuneCountInString(mid)
 	if n < 4 {
 		return mid
 	}
@@ -147,6 +148,14 @@ func spinnerChar(elapsed time.Duration) string {
 // ANSI sequence to erase the current line.
 func ClearLine() string {
 	return "\r" + ansiClearLn + "\r"
+}
+
+// ANSI sequence to clear the entire screen and reset cursor to top-left.
+func ClearScreen() string {
+	if !stdoutIsTerminal.Load() {
+		return ""
+	}
+	return ansiClearScreen
 }
 
 // Lightweight markdown-to-ANSI renderer.

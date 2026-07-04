@@ -470,6 +470,37 @@ func TestRetriever_Retrieve_PunctuationStripped(t *testing.T) {
 	}
 }
 
+// TestRetriever_Retrieve_IncrementsAccess checks access count bumps.
+func TestRetriever_Retrieve_IncrementsAccess(t *testing.T) {
+	s := newTestSQLiteStore(t)
+
+	entry := MemoryEntry{
+		ID: "acc-test", SessionID: "s1",
+		Command: "echo hello", Result: "hello",
+	}
+	if err := s.Insert(entry); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	// Get once to increment.
+	_, err := s.Get("acc-test")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+
+	// Verify accessed count via raw query.
+	var accessed int
+	err = s.db.QueryRow(
+		"SELECT accessed FROM memory WHERE id = ?", "acc-test",
+	).Scan(&accessed)
+	if err != nil {
+		t.Fatalf("query accessed: %v", err)
+	}
+	if accessed < 1 {
+		t.Errorf("want accessed >= 1, got %d", accessed)
+	}
+}
+
 // TestRetriever_Retrieve_CaseInsensitive matches regardless of case.
 func TestRetriever_Retrieve_CaseInsensitive(t *testing.T) {
 	ms := &mockStore{

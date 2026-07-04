@@ -32,18 +32,6 @@ func (m *mockStore) Close() error               { return nil }
 func (m *mockStore) AutoCaptureEnabled() bool   { return false }
 func (m *mockStore) TagRules() []memory.TagRule { return nil }
 
-type fixedEstimator struct {
-	perMsg int
-}
-
-func (f *fixedEstimator) Estimate(text string) int {
-	return len(text)
-}
-
-func (f *fixedEstimator) EstimateMessages(ms []session.Message) int {
-	return f.perMsg
-}
-
 func TestCompressor_ShouldCompress_UnderThreshold(t *testing.T) {
 	c := NewCompressor(CompressorConfig{
 		Enabled:               true,
@@ -51,7 +39,7 @@ func TestCompressor_ShouldCompress_UnderThreshold(t *testing.T) {
 		Threshold:             0.8,
 		MinMessagesToCompress: 2,
 		FallbackContextWindow: 100,
-	}, nil, &fixedEstimator{perMsg: 50}, nil)
+	}, nil, NewEstimator("gpt-4"), nil)
 
 	msgs := make([]session.Message, 5)
 	got := c.ShouldCompress(msgs, llm.ModelInfo{ContextWindow: 100})
@@ -67,9 +55,12 @@ func TestCompressor_ShouldCompress_OverThreshold(t *testing.T) {
 		Threshold:             0.8,
 		MinMessagesToCompress: 2,
 		FallbackContextWindow: 100,
-	}, nil, &fixedEstimator{perMsg: 90}, nil)
+	}, nil, NewEstimator("gpt-4"), nil)
 
 	msgs := make([]session.Message, 5)
+	for i := range msgs {
+		msgs[i].Content = strings.Repeat("this is a long message content ", 10)
+	}
 	got := c.ShouldCompress(msgs, llm.ModelInfo{ContextWindow: 100})
 	if !got {
 		t.Errorf("want true, got false")
@@ -83,7 +74,7 @@ func TestCompressor_ShouldCompress_ModeOff(t *testing.T) {
 		Threshold:             0.8,
 		MinMessagesToCompress: 2,
 		FallbackContextWindow: 100,
-	}, nil, &fixedEstimator{perMsg: 90}, nil)
+	}, nil, NewEstimator("gpt-4"), nil)
 
 	msgs := make([]session.Message, 5)
 	got := c.ShouldCompress(msgs, llm.ModelInfo{ContextWindow: 100})
@@ -99,7 +90,7 @@ func TestCompressor_ShouldCompress_TooFewMessages(t *testing.T) {
 		Threshold:             0.8,
 		MinMessagesToCompress: 10,
 		FallbackContextWindow: 100,
-	}, nil, &fixedEstimator{perMsg: 90}, nil)
+	}, nil, NewEstimator("gpt-4"), nil)
 
 	msgs := make([]session.Message, 5)
 	got := c.ShouldCompress(msgs, llm.ModelInfo{ContextWindow: 100})
@@ -263,7 +254,7 @@ func TestCompressor_CompressToolOutput_PublicMethod(t *testing.T) {
 
 func TestCompressor_SummarizeMessages_WithFunc(t *testing.T) {
 	c := NewCompressor(CompressorConfig{Enabled: true}, nil,
-		&HeuristicEstimator{},
+		NewEstimator("gpt-4"),
 		func(ctx context.Context, text string) (string, error) {
 			return "mock summary", nil
 		})
@@ -281,9 +272,9 @@ func TestCompressor_SummarizeMessages_WithFunc(t *testing.T) {
 	}
 }
 
-func TestCompressor_SummarizeMessages_NilFuncTruncation(t *testing.T) {
+func TestCompressor_SummarizeMessages_NilFuncExtractive(t *testing.T) {
 	c := NewCompressor(CompressorConfig{Enabled: true}, nil,
-		&HeuristicEstimator{}, nil)
+		NewEstimator("gpt-4"), nil)
 
 	msgs := []session.Message{
 		{Role: "user", Content: "hello"},
@@ -361,11 +352,10 @@ func TestCompressor_Compress_AlwaysTruncatesAssistantMessages(t *testing.T) {
 		Threshold:             0.8,
 		MinMessagesToCompress: 2,
 		FallbackContextWindow: 100,
-	}, nil, &fixedEstimator{perMsg: 90}, nil)
+	}, nil, NewEstimator("gpt-4"), nil)
 
 	// Verify compressToolOutput passes through (per-turn behavior)
 	// while truncateToolOutputLines truncates (session compression).
-	// but truncateToolOutputLines truncates (session compression).
 	perTurn := c.compressToolOutput(bigOutput)
 	if perTurn != bigOutput {
 		t.Error("compressToolOutput should pass through when MaxToolOutputLines=0")
@@ -378,5 +368,80 @@ func TestCompressor_Compress_AlwaysTruncatesAssistantMessages(t *testing.T) {
 	}
 	if !strings.Contains(sessionTrunc, "(80 lines omitted)") {
 		t.Errorf("want '(80 lines omitted)', got %s", sessionTrunc)
+	}
+}
+
+func TestSummarizeExtractive_Basic(t *testing.T) {
+	msgs := []session.Message{
+		{Role: "user", Content: "short"},
+		{Role: "assistant", Content: "ok"},
+	}
+	got, err := summarizeExtractive(msgs)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(got, "short") || !strings.Contains(got, "ok") {
+		t.Errorf("want content preserved, got %s", got)
+	}
+}
+
+func TestSummarizeExtractive_LongWithTail(t *testing.T) {
+	long := strings.Repeat("a", 250) + " output: exit code 0 " +
+		strings.Repeat("b", 100)
+	msgs := []session.Message{
+		{Role: "user", Content: long},
+	}
+	got, err := summarizeExtractive(msgs)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(got, "exit code") {
+		t.Errorf("want exit code preserved, got %s", got)
+	}
+}
+
+func TestSummarizeExtractive_LongWithoutTail(t *testing.T) {
+	long := strings.Repeat("a", 500)
+	msgs := []session.Message{
+		{Role: "user", Content: long},
+	}
+	got, err := summarizeExtractive(msgs)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Errorf("want truncation marker, got %s", got)
+	}
+}
+
+func TestSummarizeExtractive_Empty(t *testing.T) {
+	got, err := summarizeExtractive(nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "" {
+		t.Errorf("want empty, got %s", got)
+	}
+}
+
+func TestHasImportantSuffix(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"error: something failed", true},
+		{"exit code 1", true},
+		{"result: success", true},
+		{"✓ nginx restarted", true},
+		{"✗ deployment failed", true},
+		{"everything is fine", false},
+		{"just some regular text", false},
+	}
+	for _, tt := range tests {
+		got := hasImportantSuffix(tt.input)
+		if got != tt.want {
+			t.Errorf("hasImportantSuffix(%q): want %v, got %v",
+				tt.input, tt.want, got)
+		}
 	}
 }

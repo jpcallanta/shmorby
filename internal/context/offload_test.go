@@ -2,6 +2,7 @@ package context
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"shmorby/internal/session"
@@ -12,7 +13,7 @@ func TestCompressor_Offload_Disabled(t *testing.T) {
 	c := NewCompressor(CompressorConfig{
 		Enabled:         true,
 		OffloadToMemory: false,
-	}, store, &HeuristicEstimator{}, nil)
+	}, store, NewEstimator("gpt-4"), nil)
 
 	err := c.Offload(context.Background(),
 		[]session.Message{{Role: "user", Content: "hi"}}, "s1")
@@ -29,7 +30,7 @@ func TestCompressor_Offload_Enabled(t *testing.T) {
 	c := NewCompressor(CompressorConfig{
 		Enabled:         true,
 		OffloadToMemory: true,
-	}, store, &HeuristicEstimator{}, nil)
+	}, store, NewEstimator("gpt-4"), nil)
 
 	err := c.Offload(context.Background(),
 		[]session.Message{
@@ -48,7 +49,7 @@ func TestCompressor_Offload_NilStore(t *testing.T) {
 	c := NewCompressor(CompressorConfig{
 		Enabled:         true,
 		OffloadToMemory: true,
-	}, nil, &HeuristicEstimator{}, nil)
+	}, nil, NewEstimator("gpt-4"), nil)
 
 	err := c.Offload(context.Background(),
 		[]session.Message{{Role: "user", Content: "hi"}}, "s1")
@@ -60,12 +61,12 @@ func TestCompressor_Offload_NilStore(t *testing.T) {
 func TestCompressor_Compress_SessionShorter(t *testing.T) {
 	sess := session.New()
 	sess.AppendMessages([]session.Message{
-		{Role: "user", Content: "a"},
-		{Role: "assistant", Content: "b"},
-		{Role: "user", Content: "c"},
-		{Role: "assistant", Content: "d"},
-		{Role: "user", Content: "e"},
-		{Role: "assistant", Content: "f"},
+		{Role: "user", Content: strings.Repeat("long message ", 20)},
+		{Role: "assistant", Content: strings.Repeat("long response ", 20)},
+		{Role: "user", Content: strings.Repeat("long message ", 20)},
+		{Role: "assistant", Content: strings.Repeat("long response ", 20)},
+		{Role: "user", Content: strings.Repeat("long message ", 20)},
+		{Role: "assistant", Content: strings.Repeat("long response ", 20)},
 	})
 
 	c := NewCompressor(CompressorConfig{
@@ -74,7 +75,7 @@ func TestCompressor_Compress_SessionShorter(t *testing.T) {
 		Threshold:             0.2,
 		MinMessagesToCompress: 3,
 		FallbackContextWindow: 100,
-	}, nil, &fixedEstimator{perMsg: 30}, nil)
+	}, nil, NewEstimator("gpt-4"), nil)
 
 	err := c.Compress(context.Background(), sess, struct {
 		ContextWindow   int
@@ -101,7 +102,7 @@ func TestCompressor_Compress_UnderThreshold(t *testing.T) {
 		Threshold:             0.8,
 		MinMessagesToCompress: 10,
 		FallbackContextWindow: 100,
-	}, nil, &HeuristicEstimator{}, nil)
+	}, nil, NewEstimator("gpt-4"), nil)
 
 	err := c.Compress(context.Background(), sess, struct {
 		ContextWindow   int
@@ -116,5 +117,35 @@ func TestCompressor_Compress_UnderThreshold(t *testing.T) {
 	msgs := sess.Messages()
 	if len(msgs) != 1 {
 		t.Errorf("want 1 message unchanged, got %d", len(msgs))
+	}
+}
+
+func TestOffloadSummary_Short(t *testing.T) {
+	input := "short content"
+	got := offloadSummary(input)
+	if got != input {
+		t.Errorf("want %q, got %q", input, got)
+	}
+}
+
+func TestOffloadSummary_Long(t *testing.T) {
+	input := strings.Repeat("a", 300) + strings.Repeat("b", 300)
+	got := offloadSummary(input)
+	if !strings.Contains(got, "... (100 chars omitted) ...") {
+		t.Errorf("want omission marker, got %s", got)
+	}
+	if !strings.HasPrefix(got, strings.Repeat("a", 250)) {
+		t.Errorf("want head preserved, got %s", got)
+	}
+	if !strings.HasSuffix(got, strings.Repeat("b", 250)) {
+		t.Errorf("want tail preserved, got %s", got)
+	}
+}
+
+func TestOffloadSummary_ExactBoundary(t *testing.T) {
+	input := strings.Repeat("a", 501)
+	got := offloadSummary(input)
+	if !strings.Contains(got, "(1 chars omitted)") {
+		t.Errorf("expected head+tail with 1 omitted char, got %s", got)
 	}
 }

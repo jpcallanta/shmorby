@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	"shmorby/internal/tools"
 	"shmorby/internal/tui"
 	tuicl "shmorby/internal/tui/clipboard"
+	"shmorby/internal/xdg"
 )
 
 var (
@@ -46,9 +48,17 @@ var (
 				return fmt.Errorf("parse log level: %w", err)
 			}
 
+			// Log to file so REPL output on stdout stays clean.
+			logPath := filepath.Join(xdg.UserDataDir(), "shmorby.log")
+			logFile, fErr := os.OpenFile(logPath,
+				os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+			if fErr != nil {
+				return fmt.Errorf("open log file: %w", fErr)
+			}
+			defer logFile.Close()
 			logger := slog.New(
 				slog.NewTextHandler(
-					os.Stdout,
+					logFile,
 					&slog.HandlerOptions{Level: level},
 				),
 			)
@@ -78,7 +88,16 @@ var (
 			}
 
 			// Ensure workdir exists for shell tool.
-			if err := os.MkdirAll(cfg.Scope.Workdir, 0o755); err != nil {
+			workdir := cfg.Scope.Workdir
+
+			if strings.HasPrefix(workdir, "~/") {
+				home, err := os.UserHomeDir()
+				if err != nil {
+					return fmt.Errorf("resolve workdir tilde: %w", err)
+				}
+				workdir = filepath.Join(home, workdir[2:])
+			}
+			if err := os.MkdirAll(workdir, 0o755); err != nil {
 				return fmt.Errorf("create workdir: %w", err)
 			}
 
@@ -93,7 +112,7 @@ var (
 			if cfg.Tools.Shell.Enabled {
 				t := tools.NewShellTool(
 					cfg.Agent.Shell,
-					cfg.Scope.Workdir,
+					workdir,
 					cfg.Permission.Shell,
 				)
 				t.SetDefaultTimeout(cfg.Tools.Timeout)
@@ -220,13 +239,6 @@ var (
 			var compressor *ctxcomp.Compressor
 			var modelInfo llm.ModelInfo
 			if cfg.Context.Enabled {
-				var estimator ctxcomp.Estimator
-				if cfg.Context.TokenEstimator == "tiktoken" {
-					estimator = ctxcomp.NewTiktokenEstimator(cfg.Model)
-				} else {
-					estimator = &ctxcomp.HeuristicEstimator{}
-				}
-
 				// Read model override for context window info.
 				if mo, ok := cfg.Models[cfg.Model]; ok {
 					modelInfo = llm.ModelInfo{
@@ -249,7 +261,7 @@ var (
 						FallbackContextWindow: cfg.Context.FallbackContextWindow,
 					},
 					memStore,
-					estimator,
+					ctxcomp.NewEstimator(cfg.Model),
 					nil, // summaryFunc: no LLM summarizer wired yet
 				)
 			}
@@ -271,6 +283,65 @@ var (
 				agent.WithMemoryStore(memStore), // propagates auto_capture at runtime
 			)
 
+			// Phase 34: subagent orchestrator with task tool.
+			// Channel is non-nil only when TUI is active (see below).
+			var subagentEventChan chan tools.SubagentEvent
+			orch := &tools.TaskOrchestrator{
+				RunSubtask: func(ctx context.Context, task tools.Subtask) tools.TaskResult {
+					childSess := session.New()
+					if subagentEventChan != nil {
+						select {
+						case subagentEventChan <- tools.SubagentEvent{
+							Session:   childSess,
+							SessionID: childSess.ID(),
+							ParentID:  sess.ID(),
+							Label:     task.ID,
+							Status:    "",
+						}:
+						default:
+						}
+					}
+					reply, err := agent.RunTurnWithTools(
+						ctx, provider, childSess,
+						cfg.Agent.Default, scopeResult.Content,
+						"", cfg.Model, task.Prompt,
+						reg, cfg.Agent.MaxToolIterations,
+						cfg.Tools.Shell.Enabled,
+						memStore, memRetriever,
+						compressor, modelInfo,
+						nil, nil, toolRules,
+					)
+					status := "ok"
+					errStr := ""
+					if err != nil {
+						status = "error"
+						errStr = err.Error()
+						reply = ""
+					}
+					if subagentEventChan != nil {
+						select {
+						case subagentEventChan <- tools.SubagentEvent{
+							Session:   childSess,
+							SessionID: childSess.ID(),
+							ParentID:  sess.ID(),
+							Label:     task.ID,
+							Status:    status,
+						}:
+						default:
+						}
+					}
+					return tools.TaskResult{
+						TaskID:      task.ID,
+						Description: task.Description,
+						Status:      status,
+						Output:      reply,
+						Error:       errStr,
+					}
+				},
+				MaxParallel: 5,
+			}
+			reg.Register(tools.NewTaskTool(orch))
+
 			// Use TUI when terminal and --no-tui not set.
 			if !noTuiFlag && isTerminal() {
 				if err := tuicl.Init(); err != nil {
@@ -280,6 +351,9 @@ var (
 				if scrollLines <= 0 {
 					scrollLines = 5
 				}
+
+				// Wire subagent event channel for TUI tab lifecycle.
+				subagentEventChan = make(chan tools.SubagentEvent, 20)
 
 				// Wire TUI log handler when logging is enabled.
 				var logHandler *tui.TUILogHandler
@@ -331,6 +405,7 @@ var (
 					LogHandler:           logHandler,
 					ToolRules:            toolRules,
 					ConfigOverrider:      overrider,
+					SubagentEventChan:    subagentEventChan,
 				})
 				opts := []tea.ProgramOption{}
 				if cfg.TUI.Fullscreen {
@@ -343,6 +418,7 @@ var (
 
 			// Fall back to plain REPL.
 			repl := &agent.REPL{
+				NoTUI:        noTuiFlag,
 				Provider:     provider,
 				Session:      sess,
 				Mode:         cfg.Agent.Default,

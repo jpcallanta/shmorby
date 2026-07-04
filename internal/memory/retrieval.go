@@ -181,7 +181,8 @@ func searchSubstring(s, substr string) bool {
 	return false
 }
 
-// fetchByID retrieves entries from SQLite by their vector IDs.
+// Retrieves entries from SQLite by their vector IDs. Access count
+// is bumped by Get() internally.
 func (r *Retriever) fetchByID(ids []string) []MemoryEntry {
 	var entries []MemoryEntry
 

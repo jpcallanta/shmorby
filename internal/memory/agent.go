@@ -32,11 +32,47 @@ func FormatMemoryContext(entries []MemoryEntry) string {
 			b.WriteString(fmt.Sprintf(" (%s)", strings.Join(e.Tags, ", ")))
 		}
 		b.WriteString("\n")
+		// Append summary snippet when present and not matching command.
+		if e.Summary != "" && e.Summary != e.Command {
+			snippet := e.Summary
+			if len(snippet) > 80 {
+				snippet = snippet[:80]
+			}
+			b.WriteString(fmt.Sprintf("  %s\n", snippet))
+		}
 	}
 
 	b.WriteString("\nUse this context if relevant to the current request.")
 
 	return b.String()
+}
+
+// DedupMemoryContext removes entries that are already represented in the
+// session messages (e.g. from [compressed] summaries). An entry is
+// considered duplicate if its Tool+Command appears as a substring in any
+// session message content.
+func DedupMemoryContext(entries []MemoryEntry,
+	sessionMessages []session.Message,
+) []MemoryEntry {
+	if len(entries) == 0 || len(sessionMessages) == 0 {
+		return entries
+	}
+
+	var sessionText string
+	for _, m := range sessionMessages {
+		sessionText += " " + m.Content
+	}
+	sessionText = strings.ToLower(sessionText)
+
+	result := make([]MemoryEntry, 0, len(entries))
+	for _, e := range entries {
+		needle := strings.ToLower(e.Tool + " " + e.Command)
+		if !strings.Contains(sessionText, needle) {
+			result = append(result, e)
+		}
+	}
+
+	return result
 }
 
 // Injects a memory context string as a system message before the first
