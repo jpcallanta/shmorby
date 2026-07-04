@@ -29,6 +29,7 @@ type Theme struct {
 	TabActive   lipgloss.Style
 	TabInactive lipgloss.Style
 	TabSpin     lipgloss.Style
+	TabOverflow lipgloss.Style
 	ModeOperate lipgloss.Style
 	ModeDiag    lipgloss.Style
 	WhichKey    lipgloss.Style
@@ -192,6 +193,8 @@ func DefaultTheme() Theme {
 		TabSpin: lipgloss.NewStyle().
 			Foreground(Yellow).
 			Background(Surface0),
+		TabOverflow: lipgloss.NewStyle().
+			Foreground(Overlay1),
 		ModeOperate: lipgloss.NewStyle().
 			Foreground(Green).
 			Bold(true),
@@ -248,6 +251,8 @@ func LatteTheme() Theme {
 		TabSpin: lipgloss.NewStyle().
 			Foreground(LatteYellow).
 			Background(LatteSurface0),
+		TabOverflow: lipgloss.NewStyle().
+			Foreground(LatteOverlay1),
 		ModeOperate: lipgloss.NewStyle().
 			Foreground(LatteGreen).
 			Bold(true),
@@ -304,6 +309,8 @@ func FrappeTheme() Theme {
 		TabSpin: lipgloss.NewStyle().
 			Foreground(FrappeYellow).
 			Background(FrappeSurface0),
+		TabOverflow: lipgloss.NewStyle().
+			Foreground(FrappeOverlay1),
 		ModeOperate: lipgloss.NewStyle().
 			Foreground(FrappeGreen).
 			Bold(true),
@@ -360,6 +367,8 @@ func MacchiatoTheme() Theme {
 		TabSpin: lipgloss.NewStyle().
 			Foreground(MacchiatoYellow).
 			Background(MacchiatoSurface0),
+		TabOverflow: lipgloss.NewStyle().
+			Foreground(MacchiatoOverlay1),
 		ModeOperate: lipgloss.NewStyle().
 			Foreground(MacchiatoGreen).
 			Bold(true),
@@ -401,6 +410,7 @@ func MinimalTheme() Theme {
 		TabActive:    lipgloss.NewStyle().Bold(true).Reverse(true),
 		TabInactive:  lipgloss.NewStyle(),
 		TabSpin:      lipgloss.NewStyle(),
+		TabOverflow:  lipgloss.NewStyle(),
 		ModeOperate:  lipgloss.NewStyle().Bold(true),
 		ModeDiag:     lipgloss.NewStyle().Bold(true),
 		WhichKey:     lipgloss.NewStyle(),

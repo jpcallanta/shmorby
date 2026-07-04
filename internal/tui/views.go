@@ -47,14 +47,25 @@ func (m Model) renderStatus() string {
 	if m.mode == "diagnose" {
 		modeStyle = m.theme.ModeDiag
 	}
-	parts := []string{
-		m.theme.StatusKey.Render("agent:") +
-			" " + modeStyle.Render(m.mode),
-		m.theme.StatusKey.Render("provider:") +
-			" " + m.theme.StatusValue.Render(providerName),
-		m.theme.StatusKey.Render("model:") +
-			" " + m.theme.StatusValue.Render(m.model),
+	var parts []string
+
+	if m.running && m.spinner.View() != "" {
+		elapsed := time.Since(m.startTime).Round(time.Second)
+		parts = append(parts, fmt.Sprintf(
+			"%s (%s)",
+			m.spinner.View(),
+			elapsed,
+		))
 	}
+
+	parts = append(parts,
+		m.theme.StatusKey.Render("agent:")+
+			" "+modeStyle.Render(m.mode),
+		m.theme.StatusKey.Render("provider:")+
+			" "+m.theme.StatusValue.Render(providerName),
+		m.theme.StatusKey.Render("model:")+
+			" "+m.theme.StatusValue.Render(m.model),
+	)
 	if m.selectionMode {
 		parts = append(parts,
 			m.theme.StatusKey.Render("mode:")+

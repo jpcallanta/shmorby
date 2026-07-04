@@ -14,10 +14,17 @@ type Tab struct {
 
 // TabBar holds multiple session tabs.
 type TabBar struct {
-	tabs    []Tab
-	active  int
-	visible bool
+	tabs         []Tab
+	active       int
+	visible      bool
+	scrollOffset int
 }
+
+// ScrollOffset returns the current horizontal scroll offset.
+func (tb *TabBar) ScrollOffset() int { return tb.scrollOffset }
+
+// SetScrollOffset updates the horizontal scroll offset.
+func (tb *TabBar) SetScrollOffset(offset int) { tb.scrollOffset = offset }
 
 // New creates a tab bar with an initial session.
 func New(id, label string) *TabBar {

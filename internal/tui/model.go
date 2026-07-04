@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textarea"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"shmorby/internal/agent"
 	ctxcomp "shmorby/internal/context"
 	"shmorby/internal/llm"
@@ -1747,6 +1748,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.SetWidth(msg.Width)
 		m.textarea.SetWidth(msg.Width)
 		m.textarea.SetHeight(m.inputLineHeight())
+		m.ensureLayout()
 		return m, nil
 
 	case tea.KeyMsg:
@@ -3008,6 +3010,7 @@ func (m *Model) ensureLayout() {
 		return
 	}
 	inputHeight := m.inputLineHeight()
+	// upper separator + lower separator + status bar.
 	statusHeight := 3
 	if m.tabBar.Visible() {
 		statusHeight++
@@ -3130,23 +3133,8 @@ func (m Model) View() string {
 		sections = append(sections, m.renderHaltPrompt(m.width))
 	}
 
-	// Upper separator — show spinner when running.
-	if m.running {
-		elapsed := time.Since(m.startTime).Round(time.Second)
-		spinnerText := fmt.Sprintf(
-			"%s %s (%s)",
-			m.spinner.View(),
-			m.spinnerText,
-			elapsed,
-		)
-		sections = append(sections,
-			m.theme.Separator.Render(spinnerText),
-		)
-	} else {
-		sections = append(sections,
-			m.renderSeparator(""),
-		)
-	}
+	// Upper separator.
+	sections = append(sections, m.renderSeparator(""))
 
 	// Input line — plain text, no lipgloss styling on typed chars.
 	promptChar := m.theme.PromptNormal.Render("❯")
@@ -3333,10 +3321,17 @@ func (m Model) renderReverseSearch() string {
 	return b.String()
 }
 
-// renderTabBar renders the session tab bar.
+// renderTabBar renders the session tab bar with horizontal scrolling.
 func (m Model) renderTabBar() string {
 	tabs := m.tabBar.Tabs()
-	var b strings.Builder
+	activeIdx := m.tabBar.ActiveIndex()
+
+	type tabRendered struct {
+		str   string
+		width int
+	}
+	renders := make([]tabRendered, len(tabs))
+	totalW := 0
 	for i, t := range tabs {
 		label := t.Label
 		switch {
@@ -3345,19 +3340,79 @@ func (m Model) renderTabBar() string {
 		case t.Status == "error":
 			label += " ✗"
 		}
-		if i == m.tabBar.ActiveIndex() {
-			b.WriteString(m.theme.TabActive.Render(
-				" " + label + " ",
-			))
+		var style lipgloss.Style
+		if i == activeIdx {
+			style = m.theme.TabActive
+		} else if t.Spinning {
+			style = m.theme.TabSpin
 		} else {
-			style := m.theme.TabInactive
-			if t.Spinning {
-				style = m.theme.TabSpin
-			}
-			b.WriteString(style.Render(" " + label + " "))
+			style = m.theme.TabInactive
 		}
+		s := style.Render(" " + label + " ")
+		renders[i] = tabRendered{s, lipgloss.Width(s)}
+		totalW += renders[i].width
 	}
-	return b.String()
+
+	if totalW <= m.width {
+		var b strings.Builder
+		for _, r := range renders {
+			b.WriteString(r.str)
+		}
+		return b.String()
+	}
+
+	indW := 1
+	contentW := m.width - 2*indW
+	if contentW <= 0 {
+		return ""
+	}
+
+	activeStart := 0
+	for i := 0; i < activeIdx; i++ {
+		activeStart += renders[i].width
+	}
+	activeEnd := activeStart + renders[activeIdx].width
+
+	offset := m.tabBar.ScrollOffset()
+	if activeEnd > offset+contentW {
+		offset = activeEnd - contentW
+	}
+	if activeStart < offset {
+		offset = activeStart
+	}
+	if maxOff := totalW - contentW; offset > maxOff {
+		offset = maxOff
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	m.tabBar.SetScrollOffset(offset)
+
+	var b strings.Builder
+	pos := 0
+	for _, r := range renders {
+		endPos := pos + r.width
+		if endPos <= offset {
+			pos = endPos
+			continue
+		}
+		if pos >= offset+contentW {
+			break
+		}
+		if pos >= offset && endPos <= offset+contentW {
+			b.WriteString(r.str)
+		}
+		pos = endPos
+	}
+
+	result := b.String()
+	if offset > 0 {
+		result = m.theme.TabOverflow.Render("◂") + result
+	}
+	if offset+contentW < totalW {
+		result += m.theme.TabOverflow.Render("▸")
+	}
+	return result
 }
 
 // switchSessionTab switches to the tab with the given ID, swapping
