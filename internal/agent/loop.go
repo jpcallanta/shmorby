@@ -100,6 +100,10 @@ func RunTurn(
 		Messages: msgs,
 	}
 
+	if err := checkContextWindow(modelInfo, compressor, &req, ctx, sess); err != nil {
+		return "", err
+	}
+
 	resp, err := p.Chat(ctx, req)
 	if err != nil {
 		return "", fmt.Errorf("chat: %w", err)
@@ -244,6 +248,10 @@ func RunTurnWithTools(
 			System:   sys,
 			Messages: msgs,
 			Tools:    toolDefs,
+		}
+
+		if err := checkContextWindow(modelInfo, compressor, &req, ctx, sess); err != nil {
+			return "", err
 		}
 
 		resp, err := p.Chat(ctx, req)
@@ -435,6 +443,11 @@ func RunTurnWithTools(
 		Messages: msgs,
 	}
 
+	// Apply MaxTokens via side effect; discard context-overflow error
+	// intentionally — this path already falls back to a generic limit
+	// message on any Chat failure below.
+	_ = checkContextWindow(modelInfo, nil, &req, ctx, sess)
+
 	resp, err := p.Chat(ctx, req)
 	if err != nil {
 		slog.Warn("summary LLM call failed, falling back to "+
@@ -580,6 +593,10 @@ func RunTurnWithToolsStream(
 			System:   sys,
 			Messages: msgs,
 			Tools:    toolDefs,
+		}
+
+		if err := checkContextWindow(modelInfo, compressor, &req, ctx, sess); err != nil {
+			return "", err
 		}
 
 		stream, sErr := p.ChatStream(ctx, req)
@@ -777,6 +794,11 @@ func RunTurnWithToolsStream(
 		Messages: msgs,
 	}
 
+	// Apply MaxTokens via side effect; discard context-overflow error
+	// intentionally — this path already falls back to a generic limit
+	// message on any Chat failure below.
+	_ = checkContextWindow(modelInfo, nil, &req, ctx, sess)
+
 	resp, cErr := p.Chat(ctx, req)
 	if cErr != nil {
 		slog.Warn("summary LLM call failed, falling back to "+
@@ -801,6 +823,101 @@ func RunTurnWithToolsStream(
 	sess.AppendMessages(pending)
 
 	return resp.Text(), nil
+}
+
+// Provides a rough upper-bound on total request tokens using a chars/4
+// heuristic. Includes system, messages, and serialized tool definitions.
+// The chars/4 heuristic is intentionally simple (no tiktoken dependency)
+// since this is a safety check — overestimating is safe, and exact counts
+// aren't needed to catch context overflow.
+func estimateRequestTokens(sysPrompt string, msgs []llm.Message, tools []llm.ToolDef) int {
+	total := (len(sysPrompt) + 3) / 4
+	for _, m := range msgs {
+		total += (len(m.Content) + 3) / 4
+	}
+	if len(tools) > 0 {
+		data, err := json.Marshal(tools)
+		if err != nil {
+			total += 256 // conservative fallback per tool set
+		} else {
+			total += (len(data) + 3) / 4
+		}
+	}
+
+	return total
+}
+
+// Verifies the estimated request fits within the model's context window,
+// applies MaxTokens from ModelInfo, and if the estimate exceeds 90% of
+// the window it tries emergency compression via the compressor. Returns
+// a fatal error when compression is insufficient. The 90% threshold is a
+// safety margin — below this the model typically handles mid-request
+// truncation gracefully; above it the provider often returns a hard error.
+func checkContextWindow(
+	modelInfo llm.ModelInfo,
+	compressor *ctxcomp.Compressor,
+	req *llm.ChatRequest,
+	ctx context.Context,
+	sess *session.Session,
+) error {
+	// Apply output token cap from model metadata.
+	if modelInfo.MaxOutputTokens > 0 {
+		req.MaxTokens = modelInfo.MaxOutputTokens
+	}
+
+	// Bail early when no context window is known.
+	if modelInfo.ContextWindow <= 0 {
+		return nil
+	}
+
+	estimated := estimateRequestTokens(req.System, req.Messages, req.Tools)
+	limit := int(float64(modelInfo.ContextWindow) * 0.9)
+
+	// Within safe range — no action needed.
+	if estimated <= limit {
+		return nil
+	}
+
+	// Emergency compression: temporarily switch to aggressive mode and
+	// re-estimate after rebuilding messages from the compressed session.
+	if compressor != nil {
+		slog.Warn("request exceeds 90% of context window, forcing compression",
+			"estimated", estimated, "limit", limit)
+		origMode := compressor.Config().Mode
+		compressor.SetMode("aggressive")
+		if cErr := compressor.Compress(ctx, sess, modelInfo); cErr != nil {
+			slog.Warn("emergency compression failed", "err", cErr)
+		}
+		compressor.SetMode(origMode)
+
+		history := sess.Messages()
+		rebuilt := make([]llm.Message, 0, len(history)+len(req.Messages))
+		for _, m := range history {
+			rebuilt = append(rebuilt, llm.Message{
+				Role:       m.Role,
+				Content:    m.Content,
+				ToolName:   m.ToolName,
+				ToolCallID: m.ToolCallID,
+				ToolCalls:  m.ToolCalls,
+			})
+		}
+		for i := len(history); i < len(req.Messages); i++ {
+			rebuilt = append(rebuilt, req.Messages[i])
+		}
+		req.Messages = rebuilt
+		estimated = estimateRequestTokens(req.System, req.Messages, req.Tools)
+	}
+
+	// Still over limit after compression — fatal.
+	if estimated > limit {
+		return fmt.Errorf(
+			"estimated request tokens (%d) exceeds 90%% of context "+
+				"window (%d); try /reset or adjust compression settings",
+			estimated, modelInfo.ContextWindow,
+		)
+	}
+
+	return nil
 }
 
 // Only returns schemas for tools allowed in diagnose mode: shell, ssh,

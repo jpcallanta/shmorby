@@ -1,10 +1,13 @@
 package navigation
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os/exec"
 	"strings"
+	"syscall"
+	"time"
 )
 
 // Executor runs shell commands (same interface as tools.Executor).
@@ -15,11 +18,39 @@ type Executor interface {
 // OSExecutor uses the real os/exec package.
 type OSExecutor struct{}
 
-// Run executes a command and returns combined output.
+// Run executes a command and returns combined output, with
+// process-group isolation so the entire process tree is killed
+// when the context is cancelled.
 func (OSExecutor) Run(
 	ctx context.Context, name string, args ...string,
 ) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+	cmd := exec.Command(name, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start: %w", err)
+	}
+
+	go func() {
+		<-ctx.Done()
+		if cmd.Process != nil {
+			syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+	}()
+
+	err := cmd.Wait()
+	if ctx.Err() != nil {
+		return buf.Bytes(), fmt.Errorf("exec: %w", ctx.Err())
+	}
+	if err != nil {
+		return buf.Bytes(), err
+	}
+
+	return buf.Bytes(), nil
 }
 
 // Output holds the result of a shell command execution.
@@ -99,9 +130,9 @@ func (h *ShellCmdHandler) Handle(input string) (bool, Output, error) {
 		return true, Output{},
 			fmt.Errorf("tool: permission denied")
 	}
-	out, err := h.executor.Run(
-		context.Background(), h.shell, "-c", cmd,
-	)
+	execCtx, execCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer execCancel()
+	out, err := h.executor.Run(execCtx, h.shell, "-c", cmd)
 	exitCode := 0
 	var stderr string
 	if err != nil {

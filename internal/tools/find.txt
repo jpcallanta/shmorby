@@ -1,0 +1,11 @@
+## find
+
+Searches the filesystem for files and directories matching a glob pattern.
+Use this instead of the shell `find` command when you need to search for files
+by name pattern. This tool is cancellable and cannot hang on stuck filesystems.
+
+Parameters:
+- `path` (string): Root directory to search from (default: current directory)
+- `pattern` (string): Glob pattern, e.g. "*.go", "*.log"
+- `type` (string): Filter by "file", "dir", or "" (both)
+- `max_depth` (integer): Maximum directory depth (default: 100)

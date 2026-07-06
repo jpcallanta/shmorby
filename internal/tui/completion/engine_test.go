@@ -15,8 +15,8 @@ func TestComplete_NoPrefix(t *testing.T) {
 func TestComplete_Slash(t *testing.T) {
 	e := New()
 	matches := e.Complete("/")
-	if len(matches) != 9 {
-		t.Errorf("want 9 commands, got %d", len(matches))
+	if len(matches) != 11 {
+		t.Errorf("want 11 commands, got %d", len(matches))
 	}
 }
 
@@ -45,11 +45,19 @@ func TestComplete_CaseInsensitive(t *testing.T) {
 func TestComplete_AgentPrefix(t *testing.T) {
 	e := New()
 	matches := e.Complete("/a")
-	if len(matches) != 1 {
-		t.Fatalf("want 1 match (/agent), got %d", len(matches))
+	if len(matches) != 2 {
+		t.Fatalf("want 2 matches (/agent, /apikey), got %d",
+			len(matches))
 	}
-	if matches[0].Name != "/agent" {
-		t.Errorf("want /agent, got %s", matches[0].Name)
+	found := make(map[string]bool)
+	for _, m := range matches {
+		found[m.Name] = true
+	}
+	if !found["/agent"] {
+		t.Error("want /agent in matches")
+	}
+	if !found["/apikey"] {
+		t.Error("want /apikey in matches")
 	}
 }
 
@@ -64,7 +72,7 @@ func TestComplete_NoMatch(t *testing.T) {
 func TestAll(t *testing.T) {
 	e := New()
 	all := e.All()
-	if len(all) != 9 {
-		t.Errorf("want 9 commands, got %d", len(all))
+	if len(all) != 11 {
+		t.Errorf("want 11 commands, got %d", len(all))
 	}
 }

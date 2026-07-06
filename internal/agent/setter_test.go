@@ -624,3 +624,95 @@ func TestSet_RequiresRestart_PrefixMatch(t *testing.T) {
 		})
 	}
 }
+
+// TestSet_APIKey_SetsCorrectField verifies the apikey is written to
+// the correct config field for each provider type.
+func TestSet_APIKey_SetsCorrectField(t *testing.T) {
+	tests := []struct {
+		provider string
+		cfgField func(cfg *config.Config) *string
+	}{
+		{
+			"openai",
+			func(cfg *config.Config) *string {
+				return &cfg.OpenAI.APIKey
+			},
+		},
+		{
+			"openrouter",
+			func(cfg *config.Config) *string {
+				return &cfg.OpenRouter.APIKey
+			},
+		},
+		{
+			"opencode_zen",
+			func(cfg *config.Config) *string {
+				return &cfg.OpencodeZen.APIKey
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.provider, func(t *testing.T) {
+			cfg := config.Config{
+				Provider: tt.provider,
+				Model:    "gpt-4o",
+			}
+			cfg.OpenAI.APIKey = "sk-old"
+			cfg.OpenRouter.APIKey = "sk-old"
+			cfg.OpencodeZen.APIKey = "sk-old"
+			var prov llm.Provider
+			co := NewConfigOverrider(&cfg, &prov, nil, nil, nil)
+			_, err := co.Set("apikey", "sk-test")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got := *tt.cfgField(&cfg); got != "sk-test" {
+				t.Errorf("apikey = %q, want %q", got, "sk-test")
+			}
+		})
+	}
+}
+
+// TestSet_APIKey_OllamaError verifies ollama returns an error.
+func TestSet_APIKey_OllamaError(t *testing.T) {
+	cfg := config.Config{
+		Provider: "ollama",
+		Model:    "llama3.2",
+	}
+	co := NewConfigOverrider(&cfg, nil, nil, nil, nil)
+	_, err := co.Set("apikey", "sk-test")
+	if err == nil {
+		t.Fatal("expected error for ollama")
+	}
+}
+
+// TestSet_APIKey_UnknownProviderError verifies unknown provider errors.
+func TestSet_APIKey_UnknownProviderError(t *testing.T) {
+	cfg := config.Config{
+		Provider: "unknown",
+		Model:    "gpt-4o",
+	}
+	co := NewConfigOverrider(&cfg, nil, nil, nil, nil)
+	_, err := co.Set("apikey", "sk-test")
+	if err == nil {
+		t.Fatal("expected error for unknown provider")
+	}
+}
+
+// TestSet_APIKey_RecreatesProvider verifies provider pointer is updated.
+func TestSet_APIKey_RecreatesProvider(t *testing.T) {
+	cfg := config.Config{
+		Provider: "openai",
+		Model:    "gpt-4o",
+	}
+	cfg.OpenAI.APIKey = "sk-test-123"
+	var prov llm.Provider
+	co := NewConfigOverrider(&cfg, &prov, nil, nil, nil)
+	_, err := co.Set("apikey", "sk-test-456")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if prov == nil {
+		t.Error("provider should not be nil after apikey switch")
+	}
+}

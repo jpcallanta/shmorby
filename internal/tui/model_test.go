@@ -1439,3 +1439,320 @@ func (f *fakeProvider) ModelInfo(
 ) (llm.ModelInfo, error) {
 	return llm.ModelInfo{}, nil
 }
+
+// TestTUIModelCommand_NoArg verifies /model prints current.
+func TestTUIModelCommand_NoArg(t *testing.T) {
+	m := NewModel(Config{
+		Model: "test-model",
+	})
+	m.width = 80
+	m.height = 24
+	m.model = "llama3"
+	m.provider = &fakeProvider{name: "openai"}
+
+	cmd, done, err := m.handleCommand("/model")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cmd {
+		t.Error("expected command handled")
+	}
+	if done {
+		t.Error("should not quit")
+	}
+	if len(m.output) == 0 {
+		t.Fatal("expected output entries")
+	}
+	last := m.output[len(m.output)-1]
+	if !strings.Contains(last.text, "openai (llama3)") {
+		t.Errorf(
+			"want provider and model, got %q", last.text,
+		)
+	}
+}
+
+// TestTUIModelCommand_Switch verifies /model <name> switches model.
+func TestTUIModelCommand_Switch(t *testing.T) {
+	cfg := config.Config{
+		Provider: "ollama",
+		Model:    "llama3",
+	}
+	co := agent.NewConfigOverrider(
+		&cfg, nil, nil, nil, nil,
+	)
+
+	m := NewModel(Config{
+		ConfigOverrider: co,
+	})
+	m.width = 80
+	m.height = 24
+	m.model = "llama3"
+	m.provider = &fakeProvider{name: "ollama"}
+
+	cmd, done, err := m.handleCommand("/model gpt-4o")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cmd {
+		t.Error("expected command handled")
+	}
+	if done {
+		t.Error("should not quit")
+	}
+	if m.model != "gpt-4o" {
+		t.Errorf("m.model = %q, want %q", m.model, "gpt-4o")
+	}
+	if len(m.output) == 0 {
+		t.Fatal("expected output entries")
+	}
+	last := m.output[len(m.output)-1]
+	if !strings.Contains(last.text, `model set to "gpt-4o"`) {
+		t.Errorf(
+			"want confirmation, got %q", last.text,
+		)
+	}
+}
+
+// TestTUIModelCommand_NilConfigOverrider verifies error when nil.
+func TestTUIModelCommand_NilConfigOverrider(t *testing.T) {
+	m := NewModel(Config{
+		Model: "llama3",
+	})
+	m.width = 80
+	m.height = 24
+
+	cmd, done, err := m.handleCommand("/model gpt-4o")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cmd {
+		t.Error("expected command handled")
+	}
+	if done {
+		t.Error("should not quit")
+	}
+	if len(m.output) == 0 {
+		t.Fatal("expected output entries")
+	}
+	last := m.output[len(m.output)-1]
+	if !strings.Contains(
+		last.text, "Config override not available.",
+	) {
+		t.Errorf(
+			"want error, got %q", last.text,
+		)
+	}
+}
+
+// TestTUI_PlatformCommand_NoArg verifies /platform prints current.
+func TestTUI_PlatformCommand_NoArg(t *testing.T) {
+	m := NewModel(Config{
+		Model: "test-model",
+	})
+	m.width = 80
+	m.height = 24
+	m.provider = &fakeProvider{name: "openai"}
+
+	cmd, done, err := m.handleCommand("/platform")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cmd {
+		t.Error("expected command handled")
+	}
+	if done {
+		t.Error("should not quit")
+	}
+	if len(m.output) == 0 {
+		t.Fatal("expected output entries")
+	}
+	last := m.output[len(m.output)-1]
+	if !strings.Contains(last.text, "openai") {
+		t.Errorf(
+			"want provider name, got %q", last.text,
+		)
+	}
+}
+
+// TestTUI_PlatformCommand_Switch verifies /platform <name> switches.
+func TestTUI_PlatformCommand_Switch(t *testing.T) {
+	cfg := config.Config{
+		Provider: "openai",
+		Model:    "gpt-4o",
+	}
+	cfg.OpenAI.APIKey = "sk-test"
+	var prov llm.Provider = &fakeProvider{name: "openai"}
+	co := agent.NewConfigOverrider(
+		&cfg, &prov, nil, nil, nil,
+	)
+
+	m := NewModel(Config{
+		ConfigOverrider: co,
+	})
+	m.width = 80
+	m.height = 24
+	m.model = "gpt-4o"
+	m.provider = &fakeProvider{name: "ollama"}
+
+	cmd, done, err := m.handleCommand("/platform openai")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cmd {
+		t.Error("expected command handled")
+	}
+	if done {
+		t.Error("should not quit")
+	}
+	if len(m.output) == 0 {
+		t.Fatal("expected output entries")
+	}
+	last := m.output[len(m.output)-1]
+	if !strings.Contains(
+		last.text, `provider set to "openai"`,
+	) {
+		t.Errorf(
+			"want confirmation, got %q", last.text,
+		)
+	}
+}
+
+// TestTUI_PlatformCommand_Invalid verifies /platform bogus shows error.
+func TestTUI_PlatformCommand_Invalid(t *testing.T) {
+	cfg := config.Config{
+		Provider: "ollama",
+		Model:    "llama3",
+	}
+	co := agent.NewConfigOverrider(
+		&cfg, nil, nil, nil, nil,
+	)
+
+	m := NewModel(Config{
+		ConfigOverrider: co,
+	})
+	m.width = 80
+	m.height = 24
+	m.model = "llama3"
+	m.provider = &fakeProvider{name: "ollama"}
+
+	cmd, done, err := m.handleCommand("/platform bogus")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cmd {
+		t.Error("expected command handled")
+	}
+	if done {
+		t.Error("should not quit")
+	}
+	if len(m.output) == 0 {
+		t.Fatal("expected output entries")
+	}
+	last := m.output[len(m.output)-1]
+	if !strings.Contains(last.text, "invalid provider") {
+		t.Errorf(
+			"want error, got %q", last.text,
+		)
+	}
+}
+
+// TestTUI_ApikeyCommand_NoArg verifies /apikey prints message.
+func TestTUI_ApikeyCommand_NoArg(t *testing.T) {
+	m := NewModel(Config{
+		Model: "test-model",
+	})
+	m.width = 80
+	m.height = 24
+
+	cmd, done, err := m.handleCommand("/apikey")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cmd {
+		t.Error("expected command handled")
+	}
+	if done {
+		t.Error("should not quit")
+	}
+	if len(m.output) == 0 {
+		t.Fatal("expected output entries")
+	}
+	last := m.output[len(m.output)-1]
+	if !strings.Contains(last.text, "apikey is set") {
+		t.Errorf(
+			"want apikey message, got %q", last.text,
+		)
+	}
+}
+
+// TestTUI_ApikeyCommand_Set verifies /apikey sk-... sets key.
+func TestTUI_ApikeyCommand_Set(t *testing.T) {
+	cfg := config.Config{
+		Provider: "openai",
+		Model:    "gpt-4o",
+	}
+	cfg.OpenAI.APIKey = "sk-old"
+	var prov llm.Provider = &fakeProvider{name: "openai"}
+	co := agent.NewConfigOverrider(
+		&cfg, &prov, nil, nil, nil,
+	)
+
+	m := NewModel(Config{
+		ConfigOverrider: co,
+	})
+	m.width = 80
+	m.height = 24
+	m.model = "gpt-4o"
+	m.provider = &fakeProvider{name: "openai"}
+
+	cmd, done, err := m.handleCommand("/apikey sk-new")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cmd {
+		t.Error("expected command handled")
+	}
+	if done {
+		t.Error("should not quit")
+	}
+	if len(m.output) == 0 {
+		t.Fatal("expected output entries")
+	}
+	last := m.output[len(m.output)-1]
+	if !strings.Contains(last.text, "apikey set") {
+		t.Errorf(
+			"want confirmation, got %q", last.text,
+		)
+	}
+}
+
+// TestTUI_ApikeyCommand_NilOverrider verifies error when nil.
+func TestTUI_ApikeyCommand_NilOverrider(t *testing.T) {
+	m := NewModel(Config{
+		Model: "gpt-4o",
+	})
+	m.width = 80
+	m.height = 24
+
+	cmd, done, err := m.handleCommand("/apikey sk-new")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cmd {
+		t.Error("expected command handled")
+	}
+	if done {
+		t.Error("should not quit")
+	}
+	if len(m.output) == 0 {
+		t.Fatal("expected output entries")
+	}
+	last := m.output[len(m.output)-1]
+	if !strings.Contains(
+		last.text, "Config override not available.",
+	) {
+		t.Errorf(
+			"want error, got %q", last.text,
+		)
+	}
+}

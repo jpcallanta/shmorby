@@ -40,7 +40,7 @@ scope:
 
 # ── Tools ──────────────────────
 tools:
-  timeout: 1800
+  timeout: 120
   shell:
     enabled: true
   sudo:
@@ -100,8 +100,8 @@ memory:
 # caching — no config needed.
 context:
   enabled: true
-  mode: auto                   # auto | aggressive | conservative | off
-  threshold: 0.8
+  mode: aggressive                   # auto | aggressive | conservative | off
+  threshold: 0.5
   max_tool_output_tokens: 4096
   max_tool_output_lines: 0     # 0 = unlimited
   max_tool_output_bytes: 0     # 0 = unlimited
@@ -109,4 +109,4 @@ context:
   summary_provider: ""
   offload_to_memory: true
   min_messages_to_compress: 6
-  fallback_context_window: 128000
+  fallback_context_window: 32000

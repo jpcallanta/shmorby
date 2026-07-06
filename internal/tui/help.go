@@ -84,6 +84,8 @@ func helpContent(mode string, params []agent.ParamInfo) []helpSection {
 				"  /quit              Exit shmorby",
 				"  /reset             Clear conversation history",
 				"  /model <name>      Switch LLM model",
+				"  /platform <name>   Switch LLM provider",
+				"  /apikey <key>      Set API key for current provider",
 				"  /agent <mode>      Switch agent mode",
 				"  /scope             Show loaded scope context",
 				"  /memory            Memory management",

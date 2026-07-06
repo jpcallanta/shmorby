@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"shmorby/internal/config"
 	"shmorby/internal/llm"
 	"shmorby/internal/session"
 	"shmorby/internal/tools"
@@ -223,29 +224,242 @@ func TestREPL_ResetCommand_ClearsSession(t *testing.T) {
 	}
 }
 
-// TestREPL_ModelCommand_PrintsProvider checks /model prints provider and model.
-func TestREPL_ModelCommand_PrintsProvider(t *testing.T) {
-	in := strings.NewReader("/model\n/quit\n")
-	var out strings.Builder
+// TestREPL_ModelCommand covers all /model paths.
+func TestREPL_ModelCommand(t *testing.T) {
+	t.Run("no-arg prints current", func(t *testing.T) {
+		in := strings.NewReader("/model\n/quit\n")
+		var out strings.Builder
+		p := &fakeProvider{name: "fake"}
+		r := &REPL{
+			Provider: p,
+			Session:  session.New(),
+			Mode:     "operate",
+			Model:    "llama3",
+			In:       in,
+			Out:      &out,
+		}
+		err := r.Run(context.Background())
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if !strings.Contains(out.String(), "fake (llama3)") {
+			t.Errorf(
+				"want 'fake (llama3)' in output, got:\n%s",
+				out.String(),
+			)
+		}
+	})
 
-	p := &fakeProvider{name: "fake"}
-	r := &REPL{
-		Provider: p,
-		Session:  session.New(),
-		Mode:     "operate",
-		Model:    "llama3",
-		In:       in,
-		Out:      &out,
-	}
+	t.Run("switch model", func(t *testing.T) {
+		cfg := config.Config{
+			Provider: "ollama",
+			Model:    "llama3.2",
+		}
+		co := NewConfigOverrider(&cfg, nil, nil, nil, nil)
+		in := strings.NewReader("/model gpt-4o\n/quit\n")
+		var out strings.Builder
+		p := &fakeProvider{name: "openai"}
+		r := &REPL{
+			Provider:        p,
+			Session:         session.New(),
+			Mode:            "operate",
+			Model:           "llama3.2",
+			In:              in,
+			Out:             &out,
+			ConfigOverrider: co,
+		}
+		err := r.Run(context.Background())
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if !strings.Contains(
+			out.String(), `model set to "gpt-4o"`,
+		) {
+			t.Errorf(
+				"want confirmation in output, got:\n%s",
+				out.String(),
+			)
+		}
+		if r.Model != "gpt-4o" {
+			t.Errorf(
+				"r.Model = %q, want %q",
+				r.Model, "gpt-4o",
+			)
+		}
+	})
 
-	err := r.Run(context.Background())
-	if err != nil {
-		t.Fatalf("Run: %v", err)
-	}
+	t.Run("error path", func(t *testing.T) {
+		in := strings.NewReader("/model gpt-4o\n/quit\n")
+		var out strings.Builder
+		p := &fakeProvider{name: "openai"}
+		r := &REPL{
+			Provider: p,
+			Session:  session.New(),
+			Mode:     "operate",
+			Model:    "llama3.2",
+			In:       in,
+			Out:      &out,
+		}
+		err := r.Run(context.Background())
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if !strings.Contains(
+			out.String(), "Config override not available.",
+		) {
+			t.Errorf("want error message in output")
+		}
+	})
+}
 
-	if !strings.Contains(out.String(), "fake (llama3)") {
-		t.Errorf("want 'fake (llama3)' in output, got:\n%s", out.String())
-	}
+// TestREPL_PlatformCommand covers /platform paths.
+func TestREPL_PlatformCommand(t *testing.T) {
+	t.Run("no-arg prints current", func(t *testing.T) {
+		in := strings.NewReader("/platform\n/quit\n")
+		var out strings.Builder
+		p := &fakeProvider{name: "openai"}
+		r := &REPL{
+			Provider: p,
+			Session:  session.New(),
+			Mode:     "operate",
+			Model:    "llama3.2",
+			In:       in,
+			Out:      &out,
+		}
+		err := r.Run(context.Background())
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if !strings.Contains(out.String(), "openai") {
+			t.Errorf("want 'openai' in output")
+		}
+	})
+
+	t.Run("switch provider", func(t *testing.T) {
+		cfg := config.Config{
+			Provider: "openai",
+			Model:    "gpt-4o",
+		}
+		cfg.OpenAI.APIKey = "sk-test"
+		var prov llm.Provider = &fakeProvider{name: "openai"}
+		co := NewConfigOverrider(
+			&cfg, &prov, nil, nil, nil,
+		)
+		in := strings.NewReader("/platform openai\n/quit\n")
+		var out strings.Builder
+		p := &fakeProvider{name: "openai"}
+		r := &REPL{
+			Provider:        p,
+			Session:         session.New(),
+			Mode:            "operate",
+			Model:           "gpt-4o",
+			In:              in,
+			Out:             &out,
+			ConfigOverrider: co,
+		}
+		err := r.Run(context.Background())
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if !strings.Contains(
+			out.String(), `provider set to "openai"`,
+		) {
+			t.Errorf(
+				"want confirmation in output, got:\n%s",
+				out.String(),
+			)
+		}
+	})
+
+	t.Run("invalid provider", func(t *testing.T) {
+		cfg := config.Config{
+			Provider: "ollama",
+			Model:    "llama3.2",
+		}
+		co := NewConfigOverrider(&cfg, nil, nil, nil, nil)
+		in := strings.NewReader("/platform bogus\n/quit\n")
+		var out strings.Builder
+		p := &fakeProvider{name: "ollama"}
+		r := &REPL{
+			Provider:        p,
+			Session:         session.New(),
+			Mode:            "operate",
+			Model:           "llama3.2",
+			In:              in,
+			Out:             &out,
+			ConfigOverrider: co,
+		}
+		err := r.Run(context.Background())
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if !strings.Contains(out.String(), "invalid provider") {
+			t.Errorf(
+				"want error in output, got:\n%s",
+				out.String(),
+			)
+		}
+	})
+}
+
+// TestREPL_ApikeyCommand covers /apikey paths.
+func TestREPL_ApikeyCommand(t *testing.T) {
+	t.Run("set apikey", func(t *testing.T) {
+		cfg := config.Config{
+			Provider: "openai",
+			Model:    "gpt-4o",
+		}
+		cfg.OpenAI.APIKey = "sk-old"
+		var prov llm.Provider = &fakeProvider{name: "openai"}
+		co := NewConfigOverrider(
+			&cfg, &prov, nil, nil, nil,
+		)
+		in := strings.NewReader("/apikey sk-new\n/quit\n")
+		var out strings.Builder
+		p := &fakeProvider{name: "openai"}
+		r := &REPL{
+			Provider:        p,
+			Session:         session.New(),
+			Mode:            "operate",
+			Model:           "gpt-4o",
+			In:              in,
+			Out:             &out,
+			ConfigOverrider: co,
+		}
+		err := r.Run(context.Background())
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if !strings.Contains(out.String(), "apikey set") {
+			t.Errorf(
+				"want confirmation in output, got:\n%s",
+				out.String(),
+			)
+		}
+	})
+
+	t.Run("nil overrider", func(t *testing.T) {
+		in := strings.NewReader("/apikey sk-new\n/quit\n")
+		var out strings.Builder
+		p := &fakeProvider{name: "openai"}
+		r := &REPL{
+			Provider: p,
+			Session:  session.New(),
+			Mode:     "operate",
+			Model:    "gpt-4o",
+			In:       in,
+			Out:      &out,
+		}
+		err := r.Run(context.Background())
+		if err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		if !strings.Contains(
+			out.String(), "Config override not available.",
+		) {
+			t.Errorf("want error message in output")
+		}
+	})
 }
 
 // TestREPL_AgentCommand_PrintsMode checks /agent prints current mode.
@@ -1332,6 +1546,144 @@ func TestRunTurnWithTools_ClampMaxIterations(t *testing.T) {
 	if len(p.calls) != 1 {
 		t.Errorf("want 1 provider call (clamped to 1), got %d",
 			len(p.calls))
+	}
+}
+
+// TestEstimateRequestTokens_Empty checks empty inputs produce zero.
+func TestEstimateRequestTokens_Empty(t *testing.T) {
+	got := estimateRequestTokens("", nil, nil)
+	if got != 0 {
+		t.Errorf("want 0 for empty inputs, got %d", got)
+	}
+}
+
+// TestEstimateRequestTokens_SystemOnly checks system prompt is counted.
+func TestEstimateRequestTokens_SystemOnly(t *testing.T) {
+	got := estimateRequestTokens("hello world", nil, nil)
+	if got <= 0 {
+		t.Errorf("want >0 for non-empty system, got %d", got)
+	}
+	// chars/4 heuristic: "hello world" = 11 chars → 2 tokens (ceil)
+	if got != 3 {
+		t.Errorf("want 3 for 'hello world', got %d", got)
+	}
+}
+
+// TestEstimateRequestTokens_Messages checks message contents are counted.
+func TestEstimateRequestTokens_Messages(t *testing.T) {
+	msgs := []llm.Message{
+		{Role: "user", Content: "hello"},
+		{Role: "assistant", Content: "world"},
+	}
+	got := estimateRequestTokens("", msgs, nil)
+	if got != 4 {
+		t.Errorf("want 4 for two 5-char messages, got %d", got)
+	}
+}
+
+// TestEstimateRequestTokens_Tools checks tool defs are counted.
+func TestEstimateRequestTokens_Tools(t *testing.T) {
+	tools := []llm.ToolDef{
+		{Name: "shell", Description: "Run a shell command", Parameters: `{"type":"object"}`},
+	}
+	got := estimateRequestTokens("", nil, tools)
+	if got <= 0 {
+		t.Errorf("want >0 for tool defs, got %d", got)
+	}
+}
+
+// TestEstimateRequestTokens_AllComponents checks sum of all parts.
+func TestEstimateRequestTokens_AllComponents(t *testing.T) {
+	msgs := []llm.Message{
+		{Role: "user", Content: "hello"},
+	}
+	tools := []llm.ToolDef{
+		{Name: "shell"},
+	}
+	got := estimateRequestTokens("sys", msgs, tools)
+	// sys=1 token, hello=1 token, tools json ~18 bytes → 4 tokens → want >=6
+	if got < 5 {
+		t.Errorf("want >=5 for all components, got %d", got)
+	}
+}
+
+// TestCheckContextWindow_AppliesMaxTokens checks MaxTokens is set.
+func TestCheckContextWindow_AppliesMaxTokens(t *testing.T) {
+	req := &llm.ChatRequest{}
+	err := checkContextWindow(
+		llm.ModelInfo{MaxOutputTokens: 4096, ContextWindow: 128000},
+		nil, req, context.Background(), session.New(),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if req.MaxTokens != 4096 {
+		t.Errorf("want MaxTokens=4096, got %d", req.MaxTokens)
+	}
+}
+
+// TestCheckContextWindow_NilCompressorNoPanic checks nil compressor is safe.
+func TestCheckContextWindow_NilCompressorNoPanic(t *testing.T) {
+	req := &llm.ChatRequest{System: "x", Messages: []llm.Message{
+		{Role: "user", Content: string(make([]byte, 100000))},
+	}}
+	modelInfo := llm.ModelInfo{
+		ContextWindow: 100,
+	}
+	err := checkContextWindow(
+		modelInfo, nil, req, context.Background(), session.New(),
+	)
+	if err == nil {
+		t.Fatal("expected context window error, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Errorf("want 'exceeds' in error, got %v", err)
+	}
+}
+
+// TestCheckContextWindow_WithinWindow_NoError checks no error when
+// request is within 90% of the context window.
+func TestCheckContextWindow_WithinWindow_NoError(t *testing.T) {
+	req := &llm.ChatRequest{System: "hi", Messages: []llm.Message{
+		{Role: "user", Content: "hello world"},
+	}}
+	modelInfo := llm.ModelInfo{
+		ContextWindow: 100,
+	}
+	err := checkContextWindow(
+		modelInfo, nil, req, context.Background(), session.New(),
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+// TestCheckContextWindow_ZeroContextWindow_SkipsCheck checks no error
+// when context window is unknown.
+func TestCheckContextWindow_ZeroContextWindow_SkipsCheck(t *testing.T) {
+	req := &llm.ChatRequest{System: "x", Messages: []llm.Message{
+		{Role: "user", Content: string(make([]byte, 100000))},
+	}}
+	modelInfo := llm.ModelInfo{}
+	err := checkContextWindow(
+		modelInfo, nil, req, context.Background(), session.New(),
+	)
+	if err != nil {
+		t.Fatalf("expected no error for zero context window, got %v", err)
+	}
+}
+
+// TestEstimateRequestTokens_ToolMarshalError_ConservativeFallback checks
+// that when json.Marshal fails on tools, a conservative fallback is used
+// instead of silently underestimating.
+func TestEstimateRequestTokens_ToolMarshalError_ConservativeFallback(t *testing.T) {
+	// A channel can't be marshalled to JSON, causing Marshal to fail.
+	tools := []llm.ToolDef{
+		{Name: "shell", Parameters: make(chan int)},
+	}
+	got := estimateRequestTokens("", nil, tools)
+	if got <= 0 {
+		t.Errorf("want >0 conservative fallback for marshal error, got %d", got)
 	}
 }
 

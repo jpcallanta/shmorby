@@ -23,6 +23,8 @@ func New() *Engine {
 			{Name: "/quit", Description: "Exit shmorby"},
 			{Name: "/reset", Description: "Clear session history"},
 			{Name: "/model", Description: "Switch LLM model"},
+			{Name: "/platform", Description: "Switch LLM provider"},
+			{Name: "/apikey", Description: "Set API key for current provider"},
 			{Name: "/agent", Description: "Switch agent mode (operate/diagnose)"},
 			{Name: "/scope", Description: "Show loaded scope files"},
 			{Name: "/memory", Description: "Memory management"},

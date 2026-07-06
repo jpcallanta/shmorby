@@ -78,9 +78,10 @@ func (o *opencodeZenProvider) Chat(
 	baseURL, effectiveModel := o.resolveModel(model)
 
 	body := openaiRequest{
-		Model:    effectiveModel,
-		Messages: buildOpenAIMessages(req),
-		Tools:    buildOpenAITools(req.Tools),
+		Model:     effectiveModel,
+		Messages:  buildOpenAIMessages(req),
+		Tools:     buildOpenAITools(req.Tools),
+		MaxTokens: req.MaxTokens,
 	}
 
 	resp, err := doOpenAIRequest(

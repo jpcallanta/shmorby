@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -131,6 +133,9 @@ var (
 				tAWS.SetDefaultTimeout(cfg.Tools.Timeout)
 				reg.Register(tAWS)
 			}
+
+			tFind := tools.NewFindTool(cfg.Permission.Shell)
+			reg.Register(tFind)
 
 			// Initialize memory store.
 			var memStore memory.Store
@@ -342,6 +347,19 @@ var (
 			}
 			reg.Register(tools.NewTaskTool(orch))
 
+			// Propagate SIGINT/SIGTERM to the root context so
+			// running tool executions are cancelled promptly.
+			rootCtx, rootCancel := context.WithCancel(cmd.Context())
+			defer rootCancel()
+
+			sigCh := make(chan os.Signal, 1)
+			signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+			go func() {
+				<-sigCh
+				rootCancel()
+				signal.Stop(sigCh)
+			}()
+
 			// Use TUI when terminal and --no-tui not set.
 			if !noTuiFlag && isTerminal() {
 				if err := tuicl.Init(); err != nil {
@@ -443,7 +461,7 @@ var (
 				ConfigOverrider: overrider,
 			}
 
-			return repl.Run(cmd.Context())
+			return repl.Run(rootCtx)
 		},
 	}
 )

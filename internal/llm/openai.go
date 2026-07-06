@@ -64,9 +64,10 @@ func (p *openaiProvider) Chat(
 	}
 
 	body := openaiRequest{
-		Model:    model,
-		Messages: buildOpenAIMessages(req),
-		Tools:    buildOpenAITools(req.Tools),
+		Model:     model,
+		Messages:  buildOpenAIMessages(req),
+		Tools:     buildOpenAITools(req.Tools),
+		MaxTokens: req.MaxTokens,
 	}
 
 	resp, err := p.doRequest(ctx, body)
@@ -91,10 +92,11 @@ func (p *openaiProvider) ChatStream(
 	}
 
 	body := openaiRequest{
-		Model:    model,
-		Messages: buildOpenAIMessages(req),
-		Tools:    buildOpenAITools(req.Tools),
-		Stream:   true,
+		Model:     model,
+		Messages:  buildOpenAIMessages(req),
+		Tools:     buildOpenAITools(req.Tools),
+		Stream:    true,
+		MaxTokens: req.MaxTokens,
 	}
 
 	var buf bytes.Buffer

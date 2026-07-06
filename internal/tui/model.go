@@ -2613,6 +2613,45 @@ func (m *Model) handleCommand(line string) (bool, bool, error) {
 		return true, false, nil
 
 	case "/model":
+		if len(parts) >= 2 {
+			if m.configOverrider == nil {
+				m.output = append(m.output, outputEntry{
+					kind: "agent",
+					text: "Config override not available.",
+				})
+				m.syncViewport()
+				return true, false, nil
+			}
+			msg, err := m.configOverrider.Set("model", parts[1])
+			if err != nil {
+				m.output = append(m.output, outputEntry{
+					kind: "error",
+					text: fmt.Sprintf("error: %v", err),
+				})
+				m.syncViewport()
+				return true, false, nil
+			}
+			m.model = parts[1]
+			llm.InvalidateModelInfo(parts[1])
+			if m.provider != nil {
+				if fetcher, ok := m.provider.(llm.ModelInfoFetcher); ok {
+					info, fetchErr := llm.FetchModelInfo(
+						context.Background(),
+						fetcher, parts[1],
+						m.configOverrider.Config(),
+					)
+					if fetchErr == nil {
+						m.modelInfo = info
+					}
+				}
+			}
+			m.output = append(m.output, outputEntry{
+				kind: "agent",
+				text: msg,
+			})
+			m.syncViewport()
+			return true, false, nil
+		}
 		providerName := "none"
 		if m.provider != nil {
 			providerName = m.provider.Name()
@@ -2620,6 +2659,100 @@ func (m *Model) handleCommand(line string) (bool, bool, error) {
 		m.output = append(m.output, outputEntry{
 			kind: "agent",
 			text: fmt.Sprintf("%s (%s)", providerName, m.model),
+		})
+		m.syncViewport()
+		return true, false, nil
+
+	case "/platform":
+		if len(parts) >= 2 {
+			if m.configOverrider == nil {
+				m.output = append(m.output, outputEntry{
+					kind: "agent",
+					text: "Config override not available.",
+				})
+				m.syncViewport()
+				return true, false, nil
+			}
+			msg, err := m.configOverrider.Set(
+				"provider", parts[1],
+			)
+			if err != nil {
+				m.output = append(m.output, outputEntry{
+					kind: "error",
+					text: fmt.Sprintf("error: %v", err),
+				})
+				m.syncViewport()
+				return true, false, nil
+			}
+			if newProv := m.configOverrider.Provider(); newProv != nil {
+				m.provider = newProv
+			}
+			llm.InvalidateModelInfo(m.model)
+			if m.provider != nil {
+				if fetcher, ok := m.provider.(llm.ModelInfoFetcher); ok {
+					info, fetchErr := llm.FetchModelInfo(
+						context.Background(),
+						fetcher, m.model,
+						m.configOverrider.Config(),
+					)
+					if fetchErr == nil {
+						m.modelInfo = info
+					}
+				}
+			}
+			m.output = append(m.output, outputEntry{
+				kind: "agent",
+				text: msg,
+			})
+			m.syncViewport()
+			return true, false, nil
+		}
+		providerName := "none"
+		if m.provider != nil {
+			providerName = m.provider.Name()
+		}
+		m.output = append(m.output, outputEntry{
+			kind: "agent",
+			text: providerName,
+		})
+		m.syncViewport()
+		return true, false, nil
+
+	case "/apikey":
+		if len(parts) >= 2 {
+			if m.configOverrider == nil {
+				m.output = append(m.output, outputEntry{
+					kind: "agent",
+					text: "Config override not available.",
+				})
+				m.syncViewport()
+				return true, false, nil
+			}
+			value := strings.Join(parts[1:], " ")
+			msg, err := m.configOverrider.Set(
+				"apikey", value,
+			)
+			if err != nil {
+				m.output = append(m.output, outputEntry{
+					kind: "error",
+					text: fmt.Sprintf("error: %v", err),
+				})
+				m.syncViewport()
+				return true, false, nil
+			}
+			if newProv := m.configOverrider.Provider(); newProv != nil {
+				m.provider = newProv
+			}
+			m.output = append(m.output, outputEntry{
+				kind: "agent",
+				text: msg,
+			})
+			m.syncViewport()
+			return true, false, nil
+		}
+		m.output = append(m.output, outputEntry{
+			kind: "agent",
+			text: "apikey is set (use /apikey <key> to change)",
 		})
 		m.syncViewport()
 		return true, false, nil

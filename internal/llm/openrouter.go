@@ -54,9 +54,10 @@ func (o *openRouterProvider) Chat(
 	}
 
 	body := openaiRequest{
-		Model:    model,
-		Messages: buildOpenAIMessages(req),
-		Tools:    buildOpenAITools(req.Tools),
+		Model:     model,
+		Messages:  buildOpenAIMessages(req),
+		Tools:     buildOpenAITools(req.Tools),
+		MaxTokens: req.MaxTokens,
 	}
 
 	resp, err := doOpenAIRequest(

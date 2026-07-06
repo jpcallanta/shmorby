@@ -109,6 +109,36 @@ func (co *ConfigOverrider) Set(param, value string) (string, error) {
 
 		return fmt.Sprintf("model set to %q", value), nil
 
+	// --- API Key ---
+	case "apikey":
+		switch co.cfg.Provider {
+		case "openai":
+			co.cfg.OpenAI.APIKey = value
+		case "openrouter":
+			co.cfg.OpenRouter.APIKey = value
+		case "opencode_zen":
+			co.cfg.OpencodeZen.APIKey = value
+		case "ollama":
+			return "", fmt.Errorf(
+				"ollama has no API key; set base URL via config",
+			)
+		default:
+			return "", fmt.Errorf("unknown provider %q",
+				co.cfg.Provider)
+		}
+		newProv, err := llm.NewProvider(*co.cfg)
+		if err != nil {
+			return "", fmt.Errorf(
+				"cannot reconnect with new key: %w", err,
+			)
+		}
+		if co.provider != nil {
+			*co.provider = newProv
+		}
+		llm.InvalidateModelInfo(co.cfg.Model)
+
+		return "apikey set (provider reconnecting...)", nil
+
 	// --- Agent ---
 	case "agent.default":
 		if err := config.ValidateAgent(value); err != nil {
@@ -643,6 +673,11 @@ func (co *ConfigOverrider) Provider() llm.Provider {
 		return *co.provider
 	}
 	return nil
+}
+
+// Config returns a copy of the current config.
+func (co *ConfigOverrider) Config() config.Config {
+	return *co.cfg
 }
 
 // Export for compiler check of interface conformance.

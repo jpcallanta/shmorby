@@ -551,7 +551,72 @@ func (r *REPL) handleCommand(line string) (bool, bool, error) {
 		return true, false, nil
 
 	case "/model":
+		if len(parts) >= 2 {
+			if r.ConfigOverrider == nil {
+				fmt.Fprintln(
+					r.Out, "Config override not available.",
+				)
+				return true, false, nil
+			}
+			msg, err := r.ConfigOverrider.Set("model", parts[1])
+			if err != nil {
+				fmt.Fprintf(r.Out, "error: %v\n", err)
+				return true, false, nil
+			}
+			r.Model = parts[1]
+			fmt.Fprintln(r.Out, msg)
+			return true, false, nil
+		}
 		fmt.Fprintf(r.Out, "%s (%s)\n", r.Provider.Name(), r.Model)
+
+		return true, false, nil
+
+	case "/platform":
+		if len(parts) >= 2 {
+			if r.ConfigOverrider == nil {
+				fmt.Fprintln(
+					r.Out, "Config override not available.",
+				)
+				return true, false, nil
+			}
+			msg, err := r.ConfigOverrider.Set(
+				"provider", parts[1],
+			)
+			if err != nil {
+				fmt.Fprintf(r.Out, "error: %v\n", err)
+				return true, false, nil
+			}
+			if newProv := r.ConfigOverrider.Provider(); newProv != nil {
+				r.Provider = newProv
+			}
+			fmt.Fprintln(r.Out, msg)
+			return true, false, nil
+		}
+		fmt.Fprintf(r.Out, "%s\n", r.Provider.Name())
+
+		return true, false, nil
+
+	case "/apikey":
+		if len(parts) >= 2 {
+			if r.ConfigOverrider == nil {
+				fmt.Fprintln(
+					r.Out, "Config override not available.",
+				)
+				return true, false, nil
+			}
+			value := strings.Join(parts[1:], " ")
+			msg, err := r.ConfigOverrider.Set("apikey", value)
+			if err != nil {
+				fmt.Fprintf(r.Out, "error: %v\n", err)
+				return true, false, nil
+			}
+			fmt.Fprintln(r.Out, msg)
+			return true, false, nil
+		}
+		fmt.Fprintln(
+			r.Out,
+			"apikey is set (use /apikey <key> to change)",
+		)
 
 		return true, false, nil
 
@@ -876,6 +941,8 @@ SLASH COMMANDS
   /quit              Exit shmorby
   /reset             Clear conversation history
   /model <name>      Switch LLM model
+  /platform <name>   Switch LLM provider
+  /apikey <key>      Set API key for current provider
   /agent <mode>      Switch agent mode
   /scope             Show loaded scope context
   /memory            Memory management

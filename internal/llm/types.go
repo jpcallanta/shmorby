@@ -28,10 +28,11 @@ type ToolDef struct {
 
 // ChatRequest is sent to the LLM provider.
 type ChatRequest struct {
-	Model    string    `json:"model"`
-	System   string    `json:"system"`
-	Messages []Message `json:"messages"`
-	Tools    []ToolDef `json:"tools"`
+	Model     string    `json:"model"`
+	System    string    `json:"system"`
+	Messages  []Message `json:"messages"`
+	Tools     []ToolDef `json:"tools"`
+	MaxTokens int       `json:"max_tokens,omitempty"`
 }
 
 // ChatResponse is returned from the LLM provider.

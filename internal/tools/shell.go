@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
+	"syscall"
 	"time"
 
 	"shmorby/internal/xdg"
@@ -133,21 +135,62 @@ func (s *ShellTool) Run(
 	)
 	defer cancel()
 
-	cmd := exec.CommandContext(cmdCtx, s.shell, "-c", a.Command)
+	cmd := exec.Command(s.shell, "-c", a.Command)
 	cmd.Dir = cwd
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return "", fmt.Errorf("stdout pipe: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return "", fmt.Errorf("stderr pipe: %w", err)
+	}
 
 	start := time.Now()
-	out, err := cmd.CombinedOutput()
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("start: %w", err)
+	}
+
+	go func() {
+		<-cmdCtx.Done()
+		if cmd.Process != nil {
+			syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+	}()
+
+	var outBuf, errBuf strings.Builder
+	readDone := make(chan error, 2)
+
+	go func() {
+		_, err := io.Copy(&outBuf, &contextReader{r: stdout, ctx: cmdCtx})
+		readDone <- err
+	}()
+	go func() {
+		_, err := io.Copy(&errBuf, &contextReader{r: stderr, ctx: cmdCtx})
+		readDone <- err
+	}()
+
+	for i := 0; i < 2; i++ {
+		if rErr := <-readDone; rErr != nil && !errors.Is(rErr, context.Canceled) {
+			slog.Warn("pipe read error", "err", rErr)
+		}
+	}
+
+	waitErr := cmd.Wait()
 	elapsed := time.Since(start)
+
+	out := []byte(outBuf.String() + errBuf.String())
 
 	// Determine exit code for output.
 	exitStr := "0"
-	if err != nil {
+	if waitErr != nil {
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
+		if errors.As(waitErr, &exitErr) {
 			exitStr = fmt.Sprintf("%d", exitErr.ExitCode())
 		} else {
-			exitStr = fmt.Sprintf("error: %v", err)
+			exitStr = fmt.Sprintf("error: %v", waitErr)
 		}
 	}
 
@@ -160,11 +203,17 @@ func (s *ShellTool) Run(
 
 	truncated := TruncateOutput(out)
 
-	if err != nil {
+	if errors.Is(cmdCtx.Err(), context.DeadlineExceeded) {
+		return string(truncated), fmt.Errorf(
+			"shell exec timed out after %ds", timeout,
+		)
+	}
+	if errors.Is(cmdCtx.Err(), context.Canceled) {
+		return string(truncated), fmt.Errorf("shell exec cancelled")
+	}
+	if waitErr != nil {
 		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() > 0 {
-			// Non-zero exit: append exit code to output, return as
-			// success so phase 6 gets the full result text.
+		if errors.As(waitErr, &exitErr) && exitErr.ExitCode() > 0 {
 			result := string(truncated)
 			if result != "" && !strings.HasSuffix(result, "\n") {
 				result += "\n"
@@ -173,9 +222,7 @@ func (s *ShellTool) Run(
 
 			return result, nil
 		}
-		// Other error (timeout, exec failure, signal kill):
-		// return as error.
-		return string(truncated), fmt.Errorf("shell exec: %w", err)
+		return string(truncated), fmt.Errorf("shell exec: %w", waitErr)
 	}
 
 	return string(truncated), nil

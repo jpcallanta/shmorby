@@ -51,10 +51,11 @@ type openaiFunctionCall struct {
 }
 
 type openaiRequest struct {
-	Model    string          `json:"model"`
-	Messages []openaiMessage `json:"messages"`
-	Tools    []openaiTool    `json:"tools,omitempty"`
-	Stream   bool            `json:"stream,omitempty"`
+	Model     string          `json:"model"`
+	Messages  []openaiMessage `json:"messages"`
+	Tools     []openaiTool    `json:"tools,omitempty"`
+	Stream    bool            `json:"stream,omitempty"`
+	MaxTokens int             `json:"max_tokens,omitempty"`
 }
 
 type openaiChoice struct {

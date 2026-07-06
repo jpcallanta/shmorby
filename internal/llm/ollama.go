@@ -15,10 +15,11 @@ import (
 
 // ollamaRequest is the JSON body sent to /api/chat.
 type ollamaRequest struct {
-	Model    string          `json:"model"`
-	Messages []ollamaMessage `json:"messages"`
-	Stream   bool            `json:"stream"`
-	Tools    []ollamaTool    `json:"tools,omitempty"`
+	Model     string          `json:"model"`
+	Messages  []ollamaMessage `json:"messages"`
+	Stream    bool            `json:"stream"`
+	Tools     []ollamaTool    `json:"tools,omitempty"`
+	MaxTokens int             `json:"max_tokens,omitempty"`
 }
 
 type ollamaTool struct {
@@ -92,10 +93,11 @@ func (o *ollamaProvider) Chat(
 	tools := buildTools(req.Tools)
 
 	body := ollamaRequest{
-		Model:    model,
-		Messages: messages,
-		Stream:   false,
-		Tools:    tools,
+		Model:     model,
+		Messages:  messages,
+		Stream:    false,
+		Tools:     tools,
+		MaxTokens: req.MaxTokens,
 	}
 
 	resp, err := o.doRequest(ctx, body)
