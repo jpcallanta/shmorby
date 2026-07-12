@@ -3148,6 +3148,10 @@ func (m *Model) ensureLayout() {
 	if m.tabBar.Visible() {
 		statusHeight++
 	}
+	// New content indicator pushes status bar down by 1.
+	if !m.viewport.FollowMode() && m.viewport.NewContent() {
+		statusHeight++
+	}
 	vpHeight := m.height - inputHeight - statusHeight
 	if vpHeight < 1 {
 		vpHeight = 1

@@ -8,6 +8,11 @@ import (
 	"shmorby/internal/xdg"
 )
 
+// MCPConfig holds MCP server configurations.
+type MCPConfig struct {
+	Servers map[string]tools.MCPServerConfig `yaml:"servers"`
+}
+
 // Config is Phase 1 configuration.
 //
 // Merge behavior: later sources override earlier keys.
@@ -66,6 +71,7 @@ type Config struct {
 		SSH         string                 `yaml:"ssh"`
 		Sudo        string                 `yaml:"sudo"`
 		AWS         string                 `yaml:"aws"`
+		MCP         string                 `yaml:"mcp"`
 		Interactive bool                   `yaml:"interactive"`
 		Presets     []string               `yaml:"presets"`
 		Rules       []tools.PermissionRule `yaml:"rules"`
@@ -96,6 +102,8 @@ type Config struct {
 	} `yaml:"memory"`
 
 	Context ContextConfig `yaml:"context"`
+
+	MCP MCPConfig `yaml:"mcp"`
 }
 
 // ModelOverride holds user-specified model metadata.
@@ -143,6 +151,7 @@ func defaultConfig() Config {
 	cfg.Permission.SSH = "ask"
 	cfg.Permission.Sudo = "ask"
 	cfg.Permission.AWS = "ask"
+	cfg.Permission.MCP = "ask"
 	cfg.Permission.Interactive = true
 
 	cfg.TUI.Fullscreen = true

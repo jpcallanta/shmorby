@@ -40,7 +40,7 @@ scope:
 
 # ── Tools ──────────────────────
 tools:
-  timeout: 120
+  timeout: 1800
   shell:
     enabled: true
   sudo:
@@ -54,6 +54,7 @@ permission:
   ssh: ask
   sudo: ask
   aws: ask
+  mcp: ask
   interactive: true
   presets: []
   rules: []
@@ -95,13 +96,25 @@ memory:
     model: nomic-embed-text
     base_url: ""
 
+# ── MCP servers ────────────────
+# mcp:
+#   servers:
+#     db:
+#       command: npx
+#       args: ["-y", "@modelcontextprotocol/server-postgres", "postgresql://..."]
+#     k8s:
+#       command: docker
+#       args: ["run", "-i", "--rm", "mcp/k8s"]
+#       env:
+#         - "KUBECONFIG=/home/user/.kube/config"
+
 # ── Context compression ────────
 # Message ordering is optimized for OpenAI automatic prefix
 # caching — no config needed.
 context:
   enabled: true
-  mode: aggressive                   # auto | aggressive | conservative | off
-  threshold: 0.5
+  mode: auto                   # auto | aggressive | conservative | off
+  threshold: 0.8
   max_tool_output_tokens: 4096
   max_tool_output_lines: 0     # 0 = unlimited
   max_tool_output_bytes: 0     # 0 = unlimited
@@ -109,4 +122,4 @@ context:
   summary_provider: ""
   offload_to_memory: true
   min_messages_to_compress: 6
-  fallback_context_window: 32000
+  fallback_context_window: 128000

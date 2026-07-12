@@ -95,7 +95,12 @@ func (m Model) renderStatus() string {
 			m.theme.StatusKey.Render("")+
 				" "+m.theme.StatusValue.Render(ctx))
 	}
-	return strings.Join(parts, " │ ")
+	result := strings.Join(parts, " │ ")
+	if w := m.width - 2; w > 0 && lipgloss.Width(result) > w {
+		result = lipgloss.NewStyle().MaxWidth(w).Render(result)
+	}
+
+	return result
 }
 
 // renderLogSection renders expanded log entries.

@@ -347,6 +347,31 @@ var (
 			}
 			reg.Register(tools.NewTaskTool(orch))
 
+			// Initialize MCP manager.
+			var mcpManager *tools.MCPManager
+			if len(cfg.MCP.Servers) > 0 {
+				mcpManager = tools.NewMCPManager(
+					cfg.MCP.Servers, reg,
+				)
+				if err := mcpManager.Start(
+					cmd.Context(),
+				); err != nil {
+					slog.Warn("MCP manager error", "err", err)
+				}
+
+				// Apply MCP permission level.
+				mcpPerm := cfg.Permission.MCP
+				if mcpPerm == "" {
+					mcpPerm = "ask"
+				}
+				mcpManager.SetDefaultPermLevel(mcpPerm)
+			}
+			defer func() {
+				if mcpManager != nil {
+					mcpManager.Shutdown()
+				}
+			}()
+
 			// Propagate SIGINT/SIGTERM to the root context so
 			// running tool executions are cancelled promptly.
 			rootCtx, rootCancel := context.WithCancel(cmd.Context())
