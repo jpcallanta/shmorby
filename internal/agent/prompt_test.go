@@ -42,6 +42,24 @@ func TestSystemPrompt_Diagnose_ContainsEmbed(t *testing.T) {
 	}
 }
 
+// TestSystemPrompt_Chat_ContainsEmbed checks chat mode contains embedded
+// prompt.
+func TestSystemPrompt_Chat_ContainsEmbed(t *testing.T) {
+	prompt, err := SystemPrompt("chat", "", "")
+	if err != nil {
+		t.Fatalf("SystemPrompt(chat): %v", err)
+	}
+	if prompt == "" {
+		t.Fatal("chat prompt should not be empty")
+	}
+	if !strings.Contains(prompt, "conversational assistant") {
+		t.Fatalf("want prompt to contain 'conversational assistant'")
+	}
+	if !strings.Contains(prompt, "web search") {
+		t.Fatalf("want prompt to contain 'web search'")
+	}
+}
+
 // TestSystemPrompt_WithScope_AppendsScope checks scope content is appended.
 func TestSystemPrompt_WithScope_AppendsScope(t *testing.T) {
 	prompt, err := SystemPrompt("operate", "SCOPE CONTENT HERE", "")

@@ -80,24 +80,29 @@ var taskParamsSchema = json.RawMessage(`{
 // TaskTool implements Tool for dispatching subagents.
 type TaskTool struct {
 	orch *TaskOrchestrator
+	perm string // "allow", "ask", or "deny"; default "ask"
 }
 
 // NewTaskTool creates a TaskTool with the given orchestrator.
 func NewTaskTool(orch *TaskOrchestrator) *TaskTool {
-	return &TaskTool{orch: orch}
+	return &TaskTool{orch: orch, perm: "ask"}
 }
+
+// SetPerm sets the permission level for this tool.
+func (t *TaskTool) SetPerm(level string) { t.perm = level }
 
 func (t *TaskTool) Name() string { return "task" }
 
 func (t *TaskTool) Description() string {
 	return "Dispatch sub-agent tasks. Use when you have multiple " +
 		"independent pieces of work that could be done concurrently. " +
-		"Each subtask gets its own agent session with full tool access. " +
+		"Each subtask gets its own agent session with tool access " +
+		"inherited from the parent session's permission constraints. " +
 		"Set parallel: true for concurrent execution, false for sequential. " +
 		"Results are returned as a JSON array of per-task outputs."
 }
 
-func (t *TaskTool) PermLevel() string { return "allow" }
+func (t *TaskTool) PermLevel() string { return t.perm }
 
 func (t *TaskTool) Parameters() json.RawMessage { return taskParamsSchema }
 

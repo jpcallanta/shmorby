@@ -2,8 +2,16 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"sync"
+	"time"
+
+	"shmorby/internal/audit"
 )
+
+// maxSubagentDepth limits recursive subagent spawning to prevent
+// arbitrary-depth permission bypass chains.
+const maxSubagentDepth = 3
 
 // TaskOrchestrator manages subagent dispatch and result collection.
 type TaskOrchestrator struct {
@@ -12,6 +20,21 @@ type TaskOrchestrator struct {
 
 	// MaxParallel limits concurrent subagents (default 5).
 	MaxParallel int
+
+	// AuditLogger is the audit logger for subagent events.
+	AuditLogger *audit.Logger
+
+	// ParentSessionID is the parent session ID for subagent linkage.
+	ParentSessionID string
+
+	// PermFunc is the parent session's permission callback. Stored as
+	// any to avoid an import cycle (tools → agent → tools). The
+	// concrete type is agent.ToolPermissionFunc. Passed to subagents
+	// so they respect the same permission constraints.
+	PermFunc any
+
+	// Depth is the current subagent nesting depth (0 = top-level).
+	Depth int
 }
 
 // defaultMaxParallel is the default concurrency limit.
@@ -57,7 +80,27 @@ func (o *TaskOrchestrator) DispatchTasks(
 			defer wg.Done()
 			defer func() { <-throttle }()
 
+			start := time.Now()
 			result := o.runSubtask(ctx, it.task)
+			duration := time.Since(start)
+
+			if o.AuditLogger != nil && o.ParentSessionID != "" {
+				status := "completed"
+				if result.Status == "error" {
+					status = "failed"
+				}
+				o.AuditLogger.LogSubagent(audit.SubagentAudit{
+					ParentSessionID: o.ParentSessionID,
+					ChildSessionID:  result.TaskID,
+					Tool:            "task",
+					Status:          status,
+				})
+				durMs := duration.Milliseconds()
+				o.AuditLogger.CompleteSubagent(
+					result.TaskID, durMs, status,
+				)
+			}
+
 			results[it.idx] = result
 		}(it)
 	}
@@ -77,6 +120,14 @@ func (o *TaskOrchestrator) runSubtask(
 			Description: task.Description,
 			Status:      "error",
 			Error:       "orchestrator: RunSubtask not configured",
+		}
+	}
+	if o.Depth >= maxSubagentDepth {
+		return TaskResult{
+			TaskID:      task.ID,
+			Description: task.Description,
+			Status:      "error",
+			Error:       fmt.Sprintf("subagent depth limit exceeded (max %d)", maxSubagentDepth),
 		}
 	}
 	return o.RunSubtask(ctx, task)

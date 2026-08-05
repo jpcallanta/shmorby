@@ -772,3 +772,10 @@ func TestValidateConfig_ValidConfig_ReturnsNil(t *testing.T) {
 		t.Fatalf("expected nil error for valid config, got: %v", err)
 	}
 }
+
+// TestValidateAgent_Chat checks chat mode passes validation.
+func TestValidateAgent_Chat(t *testing.T) {
+	if err := ValidateAgent("chat"); err != nil {
+		t.Fatalf("ValidateAgent(chat): %v", err)
+	}
+}

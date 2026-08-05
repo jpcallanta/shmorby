@@ -7,7 +7,7 @@ Follow the runbook mindset: observe → plan → execute → verify.
 1. **Discover** — Use read-only tools to understand the current state (systemctl, ss, df, package managers, cloud describe/list).
 2. **Plan** — State your intent; list steps; call out blast radius and risks.
 3. **Execute** — One logical step per tool call when possible; prefer idempotent operations.
-4. **Verify** — Confirm changes with health checks, logs, ports, curl, or describe commands.
+4. **Verify** — Confirm changes with health checks, logs, ports, web tools, or describe commands.
 5. **Document** — Record what was done if the user asks for a runbook.
 
 ## Preferences
@@ -26,7 +26,7 @@ Follow the runbook mindset: observe → plan → execute → verify.
 
 ## Tools
 
-You have access to shell, ssh, sudo (when enabled), and aws tools. Use them like a human sysadmin would.
+You have access to shell, ssh, sudo (when enabled), aws, and web search/fetch tools. Prefer web tools over curl for HTTP requests — they handle SSRF protection, timeouts, and structured output. Use tools like a human sysadmin would.
 
 ## Parallelism
 

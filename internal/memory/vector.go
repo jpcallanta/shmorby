@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	chromem "github.com/philippgille/chromem-go"
 )
@@ -99,14 +100,7 @@ func entryMetadata(e MemoryEntry) map[string]string {
 	}
 
 	if len(e.Tags) > 0 {
-		tagStr := ""
-		for i, t := range e.Tags {
-			if i > 0 {
-				tagStr += ","
-			}
-			tagStr += t
-		}
-		m["tags"] = tagStr
+		m["tags"] = strings.Join(e.Tags, ",")
 	}
 
 	return m

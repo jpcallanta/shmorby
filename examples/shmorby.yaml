@@ -48,6 +48,24 @@ tools:
   aws:
     enabled: false
 
+# ── Websearch ──────────────────
+# Both tools disabled by default. Available in all agent modes when enabled.
+# websearch:
+#   enabled: false                    # Enable web search
+#   engine: searxng                   # "searxng" (local, no CAPTCHAs) or "exa" (cloud)
+#   base_url: http://localhost:8888   # SearXNG instance URL (required for searxng)
+#                                     # SearXNG must have JSON format enabled in settings.yml:
+#                                     #   search:
+#                                     #     formats:
+#                                     #       - html
+#                                     #       - json
+#   # exa_api_key: "sk-exa-..."      # Required for exa engine (get from exa.ai)
+#
+# webfetch:
+#   enabled: false                    # Enable URL fetching
+#                                     # SSRF protection: blocks private/loopback IPs
+#                                     # Max 64 KiB default, 1 MiB absolute max
+
 # ── Permission ─────────────────
 permission:
   shell: ask
@@ -68,6 +86,11 @@ tui:
   theme: catppuccin-mocha
   glamour:
     enabled: true
+  # Status descriptions for the spinner.
+  # Generates meaningful labels from tool name and command (no LLM needed).
+  # Examples: "running df -h", "ssh: uptime", "searching: golang concurrency"
+  # Set to "off" to disable.
+  # status_model: "off"  # disable status descriptions
   nav:
     follow_mode: true
     scroll_lines_per_tick: 5
@@ -75,6 +98,31 @@ tui:
     history_size: 100
     keybinds:
       leader: ctrl+x
+      agent_cycle: tab
+      agent_cycle_reverse: shift+tab
+      command_list: ctrl+p
+      history_search: ctrl+r
+      session_new: '<leader>n'
+      session_list: '<leader>l'
+      session_compact: '<leader>c'
+      model_list: '<leader>m'
+      theme_list: '<leader>t'
+      agent_list: '<leader>a'
+      session_undo: '<leader>u'
+      session_redo: '<leader>r'
+      editor_open: '<leader>e'
+      session_export: '<leader>x'
+      app_exit: '<leader>q'
+      status_view: '<leader>s'
+      sidebar_toggle: '<leader>b'
+      tips_toggle: '<leader>h'
+      messages_copy: '<leader>y'
+      session_child_first: '<leader>down'
+      session_parent: up
+      session_child_cycle: right
+      session_child_cycle_reverse: left
+    scroll_acceleration:
+      enabled: false
     references: []
   logging:
     enabled: true
@@ -123,3 +171,11 @@ context:
   offload_to_memory: true
   min_messages_to_compress: 6
   fallback_context_window: 128000
+
+# ── Audit ──────────────────────
+audit:
+  enabled: true
+  db_path: ~/.local/share/shmorby/audit.db
+  output_capture_max_bytes: 65536
+  retention_days: 365
+  async_buffer_size: 100

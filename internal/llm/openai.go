@@ -224,6 +224,10 @@ func (p *openaiProvider) fetchModelInfo(
 		)
 	}
 
+	// The real OpenAI /v1/models/{model} endpoint does NOT return
+	// context_length or max_context_length. The struct fields will
+	// always decode to 0. We check them for forward-compat with
+	// any future API change, then fall back to the builtin registry.
 	var resp struct {
 		Data struct {
 			ContextLength    int `json:"context_length"`
@@ -239,7 +243,15 @@ func (p *openaiProvider) fetchModelInfo(
 		cw = resp.Data.MaxContextLength
 	}
 	if cw == 0 {
-		cw = 8192
+		cw, _ = matchOpenAIContextWindow(model)
+	}
+	if cw == 0 {
+		// Return error so FetchModelInfo falls through to config
+		// override → ErrModelInfoFallback instead of silently
+		// caching 8192 as authoritative.
+		return ModelInfo{}, fmt.Errorf(
+			"model %q context length unknown", model,
+		)
 	}
 
 	return ModelInfo{
@@ -256,6 +268,94 @@ func (p *openaiProvider) ModelInfo(
 		model = p.model
 	}
 	return FetchModelInfo(ctx, p, model, p.cfg)
+}
+
+// Known context windows for OpenAI models.
+// The /v1/models API does not return context_length, so we maintain
+// this map as our source of truth.
+//
+// Snapshot/date-stamped model IDs (e.g. gpt-4o-mini-2024-07-18)
+// resolve via the longest registry key that is a prefix of the
+// requested name — see matchOpenAIContextWindow.
+var openAIModelContextWindows = map[string]int{
+	// GPT-5 series — keep in sync with zenModelContextWindows
+	// (opencode_zen.go) to avoid drift.
+	"gpt-5.5":             272000,
+	"gpt-5.5-pro":         272000,
+	"gpt-5.4":             272000,
+	"gpt-5.4-pro":         272000,
+	"gpt-5.4-mini":        272000,
+	"gpt-5.4-nano":        272000,
+	"gpt-5.3-codex":       272000,
+	"gpt-5.3-codex-spark": 272000,
+	"gpt-5.2":             272000,
+	"gpt-5.2-codex":       272000,
+	"gpt-5.1":             272000,
+	"gpt-5.1-codex":       272000,
+	"gpt-5.1-codex-max":   272000,
+	"gpt-5.1-codex-mini":  272000,
+	"gpt-5":               272000,
+	"gpt-5-codex":         272000,
+	"gpt-5-nano":          272000,
+
+	// GPT-4.1 (1M context)
+	"gpt-4.1":      1048576,
+	"gpt-4.1-mini": 1048576,
+	"gpt-4.1-nano": 1048576,
+
+	// GPT-4o / o-series
+	"o1":                200000,
+	"o1-mini":           128000,
+	"o1-preview":        128000,
+	"o3":                200000,
+	"o3-mini":           200000,
+	"o4-mini":           200000,
+	"o4-mini-high":      200000,
+	"gpt-4o":            128000,
+	"gpt-4o-mini":       128000,
+	"gpt-4o-audio":      128000,
+	"gpt-4o-search":     128000,
+	"chatgpt-4o-latest": 128000,
+
+	// GPT-4 Turbo / Legacy
+	"gpt-4-turbo":         128000,
+	"gpt-4-turbo-preview": 128000,
+	"gpt-4":               8192,
+	"gpt-4-32k":           32768,
+
+	// GPT-3.5 Turbo
+	"gpt-3.5-turbo":     16385,
+	"gpt-3.5-turbo-16k": 16385,
+}
+
+// matchOpenAIContextWindow returns the known context window for a
+// model. An exact registry key wins; otherwise the longest key that
+// is a prefix of the model ending at a name boundary (dash, dot, or
+// underscore) is used, so snapshot IDs like gpt-4o-mini-2024-07-18
+// resolve to gpt-4o-mini (128000). Returns false when no key matches.
+func matchOpenAIContextWindow(model string) (int, bool) {
+	if cw, ok := openAIModelContextWindows[model]; ok {
+		return cw, true
+	}
+
+	best := 0
+	bestCW := 0
+	found := false
+	for key, cw := range openAIModelContextWindows {
+		if len(key) <= best || len(key) >= len(model) {
+			continue
+		}
+		if !strings.HasPrefix(model, key) {
+			continue
+		}
+		if c := model[len(key)]; c != '-' && c != '.' && c != '_' {
+			continue
+		}
+		best = len(key)
+		bestCW = cw
+		found = true
+	}
+	return bestCW, found
 }
 
 // Sends an OpenAI request with retries for 429 and 5xx errors.

@@ -835,6 +835,7 @@ func TestRunTurnWithTools_ToolCallThenResult(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -900,6 +901,7 @@ func TestRunTurnWithTools_MaxIterations(t *testing.T) {
 		"operate", "", "", "m", "do it",
 		reg, 2, true,
 		nil, nil, nil, llm.ModelInfo{},
+		nil,
 		nil,
 		nil,
 		nil,
@@ -995,6 +997,7 @@ func TestRunTurnWithTools_UnknownToolError(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -1047,6 +1050,7 @@ func TestRunTurnWithTools_SecondChat_IncludesAssistantToolCalls(t *testing.T) {
 		"operate", "", "", "m", "test",
 		reg, 5, true,
 		nil, nil, nil, llm.ModelInfo{},
+		nil,
 		nil,
 		nil,
 		nil,
@@ -1117,6 +1121,7 @@ func TestRunTurnWithTools_PartialOutputOnError(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -1160,6 +1165,7 @@ func TestRunTurnWithTools_ShellDisabled(t *testing.T) {
 		"operate", "", "", "m", "hi",
 		reg, 5, false,
 		nil, nil, nil, llm.ModelInfo{},
+		nil,
 		nil,
 		nil,
 		nil,
@@ -1304,6 +1310,7 @@ func TestRunTurnWithTools_DiagnoseBlocksMutatingShell(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -1357,6 +1364,7 @@ func TestRunTurnWithTools_OperateAllowsMutatingShell(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -1397,6 +1405,7 @@ func TestRunTurnWithTools_ShellDisabledStillAdvertisesNonShell(t *testing.T) {
 		"operate", "", "", "m", "hi",
 		reg, 5, false,
 		nil, nil, nil, llm.ModelInfo{},
+		nil,
 		nil,
 		nil,
 		nil,
@@ -1458,6 +1467,7 @@ func TestRunTurnWithTools_DiagnoseBadArgs_Blocked(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -1482,17 +1492,19 @@ func TestRunTurnWithTools_DiagnoseBadArgs_Blocked(t *testing.T) {
 }
 
 // TestFilterDiagnoseSchemas_AllAllowed checks that diagnose mode
-// allows shell, ssh, sudo, aws.
+// allows shell, ssh, sudo, aws, websearch, webfetch.
 func TestFilterDiagnoseSchemas_AllAllowed(t *testing.T) {
 	schemas := []tools.ToolSchema{
 		{Name: "shell"},
 		{Name: "ssh"},
 		{Name: "sudo"},
 		{Name: "aws"},
+		{Name: "websearch"},
+		{Name: "webfetch"},
 	}
 	filtered := filterDiagnoseSchemas(schemas)
-	if len(filtered) != 4 {
-		t.Fatalf("want 4 schemas, got %d", len(filtered))
+	if len(filtered) != 6 {
+		t.Fatalf("want 6 schemas, got %d", len(filtered))
 	}
 }
 
@@ -1501,15 +1513,19 @@ func TestFilterDiagnoseSchemas_AllAllowed(t *testing.T) {
 func TestFilterDiagnoseSchemas_UnknownBlocked(t *testing.T) {
 	schemas := []tools.ToolSchema{
 		{Name: "shell"},
+		{Name: "websearch"},
 		{Name: "unknown_tool"},
 		{Name: "kubectl"},
 	}
 	filtered := filterDiagnoseSchemas(schemas)
-	if len(filtered) != 1 {
-		t.Fatalf("want 1 schema (shell only), got %d", len(filtered))
+	if len(filtered) != 2 {
+		t.Fatalf("want 2 schemas (shell, websearch), got %d", len(filtered))
 	}
 	if filtered[0].Name != "shell" {
 		t.Errorf("want 'shell', got %q", filtered[0].Name)
+	}
+	if filtered[1].Name != "websearch" {
+		t.Errorf("want 'websearch', got %q", filtered[1].Name)
 	}
 }
 
@@ -1533,6 +1549,7 @@ func TestRunTurnWithTools_ClampMaxIterations(t *testing.T) {
 		"operate", "", "", "m", "hi",
 		reg, 0, true,
 		nil, nil, nil, llm.ModelInfo{},
+		nil,
 		nil,
 		nil,
 		nil,
@@ -1714,6 +1731,7 @@ func TestRunTurnWithTools_MaxIterationsSummaryFailure(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -1765,6 +1783,7 @@ func TestRunTurnWithTools_PermissionDenyBlocks(t *testing.T) {
 		"operate", "", "", "m", "delete files",
 		reg, 5, true,
 		nil, nil, nil, llm.ModelInfo{},
+		nil,
 		nil,
 		nil,
 		nil,
@@ -1821,6 +1840,7 @@ func TestRunTurnWithTools_PermissionAsk_DefaultAllow(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -1872,6 +1892,7 @@ func TestRunTurnWithTools_PermissionAsk_DeniedByPermFunc(t *testing.T) {
 		nil, nil, nil, llm.ModelInfo{},
 		nil,
 		permFunc,
+		nil,
 		nil,
 	)
 	if err != nil {
@@ -2004,6 +2025,7 @@ func TestRunTurnWithToolsStream_TextDeltas(t *testing.T) {
 		nil,
 		func(delta string) { gotDeltas = append(gotDeltas, delta) },
 		nil, nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2042,6 +2064,7 @@ func TestRunTurnWithToolsStream_AccumulatesText(t *testing.T) {
 		"operate", "", "", "test-model", "hi",
 		nil, 5, true, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil, nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2076,6 +2099,7 @@ func TestRunTurnWithToolsStream_ReasoningDeltas(t *testing.T) {
 		nil,
 		func(delta string) { gotDeltas = append(gotDeltas, delta) },
 		nil, nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2123,6 +2147,7 @@ func TestRunTurnWithToolsStream_ToolCall_Executes(t *testing.T) {
 		"operate", "", "", "test-model", "run cmd",
 		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil, nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2178,6 +2203,7 @@ func TestRunTurnWithToolsStream_ToolCall_NoDelta(t *testing.T) {
 		nil,
 		func(delta string) { gotDeltas = append(gotDeltas, delta) },
 		nil, nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2205,6 +2231,7 @@ func TestRunTurnWithToolsStream_NoTools_ReturnsText(t *testing.T) {
 		"operate", "", "", "test-model", "hi",
 		nil, 5, true, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil, nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2258,6 +2285,7 @@ func TestRunTurnWithToolsStream_MultipleToolRounds(t *testing.T) {
 		"operate", "", "", "test-model", "do it",
 		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil, nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2296,6 +2324,7 @@ func TestRunTurnWithToolsStream_Error_ReturnsError(t *testing.T) {
 		"operate", "", "", "test-model", "hi",
 		nil, 5, true, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil, nil,
+		nil,
 	)
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -2318,6 +2347,7 @@ func TestRunTurnWithToolsStream_NilDelta_NoPanic(t *testing.T) {
 		"operate", "", "", "test-model", "hi",
 		nil, 5, true, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil, nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2362,6 +2392,7 @@ func TestRunTurnWithToolsStream_OutputParity(t *testing.T) {
 		"operate", "", "", "test-model", "do it",
 		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil, nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2389,6 +2420,7 @@ func TestRunTurnWithToolsStream_OutputParity(t *testing.T) {
 		"operate", "", "", "test-model", "do it",
 		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2436,6 +2468,7 @@ func TestRunTurnWithToolsStream_PermissionDeny(t *testing.T) {
 		"operate", "", "", "test-model", "delete",
 		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil, nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2490,6 +2523,7 @@ func TestRunTurnWithToolsStream_PermissionAsk_DefaultAllow(t *testing.T) {
 		"operate", "", "", "test-model", "say hi",
 		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil, nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2548,6 +2582,7 @@ func TestRunTurnWithToolsStream_MaxIterations(t *testing.T) {
 		"operate", "", "", "test-model", "do it",
 		reg, 2, true, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil, nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2577,6 +2612,7 @@ func TestRunTurnWithToolsStream_DiagnoseBlocksMutating(t *testing.T) {
 		"diagnose", "", "", "test-model", "delete files",
 		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil, nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2610,6 +2646,7 @@ func TestRunTurnWithToolsStream_UnknownTool(t *testing.T) {
 		"operate", "", "", "test-model", "test",
 		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil, nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2661,6 +2698,7 @@ func TestRunTurnWithToolsStream_OnEvent_Called(t *testing.T) {
 		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
 		func(ev AgentEvent) { events = append(events, ev) },
 		nil, nil, nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2691,6 +2729,7 @@ func TestRunTurnWithToolsStream_ShellDisabled(t *testing.T) {
 		"operate", "", "", "test-model", "hi",
 		reg, 5, false, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil, nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2751,6 +2790,7 @@ func TestRunTurnWithToolsStream_PermissionAllowAll_SkipsSubsequent(t *testing.T)
 		"operate", "", "", "test-model", "run two",
 		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, permFunc, nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2781,6 +2821,7 @@ func TestRunTurnWithToolsStream_EmptyStream(t *testing.T) {
 		"operate", "", "", "test-model", "hi",
 		nil, 5, true, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil, nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2830,6 +2871,7 @@ func TestRunTurnWithTools_PermissionAllowAll_SkipsSubsequent(t *testing.T) {
 		nil, nil, nil, llm.ModelInfo{},
 		nil,
 		permFunc,
+		nil,
 		nil,
 	)
 	if err != nil {
@@ -2978,6 +3020,7 @@ func TestBuildPrompt_CacheablePrefix(t *testing.T) {
 		reg, 5, true,
 		nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -3039,6 +3082,7 @@ func TestBuildPrompt_PrefixOrdering(t *testing.T) {
 		reg, 5, true,
 		nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)

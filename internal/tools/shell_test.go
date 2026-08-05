@@ -434,6 +434,71 @@ func TestRegistry_Schemas_StableOrder(t *testing.T) {
 	}
 }
 
+// TestRegistry_FilterByPerm_ExcludesDeniedTools checks that
+// FilterByPerm removes tools with PermLevel "deny".
+func TestRegistry_FilterByPerm_ExcludesDeniedTools(t *testing.T) {
+	r := NewRegistry()
+	r.Register(&namedTool{name: "shell"})
+	r.Register(&permTool{name: "sudo", perm: "deny"})
+	r.Register(&permTool{name: "ssh", perm: "ask"})
+
+	filtered := r.FilterByPerm()
+	schemas := filtered.Schemas()
+	if len(schemas) != 2 {
+		t.Fatalf("want 2 tools after filter, got %d", len(schemas))
+	}
+	names := make(map[string]bool)
+	for _, s := range schemas {
+		names[s.Name] = true
+	}
+	if !names["shell"] {
+		t.Error("shell should be in filtered registry")
+	}
+	if !names["ssh"] {
+		t.Error("ssh should be in filtered registry")
+	}
+	if names["sudo"] {
+		t.Error("sudo (deny) should be excluded from filtered registry")
+	}
+}
+
+// TestRegistry_FilterByPerm_PreservesOrder checks that FilterByPerm
+// preserves registration order.
+func TestRegistry_FilterByPerm_PreservesOrder(t *testing.T) {
+	r := NewRegistry()
+	r.Register(&permTool{name: "a", perm: "allow"})
+	r.Register(&permTool{name: "b", perm: "deny"})
+	r.Register(&permTool{name: "c", perm: "ask"})
+
+	filtered := r.FilterByPerm()
+	schemas := filtered.Schemas()
+	if len(schemas) != 2 {
+		t.Fatalf("want 2 tools after filter, got %d", len(schemas))
+	}
+	if schemas[0].Name != "a" {
+		t.Errorf("want first tool 'a', got %q", schemas[0].Name)
+	}
+	if schemas[1].Name != "c" {
+		t.Errorf("want second tool 'c', got %q", schemas[1].Name)
+	}
+}
+
+// permTool is a test tool with a configurable PermLevel.
+type permTool struct {
+	name string
+	perm string
+}
+
+func (p *permTool) Name() string        { return p.name }
+func (p *permTool) Description() string { return "test tool" }
+func (p *permTool) Parameters() json.RawMessage {
+	return json.RawMessage(`{"type":"object"}`)
+}
+func (p *permTool) PermLevel() string { return p.perm }
+func (p *permTool) Run(ctx context.Context, args json.RawMessage) (string, error) {
+	return "", nil
+}
+
 // TestShellTool_Run_TimeoutKillsProcessGroup verifies that a
 // long-running command is killed by the timeout, not left hanging
 // due to a blocked pipe read.

@@ -13,7 +13,7 @@ monitoring, and diagnostics — like a senior SRE you can talk to.
 | Requirement | Notes |
 |-------------|-------|
 | Go 1.24+ | For building from source |
-| Linux/macOS/Windows | Tested on Linux; macOS and Windows support in progress |
+| Linux/macOS | Supported platforms (x86_64, arm64) |
 | LLM provider | One of: Ollama (local, free), OpenAI, OpenRouter, OpenCode Zen |
 
 ## Quick start
@@ -119,8 +119,8 @@ openai:
 
 Shmorby loads config with layered precedence (later wins):
 
-1. `/etc/shmorby/config.yaml` (Unix) / `%ProgramData%\shmorby\config.yaml` (Windows) — skipped if missing
-2. `~/.config/shmorby/config.yaml` or `$XDG_CONFIG_HOME/shmorby/config.yaml` (Unix) / `%APPDATA%\shmorby\config.yaml` (Windows)
+1. `/etc/shmorby/config.yaml` — skipped if missing
+2. `~/.config/shmorby/config.yaml` or `$XDG_CONFIG_HOME/shmorby/config.yaml`
 3. `--config` flag (error if set but missing)
 4. `./shmorby.yaml` in current directory
 5. CLI flags (`--provider`, `--model`, `--agent` — always win)
@@ -137,7 +137,7 @@ shmorby [flags]
 --model string          Model name (default "llama3.2")
 --config string         Config file path
 --scope-file string     Operational context markdown (SCOPE.md)
---agent string          Agent mode: operate, diagnose (default "operate")
+--agent string          Agent mode: operate, diagnose, chat (default "operate")
 --system-prompt-file    Override system prompt file
 --no-tui                Disable TUI, use plain stdin/stdout REPL
 --log-level string      Log level: debug, info, warn, error (default "info")
@@ -154,6 +154,60 @@ See [`examples/shmorby.yaml`](examples/shmorby.yaml) for:
 | `context` | Token estimation (tiktoken, model-resolved) and compression, threshold-based, offload-to-memory |
 | `models` | Per-model context window and max output token overrides |
 | `tui` | Theme, glamour markdown rendering, logging panel, navigation keybinds |
+| `websearch` | Web search via SearXNG or Exa API backend (all modes) |
+| `webfetch` | URL fetching for page content (all modes) |
+
+### Web search and fetch configuration
+
+Both tools are **disabled by default** and available in all agent modes when enabled.
+
+#### websearch
+
+```yaml
+tools:
+  websearch:
+    enabled: true
+    engine: searxng          # "searxng" (local) or "exa" (cloud)
+    base_url: http://localhost:8888  # SearXNG instance URL (required for searxng)
+    exa_api_key: ""          # Required for exa engine
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `false` | Enable the websearch tool |
+| `engine` | `searxng` | Search backend: `searxng` (local, no CAPTCHAs) or `exa` (cloud API) |
+| `base_url` | — | SearXNG instance URL (required when engine is `searxng`) |
+| `exa_api_key` | — | Exa API key (required when engine is `exa`) |
+
+**SearXNG setup**: Your SearXNG instance must have **JSON output format enabled**. In `settings.yml`:
+
+```yaml
+search:
+  formats:
+    - html
+    - json    # Required for shmorby
+```
+
+Default SearXNG URL: `http://localhost:8888` (typical Docker/port config).
+
+#### webfetch
+
+```yaml
+tools:
+  webfetch:
+    enabled: true
+```
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `enabled` | `false` | Enable the webfetch tool |
+
+**Behavior**:
+- Fetches any HTTP/HTTPS URL and returns plain text
+- **SSRF protection**: blocks private/loopback IPs (127.0.0.1, 10.x, 192.168.x, etc.)
+- Default max: 64 KiB; absolute max: 1 MiB
+- Configurable timeout per request (default 120s, set via `tools.timeout`)
+- Strips null bytes from response
 
 ## Slash commands
 
@@ -164,7 +218,7 @@ See [`examples/shmorby.yaml`](examples/shmorby.yaml) for:
 | `/quit` | Exit shmorby |
 | `/reset` | Clear conversation history |
 | `/model <name>` | Switch LLM model |
-| `/agent <mode>` | Switch agent mode (operate, diagnose) |
+| `/agent <mode>` | Switch agent mode (operate, diagnose, chat) |
 | `/scope` | Show loaded scope context and size |
 | `/memory` | Memory management (search, forget, clear, stats) |
 | `/context` | Token usage and compression stats |
@@ -175,17 +229,24 @@ See [`examples/shmorby.yaml`](examples/shmorby.yaml) for:
 
 ### Operate (default)
 
-Full shell, SSH, sudo, and AWS tool access. Follows the
-observe → plan → execute → verify cycle.
+Full shell, SSH, sudo, and AWS tool access. Also includes `websearch` and
+`webfetch` when enabled. Follows the observe → plan → execute → verify cycle.
 
 ### Diagnose
 
-Read-only inspection. Shell is restricted by a mutating-command guard that
-blocks `rm`, `mv`, `dd`, `mkfs`, package install/remove, systemctl
-start/stop, and redirects to `/etc`.
+Read-only inspection with `websearch` and `webfetch` available when enabled.
+Shell is restricted by a mutating-command guard that blocks `rm`, `mv`, `dd`,
+`mkfs`, package install/remove, systemctl start/stop, and redirects to `/etc`.
 
-Switch with `Tab`/`Shift+Tab` (empty input), `/agent diagnose` and
-`/agent operate` in the TUI, or set `agent.default` in config.
+### Chat
+
+General conversation and research. Advertises `websearch` and `webfetch`
+tools — no infrastructure tooling. Both tools are disabled by default;
+enable them in `tools.websearch.enabled` and `tools.webfetch.enabled` in
+config. See `examples/shmorby.yaml` for configuration.
+
+Switch with `Tab`/`Shift+Tab` (empty input), `/agent diagnose`, `/agent chat`,
+and `/agent operate` in the TUI, or set `agent.default` in config.
 
 ## Examples
 
@@ -211,6 +272,14 @@ $ kubectl logs api-7f8b9c --previous
 Exit code 1: database connection refused at /app/db.go:42
 ```
 
+```text
+❯ /agent chat
+Switched to chat mode.
+❯ what's the latest on the ozone layer?
+[websearch: "ozone layer 2026 news"]
+According to NOAA, the 2026 Antarctic ozone hole...
+```
+
 ## Permission system
 
 Permissions gate shell, SSH, sudo, and AWS commands:
@@ -221,6 +290,8 @@ Permissions gate shell, SSH, sudo, and AWS commands:
 | `ssh` | ask | Requires approval |
 | `sudo` | ask | Requires approval; tool disabled by default (`tools.sudo.enabled: false`) |
 | `aws` | ask | Requires approval; tool disabled by default (`tools.aws.enabled: false`) |
+| `websearch` | ask | Follows `shell` permission level; tool disabled by default (`tools.websearch.enabled: false`) |
+| `webfetch` | ask | Follows `shell` permission level; tool disabled by default (`tools.webfetch.enabled: false`) |
 
 Set in the `permission` section of config. Options: `allow`, `ask`, `deny`.
 

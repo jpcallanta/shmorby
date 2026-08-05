@@ -29,14 +29,14 @@ or OpenCode Zen with a config change.
         │               OpenAI      OpenRouter
         │               Ollama       OpenCode Zen
         │
-        ├── agent mode (operate | diagnose)
+        ├── agent mode (operate | diagnose | chat)
         ├── scope context (SCOPE.md + instructions)
         ├── memory (vector similarity + SQLite metadata)
         ├── context compressor (token estimation + offload)
         └── permissions (granular rules + presets)
         │
         ▼
-  Tool runner (shell | ssh | sudo | aws)
+  Tool runner (shell | ssh | sudo | aws | websearch | webfetch)
 ```
 
 ### Package map
@@ -79,12 +79,13 @@ The core loop (one "turn" per user message):
 
 | Mode | Tools | Use case |
 |------|-------|----------|
-| **operate** (default) | shell, ssh, sudo*, aws* | Full infra management |
-| **diagnose** | shell (read-only guard), ssh | Inspection only; no mutations |
+| **operate** (default) | shell, ssh, sudo*, aws*, websearch*, webfetch* | Full infra management |
+| **diagnose** | shell (read-only guard), ssh, websearch*, webfetch* | Inspection only; no mutations |
+| **chat** | websearch*, webfetch* | General conversation & research |
 
-*gated by config permissions
+*gated by config permissions; websearch/webfetch disabled by default
 
-Switch via `/agent operate`, `/agent diagnose`, or Tab/Shift+Tab in TUI.
+Switch via `/agent operate`, `/agent diagnose`, `/agent chat`, or Tab/Shift+Tab in TUI.
 
 **Read-only guard**: blocks `rm`, `mv`, `dd`, `mkfs`, package
 install/remove, systemctl start/stop, and redirects to `/etc`.
@@ -125,7 +126,7 @@ TUI. `a` allows all for this turn. Configurable
 `interactive: true/false`.
 
 **Audit trail**: JSON-lines log at
-`$XDG_DATA_HOME/shmorby/audit.log` (Unix) / `%LOCALAPPDATA%\shmorby\audit.log` (Windows) with timestamp, tool, command,
+`$XDG_DATA_HOME/shmorby/audit.log` with timestamp, tool, command,
 matched rule, decision, reason.
 
 ---
@@ -205,8 +206,8 @@ Single `Provider` interface, 4 backends:
 
 Later wins:
 
-1. `/etc/shmorby/config.yaml` (Unix) / `%ProgramData%\shmorby\config.yaml` (Windows) — optional
-2. `~/.config/shmorby/config.yaml` (Unix) / `%APPDATA%\shmorby\config.yaml` (Windows)
+1. `/etc/shmorby/config.yaml` — optional
+2. `~/.config/shmorby/config.yaml` or `$XDG_CONFIG_HOME/shmorby/config.yaml`
 3. `--config` flag
 4. `./shmorby.yaml` in cwd
 5. CLI flags (`--provider`, `--model`, `--agent`)
@@ -298,6 +299,43 @@ Ops-oriented only — no read/edit/write/grep:
 | ssh | host, user, command | Key-based, `BatchMode=yes` |
 | sudo | command | Requires `sudo -n`, gated by config |
 | aws | args array | Respects AWS env, gated by config |
+| websearch | query, max_results | SearXNG or Exa backend; configurable base URL |
+| webfetch | url, max_bytes | Fetches any HTTP(S) URL; blocks private/loopback IPs, truncates at 64 KiB |
+
+### Websearch and Webfetch
+
+Both tools are **disabled by default** and available in all agent modes when enabled.
+
+**websearch** dispatches to one of two backends:
+
+| Backend | Auth | Notes |
+|---------|------|-------|
+| SearXNG (default) | None (local) | Requires JSON output format enabled |
+| Exa | `exa_api_key` | Cloud API, no local setup |
+
+**SearXNG requirements**: The instance must have JSON format enabled in `settings.yml`:
+
+```yaml
+search:
+  formats:
+    - html
+    - json
+```
+
+The tool appends `&format=json` to the query URL. Without JSON enabled, SearXNG returns HTML and parsing fails.
+
+**webfetch** enforces SSRF protection:
+- Blocks private/loopback IPs (127.0.0.1, 10.x, 172.16-31.x, 192.168.x)
+- Resolves hostnames and checks all IPs before connecting
+- Default max: 64 KiB, absolute max: 1 MiB
+- Configurable timeout (default 120s via `tools.timeout`), strips null bytes from response
+
+**Web search flow**: Operate and diagnose modes include `websearch` and
+`webfetch` alongside shell/ssh/sudo/aws tools. Chat mode filters to only
+`websearch` and `webfetch`. When the model calls `websearch`, the tool dispatches to the
+configured backend (SearXNG or Exa), parses the JSON response, and returns
+formatted results (title, snippet, URL). The `webfetch` tool fetches a page
+body directly. Both use Go's `net/http` with a configurable timeout.
 
 ## 14. Key Design Decisions
 

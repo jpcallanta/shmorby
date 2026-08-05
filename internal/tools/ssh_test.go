@@ -236,3 +236,61 @@ func TestNewSSHTool_NilExecutor_DefaultsToOS(t *testing.T) {
 		t.Error("want non-nil executor, got nil")
 	}
 }
+
+// TestSSHTool_Run_DoubleDashPrecedesHost checks "--" precedes host to
+// prevent argument injection (issue #43). A Host starting with "-"
+// must not be interpreted as an SSH option.
+func TestSSHTool_Run_DoubleDashPrecedesHost(t *testing.T) {
+	mock := &mockExecutor{Out: []byte("ok")}
+	tool := NewSSHTool("allow", mock)
+	args := []byte(
+		`{"host":"-oProxyCommand=evil","command":"id"}`,
+	)
+
+	_, err := tool.Run(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// Find "--" in args; the next element must be the host.
+	foundSep := false
+	for i, a := range mock.Args {
+		if a == "--" && i+1 < len(mock.Args) {
+			foundSep = true
+			if mock.Args[i+1] != "-oProxyCommand=evil" {
+				t.Errorf(
+					"want host after --, got %q",
+					mock.Args[i+1],
+				)
+			}
+			break
+		}
+	}
+	if !foundSep {
+		t.Errorf("want '--' separator in args, got %v", mock.Args)
+	}
+}
+
+// TestSSHTool_Run_DoubleDashPresent_NormalHost checks "--" is always
+// present even with a normal hostname.
+func TestSSHTool_Run_DoubleDashPresent_NormalHost(t *testing.T) {
+	mock := &mockExecutor{Out: []byte("ok")}
+	tool := NewSSHTool("allow", mock)
+	args := []byte(`{"host":"example.com","command":"uptime"}`)
+
+	_, err := tool.Run(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	foundSep := false
+	for _, a := range mock.Args {
+		if a == "--" {
+			foundSep = true
+			break
+		}
+	}
+	if !foundSep {
+		t.Errorf("want '--' separator in args, got %v", mock.Args)
+	}
+}

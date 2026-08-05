@@ -1,0 +1,10 @@
+## webfetch
+
+Fetches a web page and returns its content as plain text.
+Private, loopback, and RFC1918 addresses are blocked (SSRF protection).
+
+Parameters:
+- `url` (required, string): URL to fetch (http/https only)
+- `max_bytes` (optional, integer): maximum bytes to read (default: 65536, max: 1048576)
+
+Output is truncated at 64 KiB.

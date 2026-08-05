@@ -16,6 +16,13 @@ type ModelInfoFetcher interface {
 
 var modelInfoCache sync.Map
 
+// cachedModelInfo wraps a resolved ModelInfo. guessed marks values
+// from the fallback path so a later config override still applies.
+type cachedModelInfo struct {
+	info    ModelInfo
+	guessed bool
+}
+
 // ErrModelInfoFallback indicates the returned ModelInfo is a guess
 // (8192 context window) because neither the API nor config override
 // provided real data.
@@ -28,6 +35,10 @@ var ErrModelInfoFallback = fmt.Errorf(
 // 2. Provider API (live fetch)
 // 3. Config override
 // 4. Fallback (8192 context window) — returns ErrModelInfoFallback
+//
+// Fallback results are cached as guesses so repeated lookups of an
+// unknown model do not re-hit the network; a cached guess is
+// re-checked against config overrides on every call.
 func FetchModelInfo(
 	ctx context.Context,
 	fetcher ModelInfoFetcher,
@@ -36,13 +47,29 @@ func FetchModelInfo(
 ) (ModelInfo, error) {
 	// 1. Check cache.
 	if cached, ok := modelInfoCache.Load(model); ok {
-		return cached.(ModelInfo), nil
+		ci := cached.(cachedModelInfo)
+		if !ci.guessed {
+			return ci.info, nil
+		}
+		// Cached guess: apply a config override if one exists now,
+		// otherwise return the guess as-is.
+		if cfg.Models != nil {
+			if override, ok := cfg.Models[model]; ok {
+				info := ModelInfo{
+					ContextWindow:   override.ContextWindow,
+					MaxOutputTokens: override.MaxOutputTokens,
+				}
+				modelInfoCache.Store(model, cachedModelInfo{info: info})
+				return info, nil
+			}
+		}
+		return ci.info, ErrModelInfoFallback
 	}
 
 	// 2. Try provider-specific API.
 	info, err := fetcher.fetchModelInfo(ctx, model)
 	if err == nil {
-		modelInfoCache.Store(model, info)
+		modelInfoCache.Store(model, cachedModelInfo{info: info})
 		return info, nil
 	}
 	slog.Warn(
@@ -57,7 +84,7 @@ func FetchModelInfo(
 				ContextWindow:   override.ContextWindow,
 				MaxOutputTokens: override.MaxOutputTokens,
 			}
-			modelInfoCache.Store(model, info)
+			modelInfoCache.Store(model, cachedModelInfo{info: info})
 			return info, nil
 		}
 	}
@@ -67,7 +94,14 @@ func FetchModelInfo(
 	if cw == 0 {
 		cw = 8192
 	}
-	return ModelInfo{ContextWindow: cw}, ErrModelInfoFallback
+	info = ModelInfo{ContextWindow: cw}
+
+	// Cache the guess so repeated lookups of an unknown model do not
+	// re-hit the network or repeat the WARN log. Marked guessed so a
+	// config override added later still takes precedence.
+	modelInfoCache.Store(model, cachedModelInfo{info: info, guessed: true})
+
+	return info, ErrModelInfoFallback
 }
 
 // InvalidateModelInfo removes a model from the cache.

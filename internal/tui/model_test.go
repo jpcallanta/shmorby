@@ -687,8 +687,8 @@ func TestModelUpdate_ShiftTabModeCycle(t *testing.T) {
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
 	m = updated.(Model)
 
-	if m.mode != "diagnose" {
-		t.Errorf("want diagnose after Shift+Tab, got %q", m.mode)
+	if m.mode != "chat" {
+		t.Errorf("want chat after Shift+Tab from operate, got %q", m.mode)
 	}
 }
 

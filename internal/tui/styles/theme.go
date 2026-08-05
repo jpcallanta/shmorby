@@ -32,6 +32,7 @@ type Theme struct {
 	TabOverflow lipgloss.Style
 	ModeOperate lipgloss.Style
 	ModeDiag    lipgloss.Style
+	ModeChat    lipgloss.Style
 	WhichKey    lipgloss.Style
 	FilterBox   lipgloss.Style
 }
@@ -201,6 +202,9 @@ func DefaultTheme() Theme {
 		ModeDiag: lipgloss.NewStyle().
 			Foreground(Peach).
 			Bold(true),
+		ModeChat: lipgloss.NewStyle().
+			Foreground(Teal).
+			Bold(true),
 		WhichKey: lipgloss.NewStyle().
 			Foreground(Overlay2).
 			Background(Surface0),
@@ -258,6 +262,9 @@ func LatteTheme() Theme {
 			Bold(true),
 		ModeDiag: lipgloss.NewStyle().
 			Foreground(LattePeach).
+			Bold(true),
+		ModeChat: lipgloss.NewStyle().
+			Foreground(LatteTeal).
 			Bold(true),
 		WhichKey: lipgloss.NewStyle().
 			Foreground(LatteOverlay2).
@@ -317,6 +324,9 @@ func FrappeTheme() Theme {
 		ModeDiag: lipgloss.NewStyle().
 			Foreground(FrappePeach).
 			Bold(true),
+		ModeChat: lipgloss.NewStyle().
+			Foreground(FrappeTeal).
+			Bold(true),
 		WhichKey: lipgloss.NewStyle().
 			Foreground(FrappeOverlay2).
 			Background(FrappeSurface0),
@@ -375,6 +385,9 @@ func MacchiatoTheme() Theme {
 		ModeDiag: lipgloss.NewStyle().
 			Foreground(MacchiatoPeach).
 			Bold(true),
+		ModeChat: lipgloss.NewStyle().
+			Foreground(MacchiatoTeal).
+			Bold(true),
 		WhichKey: lipgloss.NewStyle().
 			Foreground(MacchiatoOverlay2).
 			Background(MacchiatoSurface0),
@@ -413,6 +426,7 @@ func MinimalTheme() Theme {
 		TabOverflow:  lipgloss.NewStyle(),
 		ModeOperate:  lipgloss.NewStyle().Bold(true),
 		ModeDiag:     lipgloss.NewStyle().Bold(true),
+		ModeChat:     lipgloss.NewStyle().Bold(true),
 		WhichKey:     lipgloss.NewStyle(),
 		FilterBox:    lipgloss.NewStyle(),
 	}

@@ -46,6 +46,8 @@ func (m Model) renderStatus() string {
 	modeStyle := m.theme.ModeOperate
 	if m.mode == "diagnose" {
 		modeStyle = m.theme.ModeDiag
+	} else if m.mode == "chat" {
+		modeStyle = m.theme.ModeChat
 	}
 	var parts []string
 

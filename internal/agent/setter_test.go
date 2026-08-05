@@ -496,6 +496,62 @@ func TestSet_RequiresRestart_Nested(t *testing.T) {
 	}
 }
 
+// changeableKeys are the /set keys that change at runtime. "apikey" is
+// intentionally absent: secrets must not be echoed in /help output.
+var changeableKeys = []string{
+	"provider", "model",
+	"agent.default", "agent.max_tool_iterations", "agent.shell",
+	"tools.timeout", "tools.shell.enabled", "tools.sudo.enabled",
+	"tools.aws.enabled",
+	"permission.shell", "permission.ssh", "permission.sudo",
+	"permission.aws", "permission.interactive",
+	"tui.fullscreen", "tui.theme", "tui.glamour.enabled",
+	"tui.logging.default_level", "tui.logging.enabled",
+	"memory.auto_capture",
+	"context.mode", "context.enabled", "context.threshold",
+	"context.offload_to_memory",
+}
+
+// TestOverrideableParams_MatchesChangeableSet verifies the /set cases and
+// the /help param list stay in sync in both directions, so a future param
+// accepted by Set() without being surfaced in /help output fails.
+func TestOverrideableParams_MatchesChangeableSet(t *testing.T) {
+	co := overriderForTest(t)
+	params := co.OverrideableParams()
+
+	got := make(map[string]bool, len(params))
+	for _, p := range params {
+		if got[p.Key] {
+			t.Errorf("duplicate param %q in OverrideableParams", p.Key)
+		}
+		got[p.Key] = true
+	}
+
+	for _, key := range changeableKeys {
+		if !got[key] {
+			t.Errorf(
+				"changeable /set key %q missing from OverrideableParams "+
+					"(add it to /help output)", key,
+			)
+		}
+	}
+	for key := range got {
+		found := false
+		for _, expected := range changeableKeys {
+			if key == expected {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf(
+				"OverrideableParams lists %q but Set() has no "+
+					"runtime-changeable case for it", key,
+			)
+		}
+	}
+}
+
 // TestOverrideableParams_ReturnsAll verifies all params are returned.
 func TestOverrideableParams_ReturnsAll(t *testing.T) {
 	co := overriderForTest(t)

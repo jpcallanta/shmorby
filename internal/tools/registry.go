@@ -93,3 +93,19 @@ func (r *Registry) Run(
 
 	return t.Run(ctx, args)
 }
+
+// FilterByPerm returns a new Registry containing only tools whose
+// PermLevel is not "deny". Used to create subagent registries that
+// respect the parent session's permission constraints.
+func (r *Registry) FilterByPerm() *Registry {
+	filtered := NewRegistry()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, name := range r.order {
+		t := r.tools[name]
+		if t.PermLevel() != "deny" {
+			filtered.Register(t)
+		}
+	}
+	return filtered
+}

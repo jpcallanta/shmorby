@@ -7,10 +7,10 @@ type ModeSwitcher struct {
 	current int
 }
 
-// NewModeSwitcher creates a switcher cycling operate ↔ diagnose.
+// NewModeSwitcher creates a switcher cycling operate ↔ diagnose ↔ chat.
 func NewModeSwitcher() *ModeSwitcher {
 	return &ModeSwitcher{
-		modes:   []string{"operate", "diagnose"},
+		modes:   []string{"operate", "diagnose", "chat"},
 		current: 0,
 	}
 }

@@ -1,0 +1,9 @@
+## websearch
+
+Searches the web for current information using a configurable backend (SearXNG or Exa API).
+
+Parameters:
+- `query` (required, string): search query
+- `max_results` (optional, integer): maximum number of results to return (default: 5, max: 20)
+
+Output is truncated at 64 KiB.

@@ -152,7 +152,7 @@ func TestMergeRules_NoPresetsOnlyCustom(t *testing.T) {
 func TestEvaluateWithMergedRules(t *testing.T) {
 	rs := MergeRules([]string{"service"}, nil)
 
-	action, reason := rs.Evaluate("systemctl restart nginx")
+	action, reason, _ := rs.Evaluate("systemctl restart nginx")
 	if action != "ask" {
 		t.Errorf("want ask, got %q", action)
 	}

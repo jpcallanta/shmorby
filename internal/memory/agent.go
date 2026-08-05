@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"shmorby/internal/redact"
 	"shmorby/internal/session"
 )
 
@@ -58,10 +59,12 @@ func DedupMemoryContext(entries []MemoryEntry,
 		return entries
 	}
 
-	var sessionText string
+	var sb strings.Builder
 	for _, m := range sessionMessages {
-		sessionText += " " + m.Content
+		sb.WriteString(" ")
+		sb.WriteString(m.Content)
 	}
+	sessionText := sb.String()
 	sessionText = strings.ToLower(sessionText)
 
 	result := make([]MemoryEntry, 0, len(entries))
@@ -115,6 +118,7 @@ const DefaultSessionID = "default"
 
 // Captures a tool execution to the memory store if the store is non-nil
 // and auto-capture is enabled.
+// Secrets in the result are redacted before storage (issue #45).
 func CaptureToolResult(
 	store Store,
 	sessionID, tool, command, args, result string, exitCode int,
@@ -124,7 +128,9 @@ func CaptureToolResult(
 	}
 
 	timestamp := time.Now()
-	truncResult := truncateResult(result)
+	// Redact secrets from result before storage to prevent credential
+	// leakage via memory retrievals.
+	truncResult := truncateResult(redact.SecretString(result))
 	tags := extractTags(command, store.TagRules())
 
 	entry := MemoryEntry{

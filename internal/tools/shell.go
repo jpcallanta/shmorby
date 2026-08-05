@@ -11,9 +11,9 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 	"time"
 
+	"shmorby/internal/audit"
 	"shmorby/internal/xdg"
 )
 
@@ -51,6 +51,7 @@ type ShellTool struct {
 	workdir        string
 	perm           string
 	defaultTimeout int
+	auditLogger    *audit.Logger
 }
 
 // SetDefaultTimeout sets the default timeout in seconds for this tool.
@@ -96,6 +97,9 @@ func (s *ShellTool) PermLevel() string { return s.perm }
 // SetPerm updates the permission level at runtime.
 func (s *ShellTool) SetPerm(level string) { s.perm = level }
 
+// SetAuditLogger sets the audit logger for this tool.
+func (s *ShellTool) SetAuditLogger(l *audit.Logger) { s.auditLogger = l }
+
 // SetShell updates the shell binary path at runtime.
 func (s *ShellTool) SetShell(path string) { s.shell = path }
 
@@ -137,7 +141,7 @@ func (s *ShellTool) Run(
 
 	cmd := exec.Command(s.shell, "-c", a.Command)
 	cmd.Dir = cwd
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setupProcessGroup(cmd)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -156,7 +160,7 @@ func (s *ShellTool) Run(
 	go func() {
 		<-cmdCtx.Done()
 		if cmd.Process != nil {
-			syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			killProcessGroup(cmd.Process.Pid)
 		}
 	}()
 
@@ -201,20 +205,51 @@ func (s *ShellTool) Run(
 		"args", string(RedactArgs(args)),
 	)
 
-	truncated := TruncateOutput(out)
+	if s.auditLogger != nil {
+		exitCode := 0
+		if waitErr != nil {
+			var exitErr *exec.ExitError
+			if errors.As(waitErr, &exitErr) {
+				exitCode = exitErr.ExitCode()
+			}
+		}
+		errMsg := ""
+		if waitErr != nil {
+			errMsg = waitErr.Error()
+		}
+		s.auditLogger.LogToolRun(
+			audit.AuditEntry{
+				SessionID:  SessionIDFrom(ctx),
+				Tool:       "shell",
+				Args:       string(RedactArgs(args)),
+				DurationMs: elapsed.Milliseconds(),
+				ExitCode:   &exitCode,
+				Error:      errMsg,
+			},
+			&audit.OutputCapture{
+				SessionID:  SessionIDFrom(ctx),
+				Stdout:     outBuf.String(),
+				Stderr:     errBuf.String(),
+				StdoutSize: outBuf.Len(),
+				StderrSize: errBuf.Len(),
+				Checksum:   audit.ComputeChecksum(outBuf.String() + errBuf.String()),
+			},
+		)
+	}
+
+	result := string(TruncateOutput(out))
 
 	if errors.Is(cmdCtx.Err(), context.DeadlineExceeded) {
-		return string(truncated), fmt.Errorf(
+		return result, fmt.Errorf(
 			"shell exec timed out after %ds", timeout,
 		)
 	}
 	if errors.Is(cmdCtx.Err(), context.Canceled) {
-		return string(truncated), fmt.Errorf("shell exec cancelled")
+		return result, fmt.Errorf("shell exec cancelled")
 	}
 	if waitErr != nil {
 		var exitErr *exec.ExitError
 		if errors.As(waitErr, &exitErr) && exitErr.ExitCode() > 0 {
-			result := string(truncated)
 			if result != "" && !strings.HasSuffix(result, "\n") {
 				result += "\n"
 			}
@@ -222,8 +257,8 @@ func (s *ShellTool) Run(
 
 			return result, nil
 		}
-		return string(truncated), fmt.Errorf("shell exec: %w", waitErr)
+		return result, fmt.Errorf("shell exec: %w", waitErr)
 	}
 
-	return string(truncated), nil
+	return result, nil
 }

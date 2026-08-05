@@ -247,3 +247,48 @@ func TestOrchestrator_NoRunSubtask(t *testing.T) {
 			results[0].Status)
 	}
 }
+
+func TestOrchestrator_DepthLimit(t *testing.T) {
+	// At max depth, subtasks should be rejected.
+	orch := &TaskOrchestrator{
+		Depth: maxSubagentDepth,
+		RunSubtask: func(ctx context.Context, task Subtask) TaskResult {
+			return TaskResult{TaskID: task.ID, Status: "ok"}
+		},
+	}
+	tasks := []Subtask{{ID: "a", Prompt: "do a"}}
+	results, err := orch.DispatchTasks(context.Background(), tasks, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if results[0].Status != "error" {
+		t.Errorf("want error status at max depth, got %s", results[0].Status)
+	}
+	if results[0].Error == "" {
+		t.Error("want error message at max depth, got empty")
+	}
+}
+
+func TestOrchestrator_DepthBelowLimit(t *testing.T) {
+	// Below max depth, subtasks should succeed.
+	orch := &TaskOrchestrator{
+		Depth: maxSubagentDepth - 1,
+		RunSubtask: func(ctx context.Context, task Subtask) TaskResult {
+			return TaskResult{TaskID: task.ID, Status: "ok", Output: "done"}
+		},
+	}
+	tasks := []Subtask{{ID: "a", Prompt: "do a"}}
+	results, err := orch.DispatchTasks(context.Background(), tasks, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("want 1 result, got %d", len(results))
+	}
+	if results[0].Status != "ok" {
+		t.Errorf("want ok status below max depth, got %s", results[0].Status)
+	}
+}

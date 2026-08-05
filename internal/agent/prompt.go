@@ -3,7 +3,8 @@ package agent
 import (
 	_ "embed"
 	"fmt"
-	"os"
+
+	"shmorby/internal/fileread"
 )
 
 //go:embed prompts/operate.txt
@@ -12,12 +13,15 @@ var operatePrompt string
 //go:embed prompts/diagnose.txt
 var diagnosePrompt string
 
+//go:embed prompts/chat.txt
+var chatPrompt string
+
 //go:embed prompts/max_steps.txt
 var MaxStepsPrompt string
 
 // SystemPrompt builds the system prompt for the given mode.
 //
-// mode: "operate" or "diagnose"
+// mode: "operate", "diagnose", or "chat"
 // scope: scope content to append
 // override: path to a file that replaces the embed body (optional);
 //
@@ -34,13 +38,16 @@ func SystemPrompt(mode, scope, override string) (string, error) {
 		body = operatePrompt
 	case "diagnose":
 		body = diagnosePrompt
+	case "chat":
+		body = chatPrompt
 	default:
-		return "", fmt.Errorf("invalid agent mode %q (want operate|diagnose)", mode)
+		return "", fmt.Errorf("invalid agent mode %q (want operate|diagnose|chat)", mode)
 	}
 
 	// Override replaces the embed body only; scope appendix stays.
 	if override != "" {
-		content, err := os.ReadFile(override)
+		// Use size-limited read to prevent OOM from oversized files (issue #46).
+		content, err := fileread.ReadFileLimited(override, 0)
 		if err != nil {
 			return "", fmt.Errorf("read system-prompt file %q: %w", override, err)
 		}

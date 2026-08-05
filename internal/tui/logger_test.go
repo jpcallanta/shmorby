@@ -560,6 +560,68 @@ func TestAgentEventMsg_ToolStartAndEnd(t *testing.T) {
 	}
 }
 
+// Tests that agentEventMsg tool-status updates spinner text.
+func TestAgentEventMsg_ToolStatus_UpdatesSpinner(t *testing.T) {
+	m := NewModel(Config{})
+	m.width = 80
+
+	// Start a tool — spinner should get random text.
+	updated, _ := m.Update(agentEventMsg{
+		event: agent.AgentEvent{
+			Type: "tool-start",
+			Name: "shell",
+			Info: "echo hi",
+		},
+	})
+	m = updated.(Model)
+
+	// Tool-status should replace spinner text.
+	updated, _ = m.Update(agentEventMsg{
+		event: agent.AgentEvent{
+			Type:   "tool-status",
+			Name:   "shell",
+			Status: "running echo command",
+		},
+	})
+	m = updated.(Model)
+
+	// The spinner should now show the inference-generated text.
+	view := m.spinner.View()
+	if !strings.Contains(view, "running echo command") {
+		t.Errorf("spinner should show status, got %q", view)
+	}
+}
+
+// Tests that tool-status with empty Status is a no-op.
+func TestAgentEventMsg_ToolStatus_EmptyStatus_NoOp(t *testing.T) {
+	m := NewModel(Config{})
+	m.width = 80
+
+	updated, _ := m.Update(agentEventMsg{
+		event: agent.AgentEvent{
+			Type: "tool-start",
+			Name: "shell",
+			Info: "uptime",
+		},
+	})
+	m = updated.(Model)
+	beforeView := m.spinner.View()
+
+	updated, _ = m.Update(agentEventMsg{
+		event: agent.AgentEvent{
+			Type:   "tool-status",
+			Name:   "shell",
+			Status: "",
+		},
+	})
+	m = updated.(Model)
+	afterView := m.spinner.View()
+
+	if beforeView != afterView {
+		t.Errorf("empty status should not change spinner")
+	}
+}
+
 // Tests that logCollapseThreshold triggers auto-collapse.
 func TestLogCollapseThreshold_AutoCollapse(t *testing.T) {
 	m := NewModel(Config{})

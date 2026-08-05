@@ -64,6 +64,12 @@ type REPL struct {
 
 	// Phase 32: runtime config overrides.
 	ConfigOverrider *ConfigOverrider
+
+	// Phase 34: subagent orchestrator for permission propagation.
+	Orchestrator *tools.TaskOrchestrator
+
+	// Phase 37: async status description generator.
+	StatusGen *StatusGenerator
 }
 
 // Starts the interactive REPL loop reading from In and writing to Out.
@@ -141,7 +147,7 @@ func (r *REPL) Run(ctx context.Context) error {
 		// Normal chat turn.
 		var reply string
 
-		if r.NoTUI {
+		if !r.streamEnabled {
 			// Plain output: no spinners, no streaming, no ANSI.
 			reply, err = r.runPlainTurn(ctx, line)
 		} else {
@@ -260,6 +266,12 @@ func (r *REPL) runPlainTurn(ctx context.Context, line string) (string, error) {
 		permFunc = r.toolPermissionFunc
 	}
 
+	// Propagate permission callback to subagent orchestrator so
+	// subagents respect the same permission constraints.
+	if r.Orchestrator != nil {
+		r.Orchestrator.PermFunc = permFunc
+	}
+
 	var reply string
 	var err error
 	if r.Registry != nil {
@@ -270,6 +282,7 @@ func (r *REPL) runPlainTurn(ctx context.Context, line string) (string, error) {
 			r.Store, r.Retriever,
 			r.Compressor, r.ModelInfo,
 			onEvent, permFunc, r.ToolRules,
+			r.StatusGen,
 		)
 	} else {
 		reply, err = RunTurn(
@@ -352,6 +365,11 @@ func (r *REPL) runStreamTurn(
 				}
 			}(td, tsd)
 
+		case "tool-status":
+			// Inference-generated description arrived; no-op for
+			// REPL — it shows the tool header, not a spinner
+			// with arbitrary text. Logged for future use.
+
 		case "tool-end":
 			if r.toolDone != nil {
 				close(r.toolDone)
@@ -382,6 +400,7 @@ func (r *REPL) runStreamTurn(
 			r.Store, r.Retriever,
 			r.Compressor, r.ModelInfo,
 			onEvent, onDelta, permFunc, r.ToolRules,
+			r.StatusGen,
 		)
 
 		if err != nil && strings.Contains(err.Error(), "streaming not") {
@@ -392,6 +411,7 @@ func (r *REPL) runStreamTurn(
 				r.Store, r.Retriever,
 				r.Compressor, r.ModelInfo,
 				onEvent, permFunc, r.ToolRules,
+				r.StatusGen,
 			)
 		}
 	} else {
@@ -632,6 +652,12 @@ func (r *REPL) handleCommand(line string) (bool, bool, error) {
 			case "operate":
 				r.Mode = "operate"
 				fmt.Fprintln(r.Out, "Switched to operate mode.")
+
+				return true, false, nil
+
+			case "chat":
+				r.Mode = "chat"
+				fmt.Fprintln(r.Out, "Switched to chat mode.")
 
 				return true, false, nil
 
@@ -934,6 +960,7 @@ AGENT MODES
   tab / shift+tab    Cycle agent modes
   operate            Full tool access (default)
   diagnose           Read-only inspection
+  chat               General conversation & research
 
 SLASH COMMANDS
   /help              Show this help
@@ -1072,24 +1099,32 @@ func (r *REPL) toolPermissionFunc(
 		}
 	}
 
-	// Use a fresh scanner for non-raw mode.
-	s := bufio.NewScanner(r.In)
-	for s.Scan() {
-		line := strings.TrimSpace(s.Text())
-		switch strings.ToLower(line) {
-		case "y", "yes":
-
-			return PermAllow
-		case "n", "no":
-
+	// Use single-byte reads for non-raw mode to avoid bufio.Scanner
+	// over-reading past the permission response (issue #21).
+	buf := make([]byte, 1)
+	var line []byte
+	for {
+		n, err := r.In.Read(buf)
+		if err != nil || n == 0 {
 			return PermDeny
-		case "a", "all":
-
-			return PermAllowAll
+		}
+		c := buf[0]
+		switch {
+		case c == '\n' || c == '\r':
+			s := strings.TrimSpace(string(line))
+			line = nil
+			switch strings.ToLower(s) {
+			case "y", "yes":
+				return PermAllow
+			case "n", "no":
+				return PermDeny
+			case "a", "all":
+				return PermAllowAll
+			default:
+				fmt.Fprint(r.Out, "y/n/a: ")
+			}
 		default:
-			fmt.Fprint(r.Out, "y/n/a: ")
+			line = append(line, c)
 		}
 	}
-
-	return PermDeny
 }

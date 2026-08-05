@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"shmorby/internal/audit"
 	ctxcomp "shmorby/internal/context"
 	"shmorby/internal/llm"
 	"shmorby/internal/memory"
@@ -17,10 +18,11 @@ import (
 
 // AgentEvent is emitted during tool execution for UI status updates.
 type AgentEvent struct {
-	Type   string // "tool-start", "tool-end"
+	Type   string // "tool-start", "tool-end", "tool-status"
 	Name   string // tool name
 	Info   string // command or status text
 	Output string // tool output (only on tool-end)
+	Status string // inference-generated status description (only on tool-status)
 }
 
 // StreamFunc receives text deltas from LLM streaming responses.
@@ -138,6 +140,7 @@ func RunTurnWithTools(
 	onEvent AgentEventFunc,
 	permFunc ToolPermissionFunc,
 	toolRules map[string]*tools.RuleSet,
+	statusGen *StatusGenerator,
 ) (string, error) {
 	// Ensure at least one iteration runs.
 	if maxIterations < 1 {
@@ -155,6 +158,9 @@ func RunTurnWithTools(
 	schemas := registry.Schemas()
 	if mode == "diagnose" {
 		schemas = filterDiagnoseSchemas(schemas)
+	}
+	if mode == "chat" {
+		schemas = filterChatSchemas(schemas)
 	}
 	if !shellEnabled {
 		filtered := make([]tools.ToolSchema, 0, len(schemas))
@@ -280,6 +286,7 @@ func RunTurnWithTools(
 
 		for _, tc := range resp.ToolCalls {
 			cmd := extractCommand(tc.Name, tc.Args)
+			argsBytes := json.RawMessage(tc.Args)
 
 			// Emit tool-start event.
 			if onEvent != nil {
@@ -288,6 +295,27 @@ func RunTurnWithTools(
 					Name: tc.Name,
 					Info: cmd,
 				})
+			}
+
+			// Async status description generation: fire-and-forget.
+			// The goroutine produces a short present-tense label and
+			// emits a tool-status event when ready.
+			if statusGen != nil && onEvent != nil {
+				go func(name, desc, command string) {
+					desc = statusGen.Generate(ctx, name, desc, command)
+					if desc == "" {
+						return
+					}
+					select {
+					case <-ctx.Done():
+					default:
+						onEvent(AgentEvent{
+							Type:   "tool-status",
+							Name:   name,
+							Status: desc,
+						})
+					}
+				}(tc.Name, toolDescription(registry, tc.Name), cmd)
 			}
 
 			var result string
@@ -299,13 +327,12 @@ func RunTurnWithTools(
 			if !ok {
 				result = "error: tool not found"
 			} else if !toolOverrides[tc.Name] {
-				action, reason, pErr := tools.EvaluateToolPermission(
+				action, reason, rulePattern, ruleAction, pErr := tools.EvaluateToolPermission(
 					tool.PermLevel(), cmd, toolRules[tc.Name],
 				)
-				if pErr != nil && action != "ask" {
+				if pErr != nil {
 					result = "error: " + pErr.Error()
-				}
-				if action == "ask" {
+				} else if action == "ask" {
 					// Default allow preserves v1 behavior
 					// when no interactive func is wired.
 					resp := PermAllow
@@ -324,6 +351,22 @@ func RunTurnWithTools(
 						// fall through to execute
 					}
 				}
+
+				if auditLog := tools.AuditLoggerFrom(ctx); auditLog != nil {
+					decision := "allow"
+					if result != "" && strings.HasPrefix(result, "error: permission denied") {
+						decision = "deny"
+					}
+					auditLog.LogPermission(audit.PermissionAudit{
+						SessionID:   tools.SessionIDFrom(ctx),
+						Tool:        tc.Name,
+						Command:     string(tools.RedactArgs(argsBytes)),
+						RulePattern: rulePattern,
+						RuleAction:  ruleAction,
+						Decision:    decision,
+						Reason:      reason,
+					})
+				}
 			}
 
 			// Execute tool if no permission error.
@@ -339,7 +382,7 @@ func RunTurnWithTools(
 						Command string `json:"command"`
 					}
 					if uErr := json.Unmarshal(
-						[]byte(tc.Args), &sa,
+						argsBytes, &sa,
 					); uErr == nil && sa.Command != "" {
 						if mErr := tools.CheckMutating(
 							sa.Command,
@@ -348,7 +391,7 @@ func RunTurnWithTools(
 						} else {
 							result, runErr = registry.Run(
 								ctx, tc.Name,
-								json.RawMessage(tc.Args),
+								argsBytes,
 							)
 						}
 					} else {
@@ -359,7 +402,7 @@ func RunTurnWithTools(
 				} else {
 					result, runErr = registry.Run(
 						ctx, tc.Name,
-						json.RawMessage(tc.Args),
+						argsBytes,
 					)
 				}
 			}
@@ -370,7 +413,7 @@ func RunTurnWithTools(
 					Command string `json:"command"`
 				}
 				commandStr := tc.Args
-				if json.Unmarshal([]byte(tc.Args), &parsed) == nil &&
+				if json.Unmarshal(argsBytes, &parsed) == nil &&
 					parsed.Command != "" {
 					commandStr = parsed.Command
 				}
@@ -493,6 +536,7 @@ func RunTurnWithToolsStream(
 	onDelta StreamFunc,
 	permFunc ToolPermissionFunc,
 	toolRules map[string]*tools.RuleSet,
+	statusGen *StatusGenerator,
 ) (string, error) {
 	if maxIterations < 1 {
 		maxIterations = 1
@@ -508,6 +552,9 @@ func RunTurnWithToolsStream(
 		schemas := registry.Schemas()
 		if mode == "diagnose" {
 			schemas = filterDiagnoseSchemas(schemas)
+		}
+		if mode == "chat" {
+			schemas = filterChatSchemas(schemas)
 		}
 		if !shellEnabled {
 			filtered := make([]tools.ToolSchema, 0, len(schemas))
@@ -643,6 +690,7 @@ func RunTurnWithToolsStream(
 
 		for _, tc := range toolCalls {
 			cmd := extractCommand(tc.Name, tc.Args)
+			argsBytes := json.RawMessage(tc.Args)
 
 			if onEvent != nil {
 				onEvent(AgentEvent{
@@ -652,6 +700,25 @@ func RunTurnWithToolsStream(
 				})
 			}
 
+			// Async status description generation: fire-and-forget.
+			if statusGen != nil && onEvent != nil {
+				go func(name, desc, command string) {
+					desc = statusGen.Generate(ctx, name, desc, command)
+					if desc == "" {
+						return
+					}
+					select {
+					case <-ctx.Done():
+					default:
+						onEvent(AgentEvent{
+							Type:   "tool-status",
+							Name:   name,
+							Status: desc,
+						})
+					}
+				}(tc.Name, toolDescription(registry, tc.Name), cmd)
+			}
+
 			var result string
 			var runErr error
 
@@ -659,13 +726,12 @@ func RunTurnWithToolsStream(
 				result = "error: tool not found"
 			} else if tool, ok := registry.Lookup(tc.Name); ok {
 				if !toolOverrides[tc.Name] {
-					action, reason, pErr := tools.EvaluateToolPermission(
+					action, reason, rulePattern, ruleAction, pErr := tools.EvaluateToolPermission(
 						tool.PermLevel(), cmd, toolRules[tc.Name],
 					)
-					if pErr != nil && action != "ask" {
+					if pErr != nil {
 						result = "error: " + pErr.Error()
-					}
-					if action == "ask" {
+					} else if action == "ask" {
 						resp := PermAllow
 						if permFunc != nil {
 							resp = permFunc(tc.Name, cmd, reason)
@@ -680,6 +746,22 @@ func RunTurnWithToolsStream(
 							toolOverrides[tc.Name] = true
 						case PermAllow:
 						}
+					}
+
+					if auditLog := tools.AuditLoggerFrom(ctx); auditLog != nil {
+						decision := "allow"
+						if result != "" && strings.HasPrefix(result, "error: permission denied") {
+							decision = "deny"
+						}
+						auditLog.LogPermission(audit.PermissionAudit{
+							SessionID:   tools.SessionIDFrom(ctx),
+							Tool:        tc.Name,
+							Command:     string(tools.RedactArgs(argsBytes)),
+							RulePattern: rulePattern,
+							RuleAction:  ruleAction,
+							Decision:    decision,
+							Reason:      reason,
+						})
 					}
 				}
 			} else {
@@ -696,7 +778,7 @@ func RunTurnWithToolsStream(
 						Command string `json:"command"`
 					}
 					if uErr := json.Unmarshal(
-						[]byte(tc.Args), &sa,
+						argsBytes, &sa,
 					); uErr == nil && sa.Command != "" {
 						if mErr := tools.CheckMutating(
 							sa.Command,
@@ -705,7 +787,7 @@ func RunTurnWithToolsStream(
 						} else {
 							result, runErr = registry.Run(
 								ctx, tc.Name,
-								json.RawMessage(tc.Args),
+								argsBytes,
 							)
 						}
 					} else {
@@ -716,7 +798,7 @@ func RunTurnWithToolsStream(
 				} else {
 					result, runErr = registry.Run(
 						ctx, tc.Name,
-						json.RawMessage(tc.Args),
+						argsBytes,
 					)
 				}
 			}
@@ -726,7 +808,7 @@ func RunTurnWithToolsStream(
 					Command string `json:"command"`
 				}
 				commandStr := tc.Args
-				if json.Unmarshal([]byte(tc.Args), &parsed) == nil &&
+				if json.Unmarshal(argsBytes, &parsed) == nil &&
 					parsed.Command != "" {
 					commandStr = parsed.Command
 				}
@@ -921,13 +1003,15 @@ func checkContextWindow(
 }
 
 // Only returns schemas for tools allowed in diagnose mode: shell, ssh,
-// and sudo/aws (the latter only if registered).
+// sudo/aws (the latter only if registered), and websearch/webfetch.
 func filterDiagnoseSchemas(schemas []tools.ToolSchema) []tools.ToolSchema {
 	allowed := map[string]bool{
-		"shell": true,
-		"ssh":   true,
-		"sudo":  true,
-		"aws":   true,
+		"shell":     true,
+		"ssh":       true,
+		"sudo":      true,
+		"aws":       true,
+		"websearch": true,
+		"webfetch":  true,
 	}
 	filtered := make([]tools.ToolSchema, 0, len(schemas))
 	for _, s := range schemas {
@@ -939,29 +1023,60 @@ func filterDiagnoseSchemas(schemas []tools.ToolSchema) []tools.ToolSchema {
 	return filtered
 }
 
+// Only returns schemas for tools allowed in chat mode: websearch
+// and webfetch (the latter only if registered).
+func filterChatSchemas(schemas []tools.ToolSchema) []tools.ToolSchema {
+	allowed := map[string]bool{
+		"websearch": true,
+		"webfetch":  true,
+	}
+	filtered := make([]tools.ToolSchema, 0, len(schemas))
+	for _, s := range schemas {
+		if allowed[s.Name] {
+			filtered = append(filtered, s)
+		}
+	}
+
+	return filtered
+}
+
+// toolDescription looks up a tool's Description() from the registry.
+// Returns empty string if not found.
+func toolDescription(registry *tools.Registry, name string) string {
+	if registry == nil {
+		return ""
+	}
+	t, ok := registry.Lookup(name)
+	if !ok {
+		return ""
+	}
+	return t.Description()
+}
+
 // ExtractCommand returns a human-readable command string from a
 // tool call's arguments. Used for permission prompts and events.
 func extractCommand(toolName, argsJSON string) string {
+	argsBytes := []byte(argsJSON)
 	switch toolName {
 	case "shell", "sudo":
 		var sa struct {
 			Command string `json:"command"`
 		}
-		if json.Unmarshal([]byte(argsJSON), &sa) == nil {
+		if json.Unmarshal(argsBytes, &sa) == nil {
 			return sa.Command
 		}
 	case "ssh":
 		var sa struct {
 			Command string `json:"command"`
 		}
-		if json.Unmarshal([]byte(argsJSON), &sa) == nil {
+		if json.Unmarshal(argsBytes, &sa) == nil {
 			return sa.Command
 		}
 	case "aws":
 		var sa struct {
 			Args []string `json:"args"`
 		}
-		if json.Unmarshal([]byte(argsJSON), &sa) == nil && len(sa.Args) > 0 {
+		if json.Unmarshal(argsBytes, &sa) == nil && len(sa.Args) > 0 {
 			return "aws " + strings.Join(sa.Args, " ")
 		}
 	}

@@ -86,8 +86,27 @@ func TestTaskTool_NameDescriptionPermLevel(t *testing.T) {
 	if tool.Description() == "" {
 		t.Error("description should not be empty")
 	}
+	if tool.PermLevel() != "ask" {
+		t.Errorf("want perm 'ask', got %q", tool.PermLevel())
+	}
+}
+
+func TestTaskTool_SetPerm(t *testing.T) {
+	tool := NewTaskTool(nil)
+	if tool.PermLevel() != "ask" {
+		t.Errorf("default perm: want 'ask', got %q", tool.PermLevel())
+	}
+	tool.SetPerm("allow")
 	if tool.PermLevel() != "allow" {
-		t.Errorf("want perm 'allow', got %q", tool.PermLevel())
+		t.Errorf("after SetPerm('allow'): want 'allow', got %q", tool.PermLevel())
+	}
+	tool.SetPerm("deny")
+	if tool.PermLevel() != "deny" {
+		t.Errorf("after SetPerm('deny'): want 'deny', got %q", tool.PermLevel())
+	}
+	tool.SetPerm("ask")
+	if tool.PermLevel() != "ask" {
+		t.Errorf("after SetPerm('ask'): want 'ask', got %q", tool.PermLevel())
 	}
 }
 

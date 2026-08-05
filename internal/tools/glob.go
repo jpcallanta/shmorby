@@ -46,7 +46,7 @@ type findArgs struct {
 // Implements Tool for filesystem search using filepath.WalkDir.
 // Avoids shell find hangs on stuck filesystems.
 type FindTool struct {
-	perm           string
+	perm            string
 	defaultMaxDepth int
 }
 

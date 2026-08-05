@@ -27,7 +27,7 @@ type ParamInfo struct {
 // to the affected runtime components.
 type ConfigOverrider struct {
 	cfg      *config.Config
-	mu       sync.Mutex
+	mu       sync.RWMutex
 	provider *llm.Provider
 
 	registry   *tools.Registry
@@ -550,7 +550,7 @@ func (co *ConfigOverrider) OverrideableParams() []ParamInfo {
 		{
 			Key:          "agent.default",
 			CurrentValue: strVal(co.cfg.Agent.Default),
-			ValidOptions: "operate|diagnose", Type: "string",
+			ValidOptions: "operate|diagnose|chat", Type: "string",
 		},
 		{
 			Key: "agent.max_tool_iterations",
@@ -669,6 +669,9 @@ func (co *ConfigOverrider) OverrideableParams() []ParamInfo {
 
 // Provider returns the current live provider.
 func (co *ConfigOverrider) Provider() llm.Provider {
+	co.mu.RLock()
+	defer co.mu.RUnlock()
+
 	if co.provider != nil {
 		return *co.provider
 	}

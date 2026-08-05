@@ -8,7 +8,7 @@ func TestRuleSet_Evaluate_ExactMatch(t *testing.T) {
 		{Match: "rm -rf /", Action: "deny", Reason: "root destruction"},
 	}}
 
-	action, reason := rs.Evaluate("rm -rf /")
+	action, reason, _ := rs.Evaluate("rm -rf /")
 	if action != "deny" {
 		t.Errorf("want deny, got %q", action)
 	}
@@ -23,7 +23,7 @@ func TestRuleSet_Evaluate_Wildcard(t *testing.T) {
 		{Match: "systemctl restart *", Action: "ask", Reason: "service restart"},
 	}}
 
-	action, reason := rs.Evaluate("systemctl restart nginx")
+	action, reason, _ := rs.Evaluate("systemctl restart nginx")
 	if action != "ask" {
 		t.Errorf("want ask, got %q", action)
 	}
@@ -38,7 +38,7 @@ func TestRuleSet_Evaluate_PrefixWildcard(t *testing.T) {
 		{Match: "aws ec2 describe-*", Action: "allow"},
 	}}
 
-	action, _ := rs.Evaluate("aws ec2 describe-instances")
+	action, _, _ := rs.Evaluate("aws ec2 describe-instances")
 	if action != "allow" {
 		t.Errorf("want allow, got %q", action)
 	}
@@ -51,7 +51,7 @@ func TestRuleSet_Evaluate_FirstMatchWins(t *testing.T) {
 		{Match: "rm -rf /", Action: "allow"},
 	}}
 
-	action, reason := rs.Evaluate("rm -rf /")
+	action, reason, _ := rs.Evaluate("rm -rf /")
 	if action != "deny" {
 		t.Errorf("want deny (first match), got %q", action)
 	}
@@ -66,7 +66,7 @@ func TestRuleSet_Evaluate_NoMatch(t *testing.T) {
 		{Match: "rm *", Action: "deny"},
 	}}
 
-	action, _ := rs.Evaluate("ls -la")
+	action, _, _ := rs.Evaluate("ls -la")
 	if action != "" {
 		t.Errorf("want empty, got %q", action)
 	}
@@ -76,7 +76,7 @@ func TestRuleSet_Evaluate_NoMatch(t *testing.T) {
 func TestRuleSet_Evaluate_EmptyRules(t *testing.T) {
 	rs := RuleSet{}
 
-	action, _ := rs.Evaluate("anything")
+	action, _, _ := rs.Evaluate("anything")
 	if action != "" {
 		t.Errorf("want empty, got %q", action)
 	}
@@ -112,7 +112,7 @@ func TestMatchGlob_TrailingStarNoMatch(t *testing.T) {
 
 // TestEvaluateToolPermission_DenyToolLevel checks tool-level deny.
 func TestEvaluateToolPermission_DenyToolLevel(t *testing.T) {
-	_, _, err := EvaluateToolPermission("deny", "any command", nil)
+	_, _, _, _, err := EvaluateToolPermission("deny", "any command", nil)
 	if err == nil {
 		t.Fatal("want error for deny")
 	}
@@ -124,7 +124,7 @@ func TestEvaluateToolPermission_RuleDeny(t *testing.T) {
 		{Match: "rm -rf *", Action: "deny", Reason: "no recursive rm"},
 	}}
 
-	_, _, err := EvaluateToolPermission("allow", "rm -rf /", rs)
+	_, _, _, _, err := EvaluateToolPermission("allow", "rm -rf /", rs)
 	if err == nil {
 		t.Fatal("want error for rule deny")
 	}
@@ -136,7 +136,7 @@ func TestEvaluateToolPermission_RuleAsk(t *testing.T) {
 		{Match: "systemctl restart *", Action: "ask", Reason: "restart"},
 	}}
 
-	action, reason, err := EvaluateToolPermission("allow", "systemctl restart nginx", rs)
+	action, reason, pattern, ruleAct, err := EvaluateToolPermission("allow", "systemctl restart nginx", rs)
 	if err != nil {
 		t.Fatalf("want nil, got %v", err)
 	}
@@ -146,6 +146,12 @@ func TestEvaluateToolPermission_RuleAsk(t *testing.T) {
 	if reason != "restart" {
 		t.Errorf("want restart reason, got %q", reason)
 	}
+	if pattern != "systemctl restart *" {
+		t.Errorf("want pattern 'systemctl restart *', got %q", pattern)
+	}
+	if ruleAct != "ask" {
+		t.Errorf("want ruleAct ask, got %q", ruleAct)
+	}
 }
 
 // TestEvaluateToolPermission_RuleAllow checks rule allow returns allow.
@@ -154,7 +160,7 @@ func TestEvaluateToolPermission_RuleAllow(t *testing.T) {
 		{Match: "systemctl restart *", Action: "allow"},
 	}}
 
-	action, _, err := EvaluateToolPermission("allow", "systemctl restart nginx", rs)
+	action, _, _, _, err := EvaluateToolPermission("allow", "systemctl restart nginx", rs)
 	if err != nil {
 		t.Fatalf("want nil, got %v", err)
 	}
@@ -165,7 +171,7 @@ func TestEvaluateToolPermission_RuleAllow(t *testing.T) {
 
 // TestEvaluateToolPermission_ToolAskNoRule checks tool ask falls through.
 func TestEvaluateToolPermission_ToolAskNoRule(t *testing.T) {
-	action, _, err := EvaluateToolPermission("ask", "some command", nil)
+	action, _, _, _, err := EvaluateToolPermission("ask", "some command", nil)
 	if err != nil {
 		t.Fatalf("want nil, got %v", err)
 	}
@@ -180,7 +186,7 @@ func TestEvaluateToolPermission_ToolAskRuleAllow(t *testing.T) {
 		{Match: "some command", Action: "allow"},
 	}}
 
-	action, _, err := EvaluateToolPermission("ask", "some command", rs)
+	action, _, _, _, err := EvaluateToolPermission("ask", "some command", rs)
 	if err != nil {
 		t.Fatalf("want nil, got %v", err)
 	}
@@ -195,7 +201,7 @@ func TestEvaluateToolPermission_NoRuleFallback(t *testing.T) {
 		{Match: "unrelated", Action: "deny"},
 	}}
 
-	action, _, err := EvaluateToolPermission("allow", "some command", rs)
+	action, _, _, _, err := EvaluateToolPermission("allow", "some command", rs)
 	if err != nil {
 		t.Fatalf("want nil, got %v", err)
 	}
@@ -210,12 +216,12 @@ func TestRules(t *testing.T) {
 	rs := RuleSet{Rules: []PermissionRule{
 		{Match: "rm -rf *", Action: "deny"},
 	}}
-	action, _ := rs.Evaluate("rm -rf /")
+	action, _, _ := rs.Evaluate("rm -rf /")
 	if action != "deny" {
 		t.Errorf("RuleSet.Evaluate: want deny, got %q", action)
 	}
 
-	_, _, err := EvaluateToolPermission("deny", "anything", nil)
+	_, _, _, _, err := EvaluateToolPermission("deny", "anything", nil)
 	if err == nil {
 		t.Error("EvaluateToolPermission: want error for tool-level deny")
 	}

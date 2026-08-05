@@ -222,14 +222,6 @@ func hasImportantSuffix(s string) bool {
 	return false
 }
 
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-
-	return s[:maxLen] + "..."
-}
-
 func (c *Compressor) Compress(
 	ctx context.Context, sess *session.Session, modelInfo llm.ModelInfo,
 ) error {
@@ -255,6 +247,7 @@ func (c *Compressor) Compress(
 			messages[i].Content = truncateToolOutputLines(msg.Content, 20)
 		}
 	}
+	sess.SetMessages(messages)
 
 	// Summarize older messages
 	split := len(messages) / 2

@@ -12,15 +12,15 @@ type RuleSet struct {
 	Rules []PermissionRule
 }
 
-// Evaluate returns the action and reason for command.
+// Evaluate returns the action, reason, and matched pattern for command.
 // Empty action means no rule matched.
-func (rs *RuleSet) Evaluate(command string) (string, string) {
+func (rs *RuleSet) Evaluate(command string) (string, string, string) {
 	for _, rule := range rs.Rules {
 		if matchGlob(rule.Match, command) {
-			return rule.Action, rule.Reason
+			return rule.Action, rule.Reason, rule.Match
 		}
 	}
-	return "", ""
+	return "", "", ""
 }
 
 // matchGlob reports whether pattern matches command.

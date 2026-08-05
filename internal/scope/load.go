@@ -2,11 +2,13 @@ package scope
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"shmorby/internal/config"
+	"shmorby/internal/fileread"
 	"shmorby/internal/xdg"
 )
 
@@ -34,7 +36,7 @@ type LoadResult struct {
 func Load(cfg config.Config, flags Flags) (LoadResult, error) {
 	// 1: --scope-file flag takes highest precedence.
 	if flags.ScopeFile != "" {
-		content, err := os.ReadFile(flags.ScopeFile)
+		content, err := fileread.ReadFileLimited(flags.ScopeFile, 0)
 		if err != nil {
 			return LoadResult{}, fmt.Errorf(
 				"load --scope-file: %w",
@@ -104,6 +106,7 @@ func Load(cfg config.Config, flags Flags) (LoadResult, error) {
 // primary. Returns merged content and the list of paths actually resolved.
 // Paths are literal; glob is optional stretch.
 // Missing instruction files are silently skipped (optional stretch).
+// Oversized files are logged at WARN level and skipped.
 func mergeInstructions(primary string, paths []string) (string, []string, error) {
 	var merged strings.Builder
 	merged.WriteString(primary)
@@ -115,9 +118,16 @@ func mergeInstructions(primary string, paths []string) (string, []string, error)
 		if path == "" {
 			continue
 		}
-		content, err := os.ReadFile(path)
+		// Use size-limited read to prevent OOM from oversized files (issue #46).
+		content, err := fileread.ReadFileLimited(path, 0)
 		if err != nil {
-			// Skip missing instruction files (optional stretch).
+			if os.IsNotExist(err) {
+				// Skip missing instruction files (optional stretch).
+				continue
+			}
+			// Distinguish oversized files from other errors (MINOR-3).
+			slog.Warn("instruction file skipped",
+				"path", path, "err", err)
 			continue
 		}
 		resolved = append(resolved, path)
@@ -129,6 +139,7 @@ func mergeInstructions(primary string, paths []string) (string, []string, error)
 }
 
 // Searches for SCOPE.md from cwd up to root.
+// Logs a warning if a SCOPE.md is found but exceeds the size limit.
 func findScopeFile() (string, bool, string) {
 	wd, err := os.Getwd()
 	if err != nil {
@@ -139,9 +150,16 @@ func findScopeFile() (string, bool, string) {
 	// Walk from cwd up to root.
 	for dir := wd; dir != root; dir = filepath.Dir(dir) {
 		path := filepath.Join(dir, "SCOPE.md")
-		content, err := os.ReadFile(path)
+		// Use size-limited read to prevent OOM from oversized files (issue #46).
+		content, err := fileread.ReadFileLimited(path, 0)
 		if err == nil {
 			return string(content), true, path
+		}
+		if !os.IsNotExist(err) {
+			// File exists but is oversized or unreadable — warn instead
+			// of silently falling through (MINOR-3).
+			slog.Warn("SCOPE.md skipped",
+				"path", path, "err", err)
 		}
 		// Stop at root.
 		if dir == filepath.Dir(dir) {
@@ -151,20 +169,30 @@ func findScopeFile() (string, bool, string) {
 
 	// Check root directory.
 	path := filepath.Join(root, "SCOPE.md")
-	content, err := os.ReadFile(path)
+	content, err := fileread.ReadFileLimited(path, 0)
 	if err == nil {
 		return string(content), true, path
+	}
+	if !os.IsNotExist(err) {
+		slog.Warn("SCOPE.md skipped",
+			"path", path, "err", err)
 	}
 
 	return "", false, ""
 }
 
 // Checks user-level scope via xdg.UserConfigDir.
+// Logs a warning if the file exceeds the size limit.
 func findUserScopeFile() (string, bool, string) {
 	path := filepath.Join(xdg.UserConfigDir(), "SCOPE.md")
-	content, err := os.ReadFile(path)
+	// Use size-limited read to prevent OOM from oversized files (issue #46).
+	content, err := fileread.ReadFileLimited(path, 0)
 	if err == nil {
 		return string(content), true, path
+	}
+	if !os.IsNotExist(err) {
+		slog.Warn("user SCOPE.md skipped",
+			"path", path, "err", err)
 	}
 	return "", false, ""
 }

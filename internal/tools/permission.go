@@ -21,33 +21,34 @@ func MergeRules(presetNames []string, custom []PermissionRule) RuleSet {
 //
 //	tool-level → rule set → effective action
 //
-// Returns the effective action and matching reason.
+// Returns the effective action, matching reason, matched pattern,
+// and rule action (the action from the matched rule).
 // toolPerm is "allow", "ask", or "deny".
 // An empty ruleSet evaluates all commands as the tool-level action.
-func EvaluateToolPermission(toolPerm string, command string, rules *RuleSet) (string, string, error) {
+func EvaluateToolPermission(toolPerm string, command string, rules *RuleSet) (string, string, string, string, error) {
 	if toolPerm == "deny" {
-		return "deny", "", fmt.Errorf("tool: permission denied")
+		return "deny", "", "", "", fmt.Errorf("tool: permission denied")
 	}
 
 	if rules != nil {
-		ruleAction, ruleReason := rules.Evaluate(command)
+		ruleAction, ruleReason, matchedPattern := rules.Evaluate(command)
 		switch ruleAction {
 		case "deny":
 			r := ruleReason
 			if r == "" {
 				r = "rule denied"
 			}
-			return "deny", r, fmt.Errorf("rule: %s", r)
+			return "deny", r, matchedPattern, ruleAction, fmt.Errorf("rule: %s", r)
 		case "allow":
-			return "allow", ruleReason, nil
+			return "allow", ruleReason, matchedPattern, ruleAction, nil
 		case "ask":
-			return "ask", ruleReason, nil
+			return "ask", ruleReason, matchedPattern, ruleAction, nil
 		}
 	}
 
 	// No rule matched; fall back to tool-level action.
 	if toolPerm == "ask" {
-		return "ask", "", nil
+		return "ask", "", "", "", nil
 	}
-	return "allow", "", nil
+	return "allow", "", "", "", nil
 }

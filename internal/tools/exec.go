@@ -3,10 +3,13 @@ package tools
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"net/http"
 	"os/exec"
-	"syscall"
+	"sync"
 )
 
 // Executor runs commands for testable tool implementations.
@@ -23,7 +26,7 @@ func (OSExecutor) Run(
 	ctx context.Context, name string, args ...string,
 ) ([]byte, error) {
 	cmd := exec.Command(name, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setupProcessGroup(cmd)
 
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -41,24 +44,31 @@ func (OSExecutor) Run(
 	go func() {
 		<-ctx.Done()
 		if cmd.Process != nil {
-			syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			killProcessGroup(cmd.Process.Pid)
 		}
 	}()
 
 	var outBuf, errBuf bytes.Buffer
-	readDone := make(chan struct{}, 2)
+	// readDone carries pipe-read errors so callers can detect data
+	// loss from closed pipes or I/O failures instead of silently
+	// ignoring them (issue #49).
+	readDone := make(chan error, 2)
 
 	go func() {
-		io.Copy(&outBuf, &contextReader{r: stdout, ctx: ctx})
-		readDone <- struct{}{}
+		_, err := io.Copy(&outBuf, &contextReader{r: stdout, ctx: ctx})
+		readDone <- err
 	}()
 	go func() {
-		io.Copy(&errBuf, &contextReader{r: stderr, ctx: ctx})
-		readDone <- struct{}{}
+		_, err := io.Copy(&errBuf, &contextReader{r: stderr, ctx: ctx})
+		readDone <- err
 	}()
 
 	for i := 0; i < 2; i++ {
-		<-readDone
+		if rErr := <-readDone; rErr != nil && !errors.Is(rErr, context.Canceled) {
+			// Log pipe read errors that aren't simply context
+			// cancellation — these indicate real data loss.
+			slog.Warn("exec pipe read error", "err", rErr)
+		}
 	}
 
 	waitErr := cmd.Wait()
@@ -75,27 +85,75 @@ func (OSExecutor) Run(
 	return combined, nil
 }
 
+// HTTPClient performs HTTP requests. Used for testable web tools.
+type HTTPClient interface {
+	Do(req *http.Request) (*http.Response, error)
+}
+
 // Wraps an io.Reader and returns context.Canceled when the
 // context is done, even if the underlying Read() blocks.
+// Uses a single background goroutine to avoid spawning
+// one goroutine per Read() call.
 type contextReader struct {
 	r   io.Reader
 	ctx context.Context
+
+	once   sync.Once
+	ch     chan readResult
+	remain []byte
+}
+
+type readResult struct {
+	data []byte
+	err  error
+}
+
+// Starts the single background reader goroutine.
+func (cr *contextReader) startReader() {
+	cr.ch = make(chan readResult, 1)
+	go func() {
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := cr.r.Read(buf)
+			if n > 0 {
+				chunk := make([]byte, n)
+				copy(chunk, buf[:n])
+				select {
+				case cr.ch <- readResult{data: chunk}:
+				case <-cr.ctx.Done():
+					return
+				}
+			}
+			if err != nil {
+				cr.ch <- readResult{err: err}
+				return
+			}
+		}
+	}()
 }
 
 func (cr *contextReader) Read(p []byte) (int, error) {
-	type result struct {
-		n   int
-		err error
+	if len(cr.remain) > 0 {
+		n := copy(p, cr.remain)
+		cr.remain = cr.remain[n:]
+
+		return n, nil
 	}
-	ch := make(chan result, 1)
-	go func() {
-		n, err := cr.r.Read(p)
-		ch <- result{n, err}
-	}()
+
+	cr.once.Do(cr.startReader)
+
 	select {
-	case r := <-ch:
-		return r.n, r.err
 	case <-cr.ctx.Done():
 		return 0, cr.ctx.Err()
+	case rr := <-cr.ch:
+		if rr.err != nil {
+			return 0, rr.err
+		}
+		n := copy(p, rr.data)
+		if n < len(rr.data) {
+			cr.remain = rr.data[n:]
+		}
+
+		return n, nil
 	}
 }

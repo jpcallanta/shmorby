@@ -74,7 +74,7 @@ func NewStore(cfg Config, embedder Embedder) (Store, error) {
 		return nil, fmt.Errorf("create memory dir: %w", err)
 	}
 
-	db, err := sql.Open("sqlite3", dbPath)
+	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}

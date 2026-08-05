@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"sync"
-	"syscall"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -68,9 +67,10 @@ func (m *MCPManager) startServer(
 	cfg MCPServerConfig,
 ) error {
 	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
 	cmd := exec.CommandContext(ctx, cfg.Command, cfg.Args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setupProcessGroup(cmd)
 	if len(cfg.Env) > 0 {
 		cmd.Env = append(os.Environ(), cfg.Env...)
 	}
@@ -87,8 +87,6 @@ func (m *MCPManager) startServer(
 
 	session, err := client.Connect(ctx, &mcp.CommandTransport{Command: cmd}, nil)
 	if err != nil {
-		cancel()
-
 		return fmt.Errorf("mcp connect: %w", err)
 	}
 
@@ -101,7 +99,6 @@ func (m *MCPManager) startServer(
 
 	if initResult.Capabilities == nil ||
 		initResult.Capabilities.Tools == nil {
-		cancel()
 		session.Close()
 
 		return fmt.Errorf(
@@ -111,7 +108,6 @@ func (m *MCPManager) startServer(
 
 	toolsResult, err := session.ListTools(ctx, nil)
 	if err != nil {
-		cancel()
 		session.Close()
 
 		return fmt.Errorf("mcp list tools: %w", err)

@@ -14,6 +14,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 	"shmorby/internal/agent"
+	"shmorby/internal/audit"
 	"shmorby/internal/config"
 	ctxcomp "shmorby/internal/context"
 	"shmorby/internal/llm"
@@ -136,6 +137,74 @@ var (
 
 			tFind := tools.NewFindTool(cfg.Permission.Shell)
 			reg.Register(tFind)
+			if cfg.Tools.WebSearch.Enabled {
+				tWS := tools.NewWebSearchTool(cfg.Permission.Shell, nil)
+				tWS.SetDefaultTimeout(cfg.Tools.Timeout)
+				tWS.SetBaseURL(cfg.Tools.WebSearch.BaseURL)
+				tWS.SetEngine(cfg.Tools.WebSearch.Engine)
+				if cfg.Tools.WebSearch.ExaAPIKey != "" {
+					tWS.SetExaAPIKey(cfg.Tools.WebSearch.ExaAPIKey)
+				}
+				reg.Register(tWS)
+			}
+			if cfg.Tools.WebFetch.Enabled {
+				tWF := tools.NewWebFetchTool(cfg.Permission.Shell, nil)
+				tWF.SetDefaultTimeout(cfg.Tools.Timeout)
+				reg.Register(tWF)
+			}
+
+			// Initialize audit store and logger.
+			var auditLogger *audit.Logger
+			if cfg.Audit.Enabled {
+				auditStore, aErr := audit.NewAuditStore(cfg.Audit.DBPath)
+				if aErr != nil {
+					slog.Warn("audit store unavailable, continuing without audit",
+						"err", aErr)
+				} else {
+					auditLogger = audit.NewLogger(
+						auditStore,
+						cfg.Audit.AsyncBufferSize,
+						500*time.Millisecond,
+						cfg.Audit.OutputCaptureMaxBytes,
+					)
+					// Wire audit logger into tools.
+					if t, ok := reg.Lookup("shell"); ok {
+						if st, ok := t.(*tools.ShellTool); ok {
+							st.SetAuditLogger(auditLogger)
+						}
+					}
+					if t, ok := reg.Lookup("ssh"); ok {
+						if st, ok := t.(*tools.SSHTool); ok {
+							st.SetAuditLogger(auditLogger)
+						}
+					}
+					if t, ok := reg.Lookup("sudo"); ok {
+						if st, ok := t.(*tools.SudoTool); ok {
+							st.SetAuditLogger(auditLogger)
+						}
+					}
+					if t, ok := reg.Lookup("aws"); ok {
+						if st, ok := t.(*tools.AWSTool); ok {
+							st.SetAuditLogger(auditLogger)
+						}
+					}
+					if t, ok := reg.Lookup("websearch"); ok {
+						if st, ok := t.(*tools.WebSearchTool); ok {
+							st.SetAuditLogger(auditLogger)
+						}
+					}
+					if t, ok := reg.Lookup("webfetch"); ok {
+						if st, ok := t.(*tools.WebFetchTool); ok {
+							st.SetAuditLogger(auditLogger)
+						}
+					}
+				}
+			}
+			defer func() {
+				if auditLogger != nil {
+					auditLogger.Close()
+				}
+			}()
 
 			// Initialize memory store.
 			var memStore memory.Store
@@ -222,15 +291,14 @@ var (
 				}
 			}
 
-			// Build per-tool permission rulesets when interactive mode
-			// is enabled. Nil rules preserves v1 "ask" = silently allow.
-			var toolRules map[string]*tools.RuleSet
-			if cfg.Permission.Interactive {
-				toolRules = make(map[string]*tools.RuleSet)
-				for _, tool := range []string{"shell", "ssh", "sudo", "aws"} {
-					rs := tools.MergeRules(cfg.Permission.Presets, cfg.Permission.Rules)
-					toolRules[tool] = &rs
-				}
+			// Build per-tool permission rulesets. The interactive flag
+			// only controls whether the user is prompted for "ask"
+			// decisions; rules are always evaluated so that presets
+			// (destructive, service, etc.) are never bypassed.
+			toolRules := make(map[string]*tools.RuleSet)
+			for _, tool := range []string{"shell", "ssh", "sudo", "aws"} {
+				rs := tools.MergeRules(cfg.Permission.Presets, cfg.Permission.Rules)
+				toolRules[tool] = &rs
 			}
 
 			// Apply tool output byte cap from config (0 = unlimited).
@@ -292,60 +360,77 @@ var (
 			// Channel is non-nil only when TUI is active (see below).
 			var subagentEventChan chan tools.SubagentEvent
 			orch := &tools.TaskOrchestrator{
-				RunSubtask: func(ctx context.Context, task tools.Subtask) tools.TaskResult {
-					childSess := session.New()
-					if subagentEventChan != nil {
-						select {
-						case subagentEventChan <- tools.SubagentEvent{
-							Session:   childSess,
-							SessionID: childSess.ID(),
-							ParentID:  sess.ID(),
-							Label:     task.ID,
-							Status:    "",
-						}:
-						default:
-						}
-					}
-					reply, err := agent.RunTurnWithTools(
-						ctx, provider, childSess,
-						cfg.Agent.Default, scopeResult.Content,
-						"", cfg.Model, task.Prompt,
-						reg, cfg.Agent.MaxToolIterations,
-						cfg.Tools.Shell.Enabled,
-						memStore, memRetriever,
-						compressor, modelInfo,
-						nil, nil, toolRules,
-					)
-					status := "ok"
-					errStr := ""
-					if err != nil {
-						status = "error"
-						errStr = err.Error()
-						reply = ""
-					}
-					if subagentEventChan != nil {
-						select {
-						case subagentEventChan <- tools.SubagentEvent{
-							Session:   childSess,
-							SessionID: childSess.ID(),
-							ParentID:  sess.ID(),
-							Label:     task.ID,
-							Status:    status,
-						}:
-						default:
-						}
-					}
-					return tools.TaskResult{
-						TaskID:      task.ID,
-						Description: task.Description,
-						Status:      status,
-						Output:      reply,
-						Error:       errStr,
-					}
-				},
-				MaxParallel: 5,
+				AuditLogger:     auditLogger,
+				ParentSessionID: sess.ID(),
+				MaxParallel:     5,
 			}
-			reg.Register(tools.NewTaskTool(orch))
+			orch.RunSubtask = func(ctx context.Context, task tools.Subtask) tools.TaskResult {
+				childSess := session.New()
+				if subagentEventChan != nil {
+					select {
+					case subagentEventChan <- tools.SubagentEvent{
+						Session:   childSess,
+						SessionID: childSess.ID(),
+						ParentID:  sess.ID(),
+						Label:     task.ID,
+						Status:    "",
+					}:
+					default:
+					}
+				}
+				// Filter registry to exclude denied tools and
+				// pass parent's permission callback to subagent.
+				childReg := reg.FilterByPerm()
+				var childPermFunc agent.ToolPermissionFunc
+				if orch.PermFunc != nil {
+					childPermFunc = orch.PermFunc.(agent.ToolPermissionFunc)
+				}
+				reply, err := agent.RunTurnWithTools(
+					ctx, provider, childSess,
+					cfg.Agent.Default, scopeResult.Content,
+					"", cfg.Model, task.Prompt,
+					childReg, cfg.Agent.MaxToolIterations,
+					cfg.Tools.Shell.Enabled,
+					memStore, memRetriever,
+					compressor, modelInfo,
+					nil, childPermFunc, toolRules,
+					nil, // no status gen for subagents
+				)
+				status := "ok"
+				errStr := ""
+				if err != nil {
+					status = "error"
+					errStr = err.Error()
+					reply = ""
+				}
+				if subagentEventChan != nil {
+					select {
+					case subagentEventChan <- tools.SubagentEvent{
+						Session:   childSess,
+						SessionID: childSess.ID(),
+						ParentID:  sess.ID(),
+						Label:     task.ID,
+						Status:    status,
+					}:
+					default:
+					}
+				}
+				return tools.TaskResult{
+					TaskID:      task.ID,
+					Description: task.Description,
+					Status:      status,
+					Output:      reply,
+					Error:       errStr,
+				}
+			}
+			// Apply task tool permission level from config.
+			taskTool := tools.NewTaskTool(orch)
+			taskPerm := cfg.Permission.Task
+			if taskPerm == "" {
+				taskPerm = "ask"
+			}
+			taskTool.SetPerm(taskPerm)
+			reg.Register(taskTool)
 
 			// Initialize MCP manager.
 			var mcpManager *tools.MCPManager
@@ -376,6 +461,23 @@ var (
 			// running tool executions are cancelled promptly.
 			rootCtx, rootCancel := context.WithCancel(cmd.Context())
 			defer rootCancel()
+
+			// Inject session ID and audit logger into context.
+			rootCtx = tools.WithSessionID(rootCtx, sess.ID())
+			if auditLogger != nil {
+				rootCtx = tools.WithAuditLogger(rootCtx, auditLogger)
+			}
+
+			// Phase 37: build status description generator.
+			// On by default — generates descriptions from tool
+			// metadata without any LLM call.
+			// Set tui.status_model: "off" to disable.
+			var statusGen *agent.StatusGenerator
+			if cfg.TUI.StatusModel == "off" {
+				// Explicitly disabled.
+			} else {
+				statusGen = agent.NewStatusGenerator(nil, "")
+			}
 
 			sigCh := make(chan os.Signal, 1)
 			signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -449,6 +551,8 @@ var (
 					ToolRules:            toolRules,
 					ConfigOverrider:      overrider,
 					SubagentEventChan:    subagentEventChan,
+					Orchestrator:         orch,
+					StatusGen:            statusGen,
 				})
 				opts := []tea.ProgramOption{}
 				if cfg.TUI.Fullscreen {
@@ -456,7 +560,10 @@ var (
 				}
 				p := tea.NewProgram(m, opts...)
 				_, err := p.Run()
-				return fmt.Errorf("run TUI: %w", err)
+				if err != nil {
+					return fmt.Errorf("run TUI: %w", err)
+				}
+				return nil
 			}
 
 			// Fall back to plain REPL.
@@ -484,12 +591,94 @@ var (
 				ModelInfo:       modelInfo,
 				ToolRules:       toolRules,
 				ConfigOverrider: overrider,
+				Orchestrator:    orch,
+				StatusGen:       statusGen,
 			}
 
 			return repl.Run(rootCtx)
 		},
 	}
 )
+
+// configCmd is the parent for `shmorby config` subcommands.
+var configCmd = &cobra.Command{
+	Use:   "config",
+	Short: "Config management (migrate, validate, show)",
+}
+
+var (
+	configFileFlag string
+	configDryRun   bool
+	configQuiet    bool
+)
+
+func init() {
+	// ── config migrate ──────────────────────────────────────
+	migrateCmd := &cobra.Command{
+		Use:   "migrate",
+		Short: "Merge missing config fields from defaults",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			src := configFileFlag
+			if src == "" {
+				src = filepath.Join(xdg.UserConfigDir(), "config.yaml")
+			}
+			dst := src // write back in place
+
+			if configDryRun {
+				if err := config.DryMigrate(src, dst); err != nil {
+					return err
+				}
+				cmd.Println("No files written (--dry-run).")
+				return nil
+			}
+
+			if err := config.Migrate(src, dst); err != nil {
+				return err
+			}
+			cmd.Printf("✓ Config migrated: %s\n", src)
+			return nil
+		},
+	}
+	migrateCmd.Flags().StringVar(&configFileFlag, "file", "", "config file path (default: ~/.config/shmorby/config.yaml)")
+	migrateCmd.Flags().BoolVar(&configDryRun, "dry-run", false, "show diff without writing")
+	configCmd.AddCommand(migrateCmd)
+
+	// ── config show ──────────────────────────────────────────
+	showCmd := &cobra.Command{
+		Use:   "show",
+		Short: "Print current default config as YAML",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cmd.Print(config.ShowDefaults())
+			return nil
+		},
+	}
+	configCmd.AddCommand(showCmd)
+
+	// ── config validate ──────────────────────────────────────
+	validateCmd := &cobra.Command{
+		Use:   "validate",
+		Short: "Validate a config file against the schema",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path := configFileFlag
+			if path == "" {
+				path = filepath.Join(xdg.UserConfigDir(), "config.yaml")
+			}
+
+			if err := config.ValidateFile(path); err != nil {
+				return err
+			}
+			if !configQuiet {
+				cmd.Printf("✓ %s: valid\n", path)
+			}
+			return nil
+		},
+	}
+	validateCmd.Flags().StringVar(&configFileFlag, "file", "", "config file path (default: ~/.config/shmorby/config.yaml)")
+	validateCmd.Flags().BoolVarP(&configQuiet, "quiet", "q", false, "suppress non-error output")
+	configCmd.AddCommand(validateCmd)
+
+	rootCmd.AddCommand(configCmd)
+}
 
 // Registers CLI flags.
 func init() {
@@ -516,7 +705,12 @@ Flags:
   --log-level string      Log level: debug, info, warn, error (default "info")
   --version               Print version and exit
 
-Config file (shmorby.yaml):
+Subcommands:
+  config migrate          Merge missing config fields from defaults
+  config show             Print default config as YAML
+  config validate         Validate a config file
+
+Config file (config.yaml):
   Loaded from (first match wins):
     1. /etc/shmorby/config.yaml (Unix) /
        %ProgramData%\shmorby\config.yaml (Windows)
@@ -529,10 +723,13 @@ Config file (shmorby.yaml):
 
 Slash commands (in TUI or stdin REPL):
   /help       Show this help
+  /set        Override a config parameter at runtime
   /quit       Exit shmorby
   /reset      Clear conversation history
   /model      Switch LLM model
-  /agent      Switch agent mode (operate, diagnose)
+  /platform   Switch LLM provider
+  /apikey     Set API key for current provider
+  /agent      Switch agent mode (operate, diagnose, chat)
   /scope      Show loaded scope context
   /memory     Memory management
   /context    Token usage and compression stats

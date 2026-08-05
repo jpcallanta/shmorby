@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"shmorby/internal/audit"
 )
 
 //go:embed sudo.txt
@@ -40,6 +42,7 @@ type SudoTool struct {
 	perm           string
 	executor       Executor
 	defaultTimeout int
+	auditLogger    *audit.Logger
 }
 
 // SetDefaultTimeout sets the default timeout in seconds for this tool.
@@ -77,6 +80,9 @@ func (s *SudoTool) PermLevel() string { return s.perm }
 
 // SetPerm updates the permission level at runtime.
 func (s *SudoTool) SetPerm(level string) { s.perm = level }
+
+// SetAuditLogger sets the audit logger for this tool.
+func (s *SudoTool) SetAuditLogger(l *audit.Logger) { s.auditLogger = l }
 
 // Parses args, executes sudo -n with timeout, truncates output, and
 // redacts secrets. Permission is enforced by the agent loop.
@@ -126,12 +132,41 @@ func (s *SudoTool) Run(
 		"args", string(RedactArgs(args)),
 	)
 
-	truncated := TruncateOutput(out)
+	if s.auditLogger != nil {
+		exitCode := 0
+		if err != nil {
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				exitCode = exitErr.ExitCode()
+			}
+		}
+		errMsg := ""
+		if err != nil {
+			errMsg = err.Error()
+		}
+		s.auditLogger.LogToolRun(
+			audit.AuditEntry{
+				SessionID:  SessionIDFrom(ctx),
+				Tool:       "sudo",
+				Args:       string(RedactArgs(args)),
+				DurationMs: elapsed.Milliseconds(),
+				ExitCode:   &exitCode,
+				Error:      errMsg,
+			},
+			&audit.OutputCapture{
+				SessionID:  SessionIDFrom(ctx),
+				Stdout:     string(out),
+				StdoutSize: len(out),
+				Checksum:   audit.ComputeChecksum(string(out)),
+			},
+		)
+	}
+
+	result := string(TruncateOutput(out))
 
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) && exitErr.ExitCode() > 0 {
-			result := string(truncated)
 			if result != "" && !strings.HasSuffix(result, "\n") {
 				result += "\n"
 			}
@@ -141,8 +176,8 @@ func (s *SudoTool) Run(
 			return result, nil
 		}
 
-		return string(truncated), fmt.Errorf("sudo exec: %w", err)
+		return result, fmt.Errorf("sudo exec: %w", err)
 	}
 
-	return string(truncated), nil
+	return result, nil
 }

@@ -1,10 +1,14 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"shmorby/internal/agent"
+	"shmorby/internal/config"
+	"shmorby/internal/tui/styles"
 )
 
 // Tests that /help opens the help overlay.
@@ -29,10 +33,12 @@ func TestModelCommand_Help(t *testing.T) {
 }
 
 // Tests that help overlay renders in View when visible.
+// Uses a tall terminal so every section is above the fold; paging tests
+// below cover reachability in a small terminal.
 func TestModelView_HelpOverlay(t *testing.T) {
 	m := NewModel(Config{ThemeName: "catppuccin-mocha"})
 	m.width = 80
-	m.height = 24
+	m.height = 200
 	m.showHelp.Show()
 
 	view := m.View()
@@ -221,10 +227,11 @@ func TestHelpOverlay_AllCommands(t *testing.T) {
 }
 
 // Tests help overlay renders all leader key bindings.
+// Uses a tall terminal: LEADER KEY sits below the fold at height=24.
 func TestHelpOverlay_LeaderBindings(t *testing.T) {
 	m := NewModel(Config{ThemeName: "catppuccin-mocha"})
 	m.width = 80
-	m.height = 24
+	m.height = 200
 	m.showHelp.Show()
 
 	view := m.View()
@@ -360,10 +367,11 @@ func TestModelUpdate_HelpScrollDoesNotClose(t *testing.T) {
 }
 
 // Tests ctrl+c description in help overlay says "Quit shmorby".
+// Uses a tall terminal: the ctrl+c line sits below the fold at height=24.
 func TestHelpOverlay_CtrlCDescription(t *testing.T) {
 	m := NewModel(Config{ThemeName: "catppuccin-mocha"})
 	m.width = 80
-	m.height = 24
+	m.height = 200
 	m.showHelp.Show()
 
 	view := m.View()
@@ -382,5 +390,173 @@ func TestHelpOverlay_TUICommand(t *testing.T) {
 	view := m.View()
 	if !strings.Contains(view, "/tui") {
 		t.Error("help overlay should list /tui command")
+	}
+}
+
+// Tests that PgDn changes the rendered help frame and PgUp restores it.
+func TestHelpOverlay_PageNavigationChangesFrame(t *testing.T) {
+	m := NewModel(Config{ThemeName: "catppuccin-mocha"})
+	m.width = 80
+	m.height = 24
+	m.showHelp.Show()
+
+	top := m.View()
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	m = updated.(Model)
+	paged := m.View()
+	if paged == top {
+		t.Error("PgDn should change the rendered help frame")
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	m = updated.(Model)
+	if back := m.View(); back != top {
+		t.Error("PgUp should restore the original help frame")
+	}
+}
+
+// Tests that the bottom of the help content is reachable in a small
+// terminal and the footer stays pinned.
+func TestHelpOverlay_BottomReachableInSmallTerminal(t *testing.T) {
+	m := NewModel(Config{ThemeName: "catppuccin-mocha"})
+	m.width = 80
+	m.height = 24
+	m.showHelp.Show()
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnd})
+	m = updated.(Model)
+
+	view := m.View()
+	if !strings.Contains(view, "PERMISSIONS") {
+		t.Error("PERMISSIONS section should be reachable at height=24")
+	}
+	if !strings.Contains(view, "Press any key to close") {
+		t.Error("footer should stay visible when scrolled to bottom")
+	}
+}
+
+// Tests that scrolling is clamped at the end of the help content.
+func TestHelpOverlay_ScrollClampedAtEnd(t *testing.T) {
+	m := NewModel(Config{ThemeName: "catppuccin-mocha"})
+	m.width = 80
+	m.height = 24
+	m.showHelp.Show()
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnd})
+	m = updated.(Model)
+	bottom := m.View()
+
+	for i := 0; i < 5; i++ {
+		updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+		m = updated.(Model)
+	}
+	if m.showHelp.scroll != m.showHelp.maxScroll(m.height) {
+		t.Errorf("scroll should be clamped at maxScroll=%d, got %d",
+			m.showHelp.maxScroll(m.height), m.showHelp.scroll)
+	}
+	if after := m.View(); after != bottom {
+		t.Error("view should not change when scrolled past the end")
+	}
+}
+
+// Tests that the footer is visible at the top of the help overlay too.
+func TestHelpOverlay_FooterVisibleAtTop(t *testing.T) {
+	m := NewModel(Config{ThemeName: "catppuccin-mocha"})
+	m.width = 80
+	m.height = 24
+	m.showHelp.Show()
+
+	if !strings.Contains(m.View(), "Press any key to close") {
+		t.Error("footer should be visible at the top of the help overlay")
+	}
+}
+
+// Tests that Home/End jump to the top/bottom of the help content.
+func TestHelpOverlay_HomeEndJump(t *testing.T) {
+	m := NewModel(Config{ThemeName: "catppuccin-mocha"})
+	m.width = 80
+	m.height = 24
+	m.showHelp.Show()
+
+	top := m.View()
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnd})
+	m = updated.(Model)
+	if m.showHelp.scroll == 0 {
+		t.Fatal("End should scroll past the top")
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyHome})
+	m = updated.(Model)
+	if m.showHelp.scroll != 0 {
+		t.Errorf("Home should jump to top, scroll=%d", m.showHelp.scroll)
+	}
+	if home := m.View(); home != top {
+		t.Error("Home should restore the top help frame")
+	}
+}
+
+// Tests that the footer shows a scroll position indicator when the
+// content overflows the viewport.
+func TestHelpOverlay_PositionIndicator(t *testing.T) {
+	m := NewModel(Config{ThemeName: "catppuccin-mocha"})
+	m.width = 80
+	m.height = 24
+	m.showHelp.Show()
+
+	wantTotal := helpLineCount(helpContent(m.mode, nil))
+	top := m.View()
+	if !strings.Contains(top, fmt.Sprintf("▰ 1/%d", wantTotal)) {
+		t.Errorf("expected position indicator '▰ 1/%d' at top, got: %q",
+			wantTotal, top)
+	}
+}
+
+// Tests that every runtime-changeable config parameter is surfaced in the
+// help overlay's CONFIG PARAMETERS section when a live overrider is
+// present. Regression guard: a param accepted by /set without being added
+// to the help output fails this test.
+func TestHelpOverlay_ConfigParamsRendered(t *testing.T) {
+	co := agent.NewConfigOverrider(&config.Config{
+		Provider: "ollama",
+		Model:    "test-model",
+	}, nil, nil, nil, nil)
+	params := co.OverrideableParams()
+	if len(params) == 0 {
+		t.Fatal("expected live overrideable params")
+	}
+
+	theme := styles.GetTheme("catppuccin-mocha")
+	body := renderHelpBody(helpContent("operate", params), theme)
+
+	start := -1
+	for i, line := range body {
+		if strings.Contains(line, "CONFIG PARAMETERS") {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		t.Fatal("help content missing CONFIG PARAMETERS section")
+	}
+
+	var sectionText strings.Builder
+	for _, line := range body[start+1:] {
+		if line == "" { // blank separator ends the section
+			break
+		}
+		sectionText.WriteString(line)
+	}
+	if !strings.Contains(sectionText.String(), "(key") {
+		t.Error("CONFIG PARAMETERS section missing header line")
+	}
+	for _, p := range params {
+		if !strings.Contains(sectionText.String(), p.Key) {
+			t.Errorf(
+				"help overlay CONFIG PARAMETERS section missing %q",
+				p.Key,
+			)
+		}
 	}
 }

@@ -20,17 +20,19 @@ type Engine struct {
 func New() *Engine {
 	return &Engine{
 		commands: []Command{
+			{Name: "/help", Description: "Show this help"},
+			{Name: "/set", Description: "Override a config parameter at runtime"},
 			{Name: "/quit", Description: "Exit shmorby"},
 			{Name: "/reset", Description: "Clear session history"},
 			{Name: "/model", Description: "Switch LLM model"},
 			{Name: "/platform", Description: "Switch LLM provider"},
 			{Name: "/apikey", Description: "Set API key for current provider"},
-			{Name: "/agent", Description: "Switch agent mode (operate/diagnose)"},
+			{Name: "/agent", Description: "Switch agent mode (operate/diagnose/chat)"},
 			{Name: "/scope", Description: "Show loaded scope files"},
 			{Name: "/memory", Description: "Memory management"},
 			{Name: "/context", Description: "Context compression stats"},
+			{Name: "/log", Description: "Set log verbosity (debug/info/warn/error)"},
 			{Name: "/tui", Description: "Toggle fullscreen mode"},
-			{Name: "/help", Description: "Show this help"},
 		},
 	}
 }

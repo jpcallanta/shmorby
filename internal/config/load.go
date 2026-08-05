@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"gopkg.in/yaml.v3"
+	"shmorby/internal/fileread"
 	"shmorby/internal/xdg"
 )
 
@@ -71,7 +72,7 @@ func Load(opts LoadOptions) (Config, error) {
 
 	// 3: --config file.
 	if opts.ConfigFile != "" {
-		b, err := os.ReadFile(opts.ConfigFile)
+		b, err := fileread.ReadFileLimited(opts.ConfigFile, 0)
 		if err != nil {
 			return Config{}, fmt.Errorf("load --config %q: read %w", opts.ConfigFile, err)
 		}
@@ -125,8 +126,9 @@ func loadYAMLIfExists(cfg *Config, path string) ([]byte, error) {
 }
 
 // Reads a single YAML file into cfg. Unknown fields are ignored.
+// Uses size-limited reads to prevent OOM from oversized files (issue #46).
 func loadYAML(cfg *Config, path string) ([]byte, error) {
-	b, err := os.ReadFile(path)
+	b, err := fileread.ReadFileLimited(path, 0)
 	if err != nil {
 		return nil, fmt.Errorf("read config %s: %w", path, err)
 	}

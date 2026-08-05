@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -25,7 +24,7 @@ func (OSExecutor) Run(
 	ctx context.Context, name string, args ...string,
 ) ([]byte, error) {
 	cmd := exec.Command(name, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setupProcessGroup(cmd)
 
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
@@ -38,7 +37,7 @@ func (OSExecutor) Run(
 	go func() {
 		<-ctx.Done()
 		if cmd.Process != nil {
-			syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			killProcessGroup(cmd.Process.Pid)
 		}
 	}()
 

@@ -64,6 +64,15 @@ type Config struct {
 		AWS struct {
 			Enabled bool `yaml:"enabled"`
 		} `yaml:"aws"`
+		WebSearch struct {
+			Enabled   bool   `yaml:"enabled"`
+			Engine    string `yaml:"engine"`
+			BaseURL   string `yaml:"base_url"`
+			ExaAPIKey string `yaml:"exa_api_key"`
+		} `yaml:"websearch"`
+		WebFetch struct {
+			Enabled bool `yaml:"enabled"`
+		} `yaml:"webfetch"`
 	} `yaml:"tools"`
 
 	Permission struct {
@@ -72,6 +81,7 @@ type Config struct {
 		Sudo        string                 `yaml:"sudo"`
 		AWS         string                 `yaml:"aws"`
 		MCP         string                 `yaml:"mcp"`
+		Task        string                 `yaml:"task"`
 		Interactive bool                   `yaml:"interactive"`
 		Presets     []string               `yaml:"presets"`
 		Rules       []tools.PermissionRule `yaml:"rules"`
@@ -87,6 +97,11 @@ type Config struct {
 		} `yaml:"glamour"`
 		Nav     TUINavConfig `yaml:"nav"`
 		Logging TUILogConfig `yaml:"logging"`
+
+		// StatusModel / StatusProvider control inference-generated
+		// spinner descriptions. Empty = random flavor text (default).
+		StatusModel    string `yaml:"status_model"`
+		StatusProvider string `yaml:"status_provider"`
 	} `yaml:"tui"`
 
 	Memory struct {
@@ -104,6 +119,8 @@ type Config struct {
 	Context ContextConfig `yaml:"context"`
 
 	MCP MCPConfig `yaml:"mcp"`
+
+	Audit AuditConfig `yaml:"audit"`
 }
 
 // ModelOverride holds user-specified model metadata.
@@ -128,7 +145,23 @@ type ContextConfig struct {
 	FallbackContextWindow int     `yaml:"fallback_context_window"`
 }
 
-// Returns a Config populated with standard defaults including xdg-based paths.
+// AuditConfig holds audit subsystem settings.
+type AuditConfig struct {
+	Enabled               bool   `yaml:"enabled"`
+	DBPath                string `yaml:"db_path"`
+	OutputCaptureMaxBytes int    `yaml:"output_capture_max_bytes"`
+	RetentionDays         int    `yaml:"retention_days"`
+	AsyncBufferSize       int    `yaml:"async_buffer_size"`
+}
+
+// DefaultConfig returns a Config populated with standard defaults
+// including xdg-based paths. Exported for use by the config migrate
+// subcommand and tests.
+func DefaultConfig() Config {
+	return defaultConfig()
+}
+
+// defaultConfig returns a Config populated with standard defaults including xdg-based paths.
 func defaultConfig() Config {
 	cfg := Config{
 		Provider: "ollama",
@@ -146,12 +179,18 @@ func defaultConfig() Config {
 	cfg.Tools.Shell.Enabled = true
 	cfg.Tools.Sudo.Enabled = false
 	cfg.Tools.AWS.Enabled = false
+	cfg.Tools.WebSearch.Enabled = false
+	cfg.Tools.WebSearch.Engine = "searxng"
+	cfg.Tools.WebSearch.BaseURL = "http://localhost:8888"
+	cfg.Tools.WebSearch.ExaAPIKey = ""
+	cfg.Tools.WebFetch.Enabled = false
 
 	cfg.Permission.Shell = "ask"
 	cfg.Permission.SSH = "ask"
 	cfg.Permission.Sudo = "ask"
 	cfg.Permission.AWS = "ask"
 	cfg.Permission.MCP = "ask"
+	cfg.Permission.Task = "ask"
 	cfg.Permission.Interactive = true
 
 	cfg.TUI.Fullscreen = true
@@ -204,6 +243,12 @@ func defaultConfig() Config {
 	cfg.Context.MinMessagesToCompress = 6
 	cfg.Context.FallbackContextWindow = 128000
 
+	cfg.Audit.Enabled = true
+	cfg.Audit.DBPath = filepath.Join(xdg.UserDataDir(), "audit.db")
+	cfg.Audit.OutputCaptureMaxBytes = 65536
+	cfg.Audit.RetentionDays = 365
+	cfg.Audit.AsyncBufferSize = 100
+
 	return cfg
 }
 
@@ -220,13 +265,13 @@ func ValidateProvider(provider string) error {
 	}
 }
 
-// ValidateAgent returns an error if agent is not operate or diagnose.
+// ValidateAgent returns an error if agent is not operate, diagnose, or chat.
 func ValidateAgent(agent string) error {
 	switch agent {
-	case "operate", "diagnose":
+	case "operate", "diagnose", "chat":
 		return nil
 	default:
-		return fmt.Errorf("invalid agent %q (want operate|diagnose)", agent)
+		return fmt.Errorf("invalid agent %q (want operate|diagnose|chat)", agent)
 	}
 }
 

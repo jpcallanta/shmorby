@@ -15,8 +15,8 @@ func TestComplete_NoPrefix(t *testing.T) {
 func TestComplete_Slash(t *testing.T) {
 	e := New()
 	matches := e.Complete("/")
-	if len(matches) != 11 {
-		t.Errorf("want 11 commands, got %d", len(matches))
+	if len(matches) != 13 {
+		t.Errorf("want 13 commands, got %d", len(matches))
 	}
 }
 
@@ -72,7 +72,7 @@ func TestComplete_NoMatch(t *testing.T) {
 func TestAll(t *testing.T) {
 	e := New()
 	all := e.All()
-	if len(all) != 11 {
-		t.Errorf("want 11 commands, got %d", len(all))
+	if len(all) != 13 {
+		t.Errorf("want 13 commands, got %d", len(all))
 	}
 }
