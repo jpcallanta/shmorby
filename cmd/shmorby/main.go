@@ -11,19 +11,13 @@ import (
 	"syscall"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 	"shmorby/internal/agent"
-	"shmorby/internal/audit"
 	"shmorby/internal/config"
-	ctxcomp "shmorby/internal/context"
 	"shmorby/internal/llm"
-	"shmorby/internal/memory"
 	"shmorby/internal/scope"
 	"shmorby/internal/session"
 	"shmorby/internal/tools"
-	"shmorby/internal/tui"
-	tuicl "shmorby/internal/tui/clipboard"
 	"shmorby/internal/xdg"
 )
 
@@ -37,6 +31,8 @@ var (
 	systemPrompt = ""
 	noTuiFlag    = false
 	validateFlag = false
+	continueFlag = false
+	sessionFlag  = ""
 	rootCmd      = &cobra.Command{
 		Use:           "shmorby",
 		Short:         "AI sysadmin agent harness",
@@ -75,7 +71,7 @@ var (
 			})
 			if err != nil {
 				if validateFlag {
-					return fmt.Errorf("config invalid:\n%s", err)
+					return fmt.Errorf("config invalid:\n%w", err)
 				}
 				return fmt.Errorf("load config: %w", err)
 			}
@@ -83,6 +79,31 @@ var (
 			if validateFlag {
 				cmd.Println("config valid")
 				return nil
+			}
+
+			// Open the session store and resolve the root session,
+			// honoring --continue/--session. A resume
+			// from another directory chdirs to the stored one and
+			// re-reads config there before anything else resolves
+			// paths (opencode failure mode).
+			sessStore, sess, err := openRootSession(cmd, &cfg)
+			if err != nil {
+				return err
+			}
+			// Flush session state to the store before the store is
+			// closed. Catches pending metadata mutations that never
+			// triggered a turn. The Close defer is
+			// registered first so LIFO runs Sync() before Close().
+			if sessStore != nil {
+				defer sessStore.Close()
+			}
+			if sess != nil {
+				defer func() {
+					if err := sess.Sync(); err != nil {
+						slog.Warn("session sync on exit failed",
+							"err", err)
+					}
+				}()
 			}
 
 			scopeResult, err := scope.Load(cfg, scope.Flags{ScopeFile: scopeFile})
@@ -111,242 +132,71 @@ var (
 				return fmt.Errorf("init provider: %w", err)
 			}
 
+			// Resolve the project root for code-mode file tools.
+			// Defaults to the launch CWD (matching opencode behavior);
+			// a resume from another directory has already chdir'd, so
+			// "launch CWD" is the session directory there.
+			projectRoot, prErr := tools.NewProjectRoot(
+				cfg.Code.Workdir,
+				cfg.Code.AllowedPatterns,
+				cfg.Code.BlockedPatterns,
+			)
+			if prErr != nil {
+				return fmt.Errorf("init project root: %w", prErr)
+			}
+			slog.Info("project root", "path", projectRoot.Root)
+
+			// Register all configured tools on the registry.
 			reg := tools.NewRegistry()
-			if cfg.Tools.Shell.Enabled {
-				t := tools.NewShellTool(
-					cfg.Agent.Shell,
-					workdir,
-					cfg.Permission.Shell,
-				)
-				t.SetDefaultTimeout(cfg.Tools.Timeout)
-				reg.Register(t)
-			}
-			tSSH := tools.NewSSHTool(cfg.Permission.SSH, nil)
-			tSSH.SetDefaultTimeout(cfg.Tools.Timeout)
-			reg.Register(tSSH)
-			if cfg.Tools.Sudo.Enabled {
-				tSudo := tools.NewSudoTool(cfg.Permission.Sudo, nil)
-				tSudo.SetDefaultTimeout(cfg.Tools.Timeout)
-				reg.Register(tSudo)
-			}
-			if cfg.Tools.AWS.Enabled {
-				tAWS := tools.NewAWSTool(cfg.Permission.AWS, nil)
-				tAWS.SetDefaultTimeout(cfg.Tools.Timeout)
-				reg.Register(tAWS)
-			}
+			ledgerCtx := registerTools(reg, &cfg, workdir, projectRoot)
 
-			tFind := tools.NewFindTool(cfg.Permission.Shell)
-			reg.Register(tFind)
-			if cfg.Tools.WebSearch.Enabled {
-				tWS := tools.NewWebSearchTool(cfg.Permission.Shell, nil)
-				tWS.SetDefaultTimeout(cfg.Tools.Timeout)
-				tWS.SetBaseURL(cfg.Tools.WebSearch.BaseURL)
-				tWS.SetEngine(cfg.Tools.WebSearch.Engine)
-				if cfg.Tools.WebSearch.ExaAPIKey != "" {
-					tWS.SetExaAPIKey(cfg.Tools.WebSearch.ExaAPIKey)
-				}
-				reg.Register(tWS)
-			}
-			if cfg.Tools.WebFetch.Enabled {
-				tWF := tools.NewWebFetchTool(cfg.Permission.Shell, nil)
-				tWF.SetDefaultTimeout(cfg.Tools.Timeout)
-				reg.Register(tWF)
-			}
-
-			// Initialize audit store and logger.
-			var auditLogger *audit.Logger
-			if cfg.Audit.Enabled {
-				auditStore, aErr := audit.NewAuditStore(cfg.Audit.DBPath)
-				if aErr != nil {
-					slog.Warn("audit store unavailable, continuing without audit",
-						"err", aErr)
-				} else {
-					auditLogger = audit.NewLogger(
-						auditStore,
-						cfg.Audit.AsyncBufferSize,
-						500*time.Millisecond,
-						cfg.Audit.OutputCaptureMaxBytes,
-					)
-					// Wire audit logger into tools.
-					if t, ok := reg.Lookup("shell"); ok {
-						if st, ok := t.(*tools.ShellTool); ok {
-							st.SetAuditLogger(auditLogger)
-						}
-					}
-					if t, ok := reg.Lookup("ssh"); ok {
-						if st, ok := t.(*tools.SSHTool); ok {
-							st.SetAuditLogger(auditLogger)
-						}
-					}
-					if t, ok := reg.Lookup("sudo"); ok {
-						if st, ok := t.(*tools.SudoTool); ok {
-							st.SetAuditLogger(auditLogger)
-						}
-					}
-					if t, ok := reg.Lookup("aws"); ok {
-						if st, ok := t.(*tools.AWSTool); ok {
-							st.SetAuditLogger(auditLogger)
-						}
-					}
-					if t, ok := reg.Lookup("websearch"); ok {
-						if st, ok := t.(*tools.WebSearchTool); ok {
-							st.SetAuditLogger(auditLogger)
-						}
-					}
-					if t, ok := reg.Lookup("webfetch"); ok {
-						if st, ok := t.(*tools.WebFetchTool); ok {
-							st.SetAuditLogger(auditLogger)
-						}
-					}
-				}
-			}
+			// Wire audit logger into tools when enabled.
+			auditLogger := initAuditLogger(&cfg, reg)
 			defer func() {
 				if auditLogger != nil {
 					auditLogger.Close()
 				}
 			}()
 
-			// Initialize memory store.
-			var memStore memory.Store
-			var memRetriever *memory.Retriever
-			if cfg.Memory.Enabled {
-				// Wire embedder based on provider config.
-				var emb memory.Embedder
-				switch cfg.Memory.Embedding.Provider {
-				case "ollama":
-					baseURL := cfg.Ollama.BaseURL
-					if cfg.Memory.Embedding.BaseURL != "" {
-						baseURL = cfg.Memory.Embedding.BaseURL
-					}
-					emb = memory.NewOllamaEmbedder(
-						baseURL, cfg.Memory.Embedding.Model,
-					)
-				case "openai":
-					if cfg.OpenAI.APIKey != "" {
-						emb = memory.NewOpenAIEmbedder(
-							cfg.OpenAI.APIKey,
-							cfg.Memory.Embedding.BaseURL,
-							cfg.Memory.Embedding.Model,
-						)
-					}
-				}
-
-				// Probe embedding endpoint; skip memory if unreachable.
-				if emb != nil {
-					pCtx, pCancel := context.WithTimeout(
-						cmd.Context(), 5*time.Second,
-					)
-					defer pCancel()
-
-					_, pErr := emb.Embed(pCtx, []string{"ping"})
-					if pErr != nil {
-						slog.Warn(
-							"embedding endpoint unreachable, memory disabled",
-							"err", pErr,
-						)
-					} else {
-						memCfg := memory.Config{
-							Enabled:     cfg.Memory.Enabled,
-							DBPath:      cfg.Memory.DBPath,
-							MaxEntries:  cfg.Memory.MaxEntries,
-							AutoCapture: cfg.Memory.AutoCapture,
-						}
-
-						var mErr error
-						memStore, mErr = memory.NewStore(memCfg, emb)
-						if mErr != nil {
-							slog.Warn("memory store unavailable, continuing without memory",
-								"err", mErr)
-						} else {
-							memRetriever = memory.NewRetriever(memStore, 5)
-
-							// Wire vector search into the retriever.
-							vs, vEmb := memory.StoreVectorSearch(memStore)
-							if vs != nil && vEmb != nil {
-								memRetriever.SetVectorSearch(vs, vEmb)
-							}
-
-							// Re-index existing SQLite entries.
-							_ = memory.StoreMigrateVectors(
-								cmd.Context(), memStore,
-							)
-						}
-					}
-				} else {
-					memCfg := memory.Config{
-						Enabled:     cfg.Memory.Enabled,
-						DBPath:      cfg.Memory.DBPath,
-						MaxEntries:  cfg.Memory.MaxEntries,
-						AutoCapture: cfg.Memory.AutoCapture,
-					}
-
-					var mErr error
-					memStore, mErr = memory.NewStore(memCfg, nil)
-					if mErr != nil {
-						slog.Warn("memory store unavailable, continuing without memory",
-							"err", mErr)
-					} else {
-						memRetriever = memory.NewRetriever(memStore, 5)
-					}
-				}
-			}
+			// Initialize memory store and retriever.
+			memStore, memRetriever := initMemoryStore(
+				cmd.Context(), &cfg,
+			)
 
 			// Build per-tool permission rulesets. The interactive flag
 			// only controls whether the user is prompted for "ask"
 			// decisions; rules are always evaluated so that presets
 			// (destructive, service, etc.) are never bypassed.
 			toolRules := make(map[string]*tools.RuleSet)
-			for _, tool := range []string{"shell", "ssh", "sudo", "aws"} {
+			for _, tool := range []string{
+				tools.ToolShell, tools.ToolSSH, tools.ToolSudo, tools.ToolAWS,
+			} {
 				rs := tools.MergeRules(cfg.Permission.Presets, cfg.Permission.Rules)
 				toolRules[tool] = &rs
 			}
 
 			// Apply tool output byte cap from config (0 = unlimited).
-			if cfg.Context.MaxToolOutputBytes > 0 {
-				tools.MaxOutput = cfg.Context.MaxToolOutputBytes
-			} else {
-				tools.MaxOutput = 0
-			}
+			tools.MaxOutput.Store(int64(cfg.Context.MaxToolOutputBytes))
 
-			// Build compressor from config.
-			var compressor *ctxcomp.Compressor
-			var modelInfo llm.ModelInfo
+			// Build summarizer provider when compression is enabled
+			// (may differ from main provider).
+			var sumProvider llm.Provider
 			if cfg.Context.Enabled {
-				// Read model override for context window info.
-				if mo, ok := cfg.Models[cfg.Model]; ok {
-					modelInfo = llm.ModelInfo{
-						ContextWindow:   mo.ContextWindow,
-						MaxOutputTokens: mo.MaxOutputTokens,
-					}
-				}
-
-				compressor = ctxcomp.NewCompressor(
-					ctxcomp.CompressorConfig{
-						Enabled:               cfg.Context.Enabled,
-						Mode:                  cfg.Context.Mode,
-						Threshold:             cfg.Context.Threshold,
-						MaxToolOutputTokens:   cfg.Context.MaxToolOutputTokens,
-						MaxToolOutputLines:    cfg.Context.MaxToolOutputLines,
-						SummaryModel:          cfg.Context.SummaryModel,
-						SummaryProvider:       cfg.Context.SummaryProvider,
-						OffloadToMemory:       cfg.Context.OffloadToMemory,
-						MinMessagesToCompress: cfg.Context.MinMessagesToCompress,
-						FallbackContextWindow: cfg.Context.FallbackContextWindow,
-					},
-					memStore,
-					ctxcomp.NewEstimator(cfg.Model),
-					nil, // summaryFunc: no LLM summarizer wired yet
-				)
+				sumProvider = initSummarizerProvider(&cfg, provider)
 			}
 
-			// Phase 32: Build runtime config overrider.
-			sess := session.New()
+			// Build context compressor from config.
+			compressor, modelInfo := initCompressor(
+				&cfg, memStore, sumProvider,
+			)
+
+			// Build runtime config overrider. The root session was
+			// resolved above (fresh or resumed) in openRootSession.
 			overrider := agent.NewConfigOverrider(
 				&cfg,
 				&provider,
 				reg,
 				compressor,
-				sess,
 				agent.WithLogLevelSetter(func(level string) {
 					l, err := parseLogLevel(level)
 					if err == nil {
@@ -354,15 +204,51 @@ var (
 					}
 				}),
 				agent.WithMemoryStore(memStore), // propagates auto_capture at runtime
+				agent.WithSessionMetaUpdater(func() {
+					// Keep the session's persisted metadata in sync
+					// with runtime config changes so Sync on exit
+					// writes current values.
+					sess.UpdateMeta(
+						cfg.Provider, cfg.Model, cfg.Agent.Default,
+					)
+				}),
 			)
 
-			// Phase 34: subagent orchestrator with task tool.
-			// Channel is non-nil only when TUI is active (see below).
-			var subagentEventChan chan tools.SubagentEvent
+			// Subagent orchestrator with task tool.
+			// Buffering allows non-blocking sends from the
+			// orchestrator even in REPL mode.
+			subagentEventChan := make(
+				chan tools.SubagentEvent, 20,
+			)
+
+			// Compute subtask timeout from config. Each subtask
+			// can run up to MaxToolIterations tool calls, each
+			// with its own timeout (tools.timeout). When
+			// tools.subtask_timeout is set, use it directly.
+			// Otherwise derive a generous upper bound:
+			// tools.timeout × maxIterations × 2.
+			// Prevents indefinite subagent hangs.
+			var subtaskTimeout time.Duration
+			if cfg.Tools.SubtaskTimeout > 0 {
+				subtaskTimeout = time.Duration(
+					cfg.Tools.SubtaskTimeout,
+				) * time.Second
+			} else {
+				subtaskTimeout = time.Duration(
+					cfg.Tools.Timeout,
+				) * time.Second * time.Duration(
+					cfg.Agent.MaxToolIterations,
+				) * 2
+				if subtaskTimeout > 0 && subtaskTimeout < time.Minute {
+					subtaskTimeout = time.Minute
+				}
+			}
+
 			orch := &tools.TaskOrchestrator{
 				AuditLogger:     auditLogger,
 				ParentSessionID: sess.ID(),
 				MaxParallel:     5,
+				SubtaskTimeout:  subtaskTimeout,
 			}
 			orch.RunSubtask = func(ctx context.Context, task tools.Subtask) tools.TaskResult {
 				childSess := session.New()
@@ -378,13 +264,11 @@ var (
 					default:
 					}
 				}
-				// Filter registry to exclude denied tools and
-				// pass parent's permission callback to subagent.
+				// Filter registry to exclude denied tools for subagents.
+				// Subagents never receive the parent's permission callback;
+				// passing nil defaults to PermAllow, preventing parallel
+				// stdin reads that deadlock the terminal.
 				childReg := reg.FilterByPerm()
-				var childPermFunc agent.ToolPermissionFunc
-				if orch.PermFunc != nil {
-					childPermFunc = orch.PermFunc.(agent.ToolPermissionFunc)
-				}
 				reply, err := agent.RunTurnWithTools(
 					ctx, provider, childSess,
 					cfg.Agent.Default, scopeResult.Content,
@@ -393,8 +277,10 @@ var (
 					cfg.Tools.Shell.Enabled,
 					memStore, memRetriever,
 					compressor, modelInfo,
-					nil, childPermFunc, toolRules,
+					nil, nil, toolRules,
 					nil, // no status gen for subagents
+					ledgerCtx,
+					projectRoot.Root,
 				)
 				status := "ok"
 				errStr := ""
@@ -430,7 +316,9 @@ var (
 				taskPerm = "ask"
 			}
 			taskTool.SetPerm(taskPerm)
-			reg.Register(taskTool)
+			if err := reg.Register(taskTool); err != nil {
+				slog.Warn("task tool registration failed", "err", err)
+			}
 
 			// Initialize MCP manager.
 			var mcpManager *tools.MCPManager
@@ -468,7 +356,13 @@ var (
 				rootCtx = tools.WithAuditLogger(rootCtx, auditLogger)
 			}
 
-			// Phase 37: build status description generator.
+			// Wire session ID into providers that need it
+			// (e.g. OpenCode Zen requires X-Opencode-Session).
+			if sp, ok := provider.(llm.SessionProvider); ok {
+				sp.SetSessionID(sess.ID())
+			}
+
+			// Build status description generator.
 			// On by default — generates descriptions from tool
 			// metadata without any LLM call.
 			// Set tui.status_model: "off" to disable.
@@ -476,7 +370,7 @@ var (
 			if cfg.TUI.StatusModel == "off" {
 				// Explicitly disabled.
 			} else {
-				statusGen = agent.NewStatusGenerator(nil, "")
+				statusGen = agent.NewStatusGenerator()
 			}
 
 			sigCh := make(chan os.Signal, 1)
@@ -488,114 +382,15 @@ var (
 			}()
 
 			// Use TUI when terminal and --no-tui not set.
-			if !noTuiFlag && isTerminal() {
-				if err := tuicl.Init(); err != nil {
-					slog.Warn("clipboard unavailable, copy/paste disabled", "err", err)
-				}
-				scrollLines := cfg.TUI.Nav.ScrollLinesPerTick
-				if scrollLines <= 0 {
-					scrollLines = 5
-				}
-
-				// Wire subagent event channel for TUI tab lifecycle.
-				subagentEventChan = make(chan tools.SubagentEvent, 20)
-
-				// Wire TUI log handler when logging is enabled.
-				var logHandler *tui.TUILogHandler
-				var logChan chan tui.LogEntry
-				logDefaultLevel := cfg.TUI.Logging.DefaultLevel
-				if logDefaultLevel == "" {
-					logDefaultLevel = "info"
-				}
-				if cfg.TUI.Logging.Enabled {
-					logChan = make(chan tui.LogEntry, 100)
-					logHandler = tui.NewTUILogHandler(
-						slog.Default().Handler(), logChan,
-					)
-					slog.SetDefault(slog.New(logHandler))
-				}
-
-				m := tui.NewModel(tui.Config{
-					Provider:       provider,
-					Session:        sess,
-					Mode:           cfg.Agent.Default,
-					Scope:          scopeResult.Content,
-					Model:          cfg.Model,
-					Override:       systemPrompt,
-					Registry:       reg,
-					MaxToolIter:    cfg.Agent.MaxToolIterations,
-					ShellEnabled:   cfg.Tools.Shell.Enabled,
-					Fullscreen:     cfg.TUI.Fullscreen,
-					ThemeName:      cfg.TUI.Theme,
-					GlamourEnabled: cfg.TUI.Glamour.Enabled,
-					ScrollLines:    scrollLines,
-					FollowMode:     cfg.TUI.Nav.FollowMode,
-					ToolTimeout:    cfg.Tools.Timeout,
-					ScopeInfo: tui.ScopeInfo{
-						PrimaryPath:  scopeResult.PrimaryPath,
-						Instructions: scopeResult.Instructions,
-						TotalBytes:   scopeResult.TotalBytes,
-					},
-					MemoryStore:          memStore,
-					Retriever:            memRetriever,
-					Compressor:           compressor,
-					ModelInfo:            modelInfo,
-					LogEnabled:           cfg.TUI.Logging.Enabled,
-					LogDefaultLevel:      logDefaultLevel,
-					LogMaxEntries:        cfg.TUI.Logging.MaxEntries,
-					LogDisplayLimit:      cfg.TUI.Logging.DisplayLimit,
-					LogCollapse:          cfg.TUI.Logging.Collapse,
-					LogCollapseThreshold: cfg.TUI.Logging.CollapseThreshold,
-					LogChan:              logChan,
-					LogHandler:           logHandler,
-					ToolRules:            toolRules,
-					ConfigOverrider:      overrider,
-					SubagentEventChan:    subagentEventChan,
-					Orchestrator:         orch,
-					StatusGen:            statusGen,
-				})
-				opts := []tea.ProgramOption{}
-				if cfg.TUI.Fullscreen {
-					opts = append(opts, tea.WithAltScreen())
-				}
-				p := tea.NewProgram(m, opts...)
-				_, err := p.Run()
-				if err != nil {
-					return fmt.Errorf("run TUI: %w", err)
-				}
-				return nil
-			}
-
-			// Fall back to plain REPL.
-			repl := &agent.REPL{
-				NoTUI:        noTuiFlag,
-				Provider:     provider,
-				Session:      sess,
-				Mode:         cfg.Agent.Default,
-				Model:        cfg.Model,
-				Scope:        scopeResult.Content,
-				Override:     systemPrompt,
-				In:           os.Stdin,
-				Out:          os.Stdout,
-				Registry:     reg,
-				MaxToolIter:  cfg.Agent.MaxToolIterations,
-				ShellEnabled: cfg.Tools.Shell.Enabled,
-				ScopeInfo: agent.ScopeInfo{
-					PrimaryPath:  scopeResult.PrimaryPath,
-					Instructions: scopeResult.Instructions,
-					TotalBytes:   scopeResult.TotalBytes,
-				},
-				Store:           memStore,
-				Retriever:       memRetriever,
-				Compressor:      compressor,
-				ModelInfo:       modelInfo,
-				ToolRules:       toolRules,
-				ConfigOverrider: overrider,
-				Orchestrator:    orch,
-				StatusGen:       statusGen,
-			}
-
-			return repl.Run(rootCtx)
+			return runTUIOrREPL(
+				rootCtx, &cfg, provider, sess, reg,
+				compressor, modelInfo, scopeResult,
+				memStore, memRetriever, toolRules,
+				overrider, orch,
+				statusGen, ledgerCtx,
+				projectRoot.Root,
+				subagentEventChan,
+			)
 		},
 	}
 )
@@ -616,7 +411,16 @@ func init() {
 	// ── config migrate ──────────────────────────────────────
 	migrateCmd := &cobra.Command{
 		Use:   "migrate",
-		Short: "Merge missing config fields from defaults",
+		Short: "Merge missing config fields from defaults (exhaustive)",
+		Long: `Merge every missing default field into an existing YAML file.
+
+Exhaustive backfill: every non-empty default and every
+enabled=false is injected when absent, so migrate --dry-run is
+exhaustive and a fresh DefaultConfig round-trips. Empty strings,
+empty maps/slices and other zero values remain omitted intentionally
+and are documented in examples/shmorby.yaml. Comments and file
+permissions are preserved via yaml.Node round-trip and atomic
+tmp+rename.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			src := configFileFlag
 			if src == "" {
@@ -699,16 +503,33 @@ Flags:
   --model string          Model name (default "llama3.2")
   --config string         Config file path
   --scope-file string     Operational context markdown (SCOPE.md)
-  --agent string          Agent mode: operate, diagnose (default "operate")
+  --agent string          Agent mode: operate, diagnose, chat, code (default "operate")
   --system-prompt-file    Override path to system prompt txt
   --no-tui                Disable TUI, use plain stdin/stdout REPL
   --log-level string      Log level: debug, info, warn, error (default "info")
+  -c, --continue          Resume the most recent session for this directory
+  -s, --session string    Resume a specific session by id
   --version               Print version and exit
 
 Subcommands:
   config migrate          Merge missing config fields from defaults
   config show             Print default config as YAML
   config validate         Validate a config file
+  audit list              List audit entries with optional filters
+  audit get <id>          Show a single audit entry with output
+  audit session <id>      Show all audit entries for a session
+  audit export            Export audit entries (json or csv)
+  audit vacuum            Archive and remove old audit entries
+  audit stats             Show audit DB statistics
+  session list            List persisted sessions (current directory)
+  session show <id>       Show session metadata or full transcript
+  session rm <id>         Archive a session (--force deletes rows)
+  session prune           Apply session retention policy
+  ledger list             List encrypted environment ledger sections
+  ledger get <section>    Print a ledger section as JSON
+  ledger set <section>    Replace a ledger section with JSON
+  ledger delete <section> Remove a ledger section
+  doctor                  Run self-diagnostics and report tool health
 
 Config file (config.yaml):
   Loaded from (first match wins):
@@ -729,7 +550,7 @@ Slash commands (in TUI or stdin REPL):
   /model      Switch LLM model
   /platform   Switch LLM provider
   /apikey     Set API key for current provider
-  /agent      Switch agent mode (operate, diagnose, chat)
+  /agent      Switch agent mode (operate, diagnose, chat, code)
   /scope      Show loaded scope context
   /memory     Memory management
   /context    Token usage and compression stats
@@ -759,7 +580,7 @@ Quick start:
 	rootCmd.Flags().StringVar(
 		&configFile, "config", "", "config yaml path")
 	rootCmd.Flags().StringVar(
-		&agentFlag, "agent", "", "operate|diagnose")
+		&agentFlag, "agent", "", "operate|diagnose|chat|code")
 	rootCmd.Flags().StringVar(
 		&scopeFile, "scope-file", "", "operational context markdown")
 	rootCmd.Flags().StringVar(
@@ -768,6 +589,12 @@ Quick start:
 		&noTuiFlag, "no-tui", false, "disable TUI, use plain REPL")
 	rootCmd.Flags().BoolVar(
 		&validateFlag, "validate", false, "validate config and exit")
+	rootCmd.Flags().BoolVarP(
+		&continueFlag, "continue", "c", false,
+		"resume the most recent session for this directory")
+	rootCmd.Flags().StringVarP(
+		&sessionFlag, "session", "s", "",
+		"resume a specific session by id")
 }
 
 // Runs the root command.
@@ -781,7 +608,6 @@ func main() {
 
 // Runs the root Cobra command.
 func execute() error {
-
 	return rootCmd.Execute()
 }
 
@@ -789,31 +615,17 @@ func execute() error {
 func parseLogLevel(s string) (slog.Level, error) {
 	switch strings.ToLower(s) {
 	case "debug":
-
 		return slog.LevelDebug, nil
 	case "info":
-
 		return slog.LevelInfo, nil
 	case "warn":
-
 		return slog.LevelWarn, nil
 	case "error":
-
 		return slog.LevelError, nil
 	default:
-
 		return 0, fmt.Errorf(
 			"invalid --log-level %q (want debug|info|warn|error)",
 			s,
 		)
 	}
-}
-
-// isTerminal checks if stdin is a terminal device.
-func isTerminal() bool {
-	fi, err := os.Stdin.Stat()
-	if err != nil {
-		return false
-	}
-	return fi.Mode()&os.ModeCharDevice != 0
 }

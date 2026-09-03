@@ -28,6 +28,12 @@ func init() {
 	stdoutIsTerminal.Store(checkTerminal(os.Stdout))
 }
 
+// IsStdoutTerminal reports whether stdout is a terminal device.
+// Used by callers outside this package to branch on TUI vs REPL.
+func IsStdoutTerminal() bool {
+	return stdoutIsTerminal.Load()
+}
+
 func checkTerminal(f *os.File) bool {
 	fi, err := f.Stat()
 	if err != nil {

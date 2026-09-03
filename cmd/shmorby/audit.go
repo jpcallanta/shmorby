@@ -142,7 +142,7 @@ func runAuditList(cmd *cobra.Command, args []string) error {
 		if auditSince != "" {
 			dur, err := parseDuration(auditSince)
 			if err != nil {
-				return err
+				return fmt.Errorf("parse since: %w", err)
 			}
 			f.Since = time.Now().Add(-dur)
 		}
@@ -182,7 +182,7 @@ func runAuditList(cmd *cobra.Command, args []string) error {
 	if auditSince != "" {
 		dur, err := parseDuration(auditSince)
 		if err != nil {
-			return err
+			return fmt.Errorf("parse since: %w", err)
 		}
 		f.Since = time.Now().Add(-dur)
 	}
@@ -327,7 +327,7 @@ func runAuditExport(cmd *cobra.Command, args []string) error {
 	if auditSince != "" {
 		dur, err := parseDuration(auditSince)
 		if err != nil {
-			return err
+			return fmt.Errorf("parse since: %w", err)
 		}
 		f.Since = time.Now().Add(-dur)
 	}
@@ -351,7 +351,7 @@ func runAuditVacuum(cmd *cobra.Command, args []string) error {
 
 	dur, err := parseDuration(auditBefore)
 	if err != nil {
-		return err
+		return fmt.Errorf("parse before: %w", err)
 	}
 
 	cutoff := time.Now().Add(-dur)

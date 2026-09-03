@@ -1,0 +1,167 @@
+# shmorby.windows.yaml — Windows example
+# Save as %APPDATA%\shmorby\config.yaml (user) or
+# %ProgramData%\shmorby\config.yaml (system).
+# Use forward slashes in YAML to avoid escaping:
+#   C:/Users/you/shmorby/workdir
+# Backslashes must be escaped:
+#   "C:\\Users\\you\\shmorby\\workdir"
+# See examples/shmorby.yaml for the Unix equivalent.
+#
+# Paths (resolved via internal/xdg/dirs_windows.go):
+#   memory.db  → %LOCALAPPDATA%\shmorby\memory.db
+#   audit.db   → %LOCALAPPDATA%\shmorby\audit.db
+#   shmorby.log→ %LOCALAPPDATA%\shmorby\shmorby.log
+#   workdir    → %LOCALAPPDATA%\shmorby\workdir
+#   vectors/   → %LOCALAPPDATA%\shmorby\vectors/
+#   ledger     → %LOCALAPPDATA%\shmorby\ledger.json.age
+#   config     → %APPDATA%\shmorby\config.yaml
+
+# ── Provider ────────────────────
+provider: ollama
+model: llama3.2
+
+# ── Agent ───────────────────────
+agent:
+  default: operate          # operate | diagnose | chat | code
+  max_tool_iterations: 25
+  shell: powershell         # powershell | pwsh | cmd | bash
+
+# ── Provider-specific options ──
+ollama:
+  base_url: http://127.0.0.1:11434
+
+openai:
+  api_key: ""
+  api_key_env: ""
+  base_url: ""
+  organization: ""
+  timeout: 120
+
+openrouter:
+  api_key: ""
+
+opencode_zen:
+  api_key: ""
+  base_url: ""
+
+# ── Scope ──────────────────────
+scope:
+  workdir: C:/Users/you/shmorby/workdir
+  instructions:
+    - ./SCOPE.md
+    - ./runbooks/*.md
+
+# ── Tools ──────────────────────
+tools:
+  timeout: 1800
+  shell:
+    enabled: true
+  sudo:
+    enabled: false          # not applicable on Windows; use gsudo if needed
+  aws:
+    enabled: false
+
+# ── Permission ─────────────────
+permission:
+  shell: ask
+  ssh: ask
+  sudo: ask                 # disabled via enabled:false; no-op on Windows
+  aws: ask
+  mcp: ask
+  find: allow                # code mode: search for files
+  file_read: allow           # code mode: read file contents
+  file_edit: ask             # code mode: edit file contents
+  file_write: ask            # code mode: create/overwrite files
+  grep: allow                # code mode: search file contents
+  interactive: true
+  presets: []
+  rules: []
+
+# ── Code mode ─────────────────
+# Project root anchoring for file tools. Paths outside the root are
+# rejected unless matched by allowed_patterns.
+# On Windows, use forward slashes: workdir: C:/Users/admin/project
+code:
+  workdir: "."
+  allowed_patterns: []
+  blocked_patterns:
+    - "**/.git/**"
+    - "**/node_modules/**"
+    - "**/vendor/**"
+    - "**/.idea/**"
+    - "**/.vscode/**"
+
+# ── TUI ────────────────────────
+tui:
+  fullscreen: false
+  theme: catppuccin-mocha
+  glamour:
+    enabled: true
+  nav:
+    follow_mode: true
+    scroll_lines_per_tick: 5
+    leader_timeout: 2000
+    history_size: 100
+  logging:
+    enabled: true
+    default_level: info
+    max_entries: 100
+    display_limit: 20
+    collapse: true
+    collapse_threshold: 5
+
+# ── Memory ─────────────────────
+memory:
+  enabled: true
+  # db_path "" inherits %LOCALAPPDATA%\shmorby\memory.db
+  db_path: C:/Users/you/AppData/Local/shmorby/memory.db
+  max_entries: 10000
+  auto_capture: true
+  context_budget: 300
+  embedding:
+    provider: ollama
+    model: nomic-embed-text
+    base_url: ""
+    dimensions: 0
+
+# ── Context compression ────────
+context:
+  enabled: true
+  mode: auto
+  threshold: 0.8
+  max_tool_output_tokens: 4096
+  max_tool_output_lines: 0
+  max_tool_output_bytes: 0
+  summary_model: ""
+  summary_provider: ""
+  offload_to_memory: true
+  min_messages_to_compress: 6
+  fallback_context_window: 128000
+
+# ── Audit ──────────────────────
+audit:
+  enabled: true
+  # db_path "" inherits %LOCALAPPDATA%\shmorby\audit.db
+  db_path: C:/Users/you/AppData/Local/shmorby/audit.db
+  output_capture_max_bytes: 65536
+  retention_days: 365
+  async_buffer_size: 100
+
+# ── Session persistence ────────
+# Conversations are saved continuously and resumable with
+# shmorby -c / -s <id>; see examples/shmorby.yaml for details.
+session:
+  enabled: true
+  # db_path "" inherits %LOCALAPPDATA%\shmorby\sessions.db
+  db_path: C:/Users/you/AppData/Local/shmorby/sessions.db
+  retention_days: 90
+  max_sessions: 200
+
+# ── Ledger ─────────────────────
+# Enabled by default — encrypted ledger at
+# %LOCALAPPDATA%\shmorby\ledger.json.age (age x25519, 0600
+# best-effort on Windows, inherited ACL); set enabled:false to
+# silence tools/context injection.
+ledger:
+  enabled: true
+  context_budget: 2048

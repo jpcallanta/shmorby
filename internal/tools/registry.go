@@ -28,16 +28,19 @@ func NewRegistry() *Registry {
 	}
 }
 
-// Adds a tool by name. Panics on duplicate.
-func (r *Registry) Register(t Tool) {
+// Adds a tool by name. Returns an error when a tool with the same name
+// is already registered, allowing callers to handle collisions
+// gracefully instead of panicking.
+func (r *Registry) Register(t Tool) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	name := t.Name()
 	if _, dup := r.tools[name]; dup {
-		panic(fmt.Sprintf("tool %q already registered", name))
+		return fmt.Errorf("tool %q already registered", name)
 	}
 	r.tools[name] = t
 	r.order = append(r.order, name)
+	return nil
 }
 
 // Returns tool schemas in registration order.
@@ -57,7 +60,7 @@ func (r *Registry) Schemas() []ToolSchema {
 	return schemas
 }
 
-// Unregister removes a tool by name. No-op if not found.
+// Removes a tool by name. No-op if not found.
 func (r *Registry) Unregister(name string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -72,7 +75,7 @@ func (r *Registry) Unregister(name string) {
 	}
 }
 
-// Lookup returns the tool by name. Returns nil, false if not found.
+// Returns the tool by name. Returns nil, false if not found.
 func (r *Registry) Lookup(name string) (Tool, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -94,9 +97,10 @@ func (r *Registry) Run(
 	return t.Run(ctx, args)
 }
 
-// FilterByPerm returns a new Registry containing only tools whose
-// PermLevel is not "deny". Used to create subagent registries that
-// respect the parent session's permission constraints.
+// Returns a new Registry containing only tools whose PermLevel is not
+// "deny". Used to create subagent registries that respect the parent
+// session's permission constraints. Errors are impossible here:
+// filtered is fresh and source tools are unique.
 func (r *Registry) FilterByPerm() *Registry {
 	filtered := NewRegistry()
 	r.mu.RLock()
@@ -104,7 +108,7 @@ func (r *Registry) FilterByPerm() *Registry {
 	for _, name := range r.order {
 		t := r.tools[name]
 		if t.PermLevel() != "deny" {
-			filtered.Register(t)
+			_ = filtered.Register(t)
 		}
 	}
 	return filtered

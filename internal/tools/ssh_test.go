@@ -238,7 +238,7 @@ func TestNewSSHTool_NilExecutor_DefaultsToOS(t *testing.T) {
 }
 
 // TestSSHTool_Run_DoubleDashPrecedesHost checks "--" precedes host to
-// prevent argument injection (issue #43). A Host starting with "-"
+// prevent argument injection. A Host starting with "-"
 // must not be interpreted as an SSH option.
 func TestSSHTool_Run_DoubleDashPrecedesHost(t *testing.T) {
 	mock := &mockExecutor{Out: []byte("ok")}
@@ -292,5 +292,33 @@ func TestSSHTool_Run_DoubleDashPresent_NormalHost(t *testing.T) {
 	}
 	if !foundSep {
 		t.Errorf("want '--' separator in args, got %v", mock.Args)
+	}
+}
+
+// TestSSHTool_Run_PortRange checks ports outside 1-65535 are
+// rejected before spawning ssh, and a valid port passes through
+// as -p.
+func TestSSHTool_Run_PortRange(t *testing.T) {
+	for _, tc := range []struct {
+		port   int
+		wantOK bool
+	}{
+		{0, true}, {22, true}, {65535, true},
+		{65536, false}, {99999, false}, {-1, false},
+	} {
+		mock := &mockExecutor{Out: []byte("ok")}
+		tool := NewSSHTool("allow", mock)
+		args := []byte(fmt.Sprintf(
+			`{"host":"example.com","command":"uptime","port":%d}`,
+			tc.port,
+		))
+
+		_, err := tool.Run(context.Background(), args)
+		if tc.wantOK && err != nil {
+			t.Errorf("port %d: want ok, got %v", tc.port, err)
+		}
+		if !tc.wantOK && err == nil {
+			t.Errorf("port %d: want error, got nil", tc.port)
+		}
 	}
 }

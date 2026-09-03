@@ -6,11 +6,10 @@ import (
 	"testing"
 )
 
-func setMaxOutput(t *testing.T, n int) {
+func setMaxOutput(t *testing.T, n int64) {
 	t.Helper()
-	old := MaxOutput
-	MaxOutput = n
-	t.Cleanup(func() { MaxOutput = old })
+	MaxOutput.Store(n)
+	t.Cleanup(func() { MaxOutput.Store(0) })
 }
 
 func TestTruncateOutput_Unlimited(t *testing.T) {
@@ -35,8 +34,9 @@ func TestTruncateOutput_UnderLimit(t *testing.T) {
 }
 
 func TestTruncateOutput_AtLimit(t *testing.T) {
-	setMaxOutput(t, 65536)
-	in := make([]byte, MaxOutput)
+	const limit int64 = 65536
+	setMaxOutput(t, limit)
+	in := make([]byte, limit)
 	for i := range in {
 		in[i] = 'a'
 	}
@@ -47,20 +47,21 @@ func TestTruncateOutput_AtLimit(t *testing.T) {
 }
 
 func TestTruncateOutput_OverLimit(t *testing.T) {
-	setMaxOutput(t, 65536)
-	in := make([]byte, MaxOutput+10000)
+	const limit int64 = 65536
+	setMaxOutput(t, limit)
+	in := make([]byte, limit+10000)
 	for i := range in {
 		in[i] = 'a'
 	}
 	got := TruncateOutput(in)
-	if len(got) >= len(in) {
+	if int64(len(got)) >= int64(len(in)) {
 		t.Errorf("expected truncated output, got len %d >= %d", len(got), len(in))
 	}
 	if !strings.HasSuffix(string(got), truncNotice) {
 		t.Errorf("expected truncation notice suffix, got %q", string(got[len(got)-50:]))
 	}
-	if len(got) != MaxOutput {
-		t.Errorf("expected output len %d, got %d", MaxOutput, len(got))
+	if int64(len(got)) != limit {
+		t.Errorf("expected output len %d, got %d", limit, len(got))
 	}
 }
 
@@ -74,15 +75,16 @@ func TestTruncateOutput_EmptyInput(t *testing.T) {
 }
 
 func TestTruncateOutput_TruncationNoticeLength(t *testing.T) {
-	setMaxOutput(t, 65536)
+	const limit int64 = 65536
+	setMaxOutput(t, limit)
 	// Verify the notice fits within the limit (no panic on negative limit).
-	in := make([]byte, MaxOutput+1)
+	in := make([]byte, limit+1)
 	for i := range in {
 		in[i] = 'b'
 	}
 	got := TruncateOutput(in)
-	if len(got) != MaxOutput {
-		t.Errorf("want %d bytes, got %d", MaxOutput, len(got))
+	if int64(len(got)) != limit {
+		t.Errorf("want %d bytes, got %d", limit, len(got))
 	}
 	if !strings.HasSuffix(string(got), truncNotice) {
 		t.Errorf("missing truncation notice")

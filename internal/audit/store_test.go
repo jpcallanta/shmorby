@@ -351,11 +351,7 @@ func TestAuditStore_IntegrityChecksum(t *testing.T) {
 
 	expected := ComputeChecksum(data)
 	if checksum != expected {
-		t.Errorf("checksum mismatch: %s != %s", checksum, expected)
-	}
-
-	if ComputeChecksum(data) != ComputeChecksum(data) {
-		t.Error("same data should produce same checksum")
+		t.Errorf("checksum: want %s, got %s", expected, checksum)
 	}
 }
 

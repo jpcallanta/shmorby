@@ -148,8 +148,8 @@ func TestMergeRules_NoPresetsOnlyCustom(t *testing.T) {
 	}
 }
 
-// TestEvaluateWithMergedRules checks merged rule set evaluates correctly.
-func TestEvaluateWithMergedRules(t *testing.T) {
+// Checks merged rule set evaluates correctly.
+func TestEvaluate_WithMergedRules(t *testing.T) {
 	rs := MergeRules([]string{"service"}, nil)
 
 	action, reason, _ := rs.Evaluate("systemctl restart nginx")

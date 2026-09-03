@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -15,7 +16,14 @@ import (
 // Migrate reads a legacy config file, merges in any missing default fields
 // and writes it back. Comments from the original file are preserved.
 // Empty files are treated as a blank config (filled with defaults).
-// Uses size-limited reads to prevent OOM from oversized files (issue #46).
+// Uses size-limited reads to prevent OOM from oversized files.
+//
+// Exhaustive backfill: every non-empty default and every
+// `enabled=false` is considered missing when absent, so a fresh
+// DefaultConfig round-trips through migrate for tool enablement.
+// Empty strings, empty maps/slices and other zero values that
+// represent “unset” stay omitted to keep the file lean; see
+// filterZeroValues for the inclusion rule.
 func Migrate(src, dst string) error {
 	data, err := fileread.ReadFileLimited(src, 0)
 	if err != nil {
@@ -35,8 +43,10 @@ func Migrate(src, dst string) error {
 		}
 	}
 
-	// Get canonical defaults, filtering zero-values so empty api_key etc.
-	// are not injected into the migrated output.
+	// Get canonical defaults, filtering only truly empty values.
+	// Explicit false for `enabled` is kept so
+	// tools.*.enabled=false is injected when absent
+	// (exhaustive mode).
 	defaults := DefaultConfig()
 	defaultData, err := yaml.Marshal(filterZeroValues(reflect.ValueOf(defaults)))
 	if err != nil {
@@ -88,7 +98,9 @@ func Migrate(src, dst string) error {
 
 // DryMigrate reports which fields (including nested) would be added but
 // writes nothing.
-// Uses size-limited reads to prevent OOM from oversized files (issue #46).
+// Uses size-limited reads to prevent OOM from oversized files.
+// Output is sorted for stable CI gating; type mismatches (user scalar
+// vs default mapping) are reported as missing with a type hint.
 func DryMigrate(src, dst string) error {
 	data, err := fileread.ReadFileLimited(src, 0)
 	if err != nil {
@@ -96,6 +108,7 @@ func DryMigrate(src, dst string) error {
 	}
 
 	var original yaml.Node
+
 	if len(bytes.TrimSpace(data)) > 0 {
 		if err := yaml.Unmarshal(data, &original); err != nil {
 			return fmt.Errorf("parse source YAML: %w", err)
@@ -110,7 +123,9 @@ func DryMigrate(src, dst string) error {
 	if err != nil {
 		return fmt.Errorf("marshal defaults: %w", err)
 	}
+
 	var defaultNode yaml.Node
+
 	if err := yaml.Unmarshal(defaultData, &defaultNode); err != nil {
 		return fmt.Errorf("parse defaults YAML: %w", err)
 	}
@@ -118,8 +133,12 @@ func DryMigrate(src, dst string) error {
 	origMap := resolveMapping(&original)
 	defMap := resolveMapping(&defaultNode)
 	missing := findMissingKeys(origMap, defMap)
+
+	sort.Strings(missing)
+
 	if len(missing) > 0 {
 		fmt.Println("Missing fields that would be added:")
+
 		for _, k := range missing {
 			fmt.Printf("  + %s\n", k)
 		}
@@ -133,7 +152,7 @@ func DryMigrate(src, dst string) error {
 // ValidateFile validates a config file for common issues:
 // provider, agent, permission levels, context mode, timeout values,
 // required paths, and unknown top-level keys.
-// Uses size-limited reads to prevent OOM from oversized files (issue #46).
+// Uses size-limited reads to prevent OOM from oversized files.
 func ValidateFile(path string) error {
 	data, err := fileread.ReadFileLimited(path, 0)
 	if err != nil {
@@ -167,6 +186,11 @@ func ValidateFile(path string) error {
 		{"permission.aws", cfg.Permission.AWS},
 		{"permission.mcp", cfg.Permission.MCP},
 		{"permission.task", cfg.Permission.Task},
+		{"permission.find", cfg.Permission.Find},
+		{"permission.file_read", cfg.Permission.FileRead},
+		{"permission.file_edit", cfg.Permission.FileEdit},
+		{"permission.file_write", cfg.Permission.FileWrite},
+		{"permission.grep", cfg.Permission.Grep},
 	} {
 		if field.value != "" {
 			if err := ValidatePermissionLevel(field.name, field.value); err != nil {
@@ -234,11 +258,13 @@ func ValidateFile(path string) error {
 	return nil
 }
 
-// ShowDefaults returns the default config as YAML with zero-value fields
-// omitted.
+// ShowDefaults returns the default config as YAML with empty values
+// omitted. Explicit false for `enabled` is kept so the reference
+// output matches the exhaustive migrate backfill.
 func ShowDefaults() string {
 	defaults := DefaultConfig()
 	out, _ := yaml.Marshal(filterZeroValues(reflect.ValueOf(defaults)))
+
 	return string(out)
 }
 
@@ -271,6 +297,9 @@ func resolveMapping(n *yaml.Node) *yaml.Node {
 
 // mergeNodes adds missing keys from src into dst (both MappingNodes).
 // Existing keys in dst are left untouched. Recurses into nested mappings.
+// Type mismatches (user scalar vs default mapping) are preserved and
+// surfaced via findMissingKeys/DryMigrate instead of being silently
+// overwritten, so ValidateFile can flag them.
 func mergeNodes(dst, src *yaml.Node) {
 	if dst.Kind != yaml.MappingNode || src.Kind != yaml.MappingNode {
 		return
@@ -281,6 +310,7 @@ func mergeNodes(dst, src *yaml.Node) {
 		val *yaml.Node
 		idx int
 	}
+
 	dstIndex := make(map[string]entry)
 	for i := 0; i < len(dst.Content)-1; i += 2 {
 		if dst.Content[i].Kind == yaml.ScalarNode {
@@ -292,12 +322,15 @@ func mergeNodes(dst, src *yaml.Node) {
 	for i := 0; i < len(src.Content)-1; i += 2 {
 		key := src.Content[i]
 		val := src.Content[i+1]
+
 		if key.Kind != yaml.ScalarNode {
 			continue
 		}
+
 		if existing, ok := dstIndex[key.Value]; !ok {
 			dst.Content = append(dst.Content, key, val)
-		} else if existing.val.Kind == yaml.MappingNode && val.Kind == yaml.MappingNode {
+		} else if existing.val.Kind == yaml.MappingNode &&
+			val.Kind == yaml.MappingNode {
 			mergeNodes(existing.val, val)
 		}
 	}
@@ -312,6 +345,7 @@ func findMissingKeys(user, defaults *yaml.Node) []string {
 func findMissingKeysPrefix(user, defaults *yaml.Node, prefix string) []string {
 	user = resolveMapping(user)
 	defaults = resolveMapping(defaults)
+
 	if user == nil || defaults == nil {
 		return nil
 	}
@@ -324,13 +358,17 @@ func findMissingKeysPrefix(user, defaults *yaml.Node, prefix string) []string {
 	}
 
 	var missing []string
+
 	for i := 0; i < len(defaults.Content)-1; i += 2 {
 		dk := defaults.Content[i]
 		dv := defaults.Content[i+1]
+
 		if dk.Kind != yaml.ScalarNode {
 			continue
 		}
+
 		name := dk.Value
+
 		if prefix != "" {
 			name = prefix + "." + name
 		}
@@ -339,13 +377,33 @@ func findMissingKeysPrefix(user, defaults *yaml.Node, prefix string) []string {
 			missing = append(missing, name)
 		} else if uv.Kind == yaml.MappingNode && dv.Kind == yaml.MappingNode {
 			missing = append(missing, findMissingKeysPrefix(uv, dv, name)...)
+		} else if uv.Kind != dv.Kind && dv.Kind == yaml.MappingNode {
+			// User has scalar/sequence where defaults expect a
+			// mapping — surface as type mismatch so the
+			// operator can fix it; mergeNodes preserves the
+			// user value.
+			missing = append(missing, name+" (type mismatch: expected mapping)")
 		}
 	}
+
 	return missing
 }
 
-// filterZeroValues returns a copy of v with zero-value struct fields removed.
-// Works recursively for nested structs. Non-struct types are returned as-is.
+// filterZeroValues returns a copy of v with zero-value struct fields
+// removed, except explicit false for `enabled` booleans which are
+// kept. This gives exhaustive backfill for tool enablement:
+// tools.*.enabled=false is injected when absent, while empty
+// strings, empty maps/slices, zero ints and other false booleans
+// that mean “unset” stay omitted to keep the file lean. Works
+// recursively for nested structs. Non-struct types are returned
+// as-is.
+//
+// Rationale: absent vs false is semantically distinct
+// for enabled flags; omitting them hid drift and made `migrate
+// --dry-run` non-exhaustive. Other zero-values (e.g.
+// openai.api_key="", models: {}, permission.presets: []) remain
+// omitted intentionally — ShowDefaults and migrate agree, and
+// operators can see the full reference in examples/shmorby.yaml.
 func filterZeroValues(v reflect.Value) interface{} {
 	if !v.IsValid() {
 		return nil
@@ -355,6 +413,7 @@ func filterZeroValues(v reflect.Value) interface{} {
 	case reflect.Struct:
 		result := make(map[string]interface{})
 		t := v.Type()
+
 		for i := 0; i < v.NumField(); i++ {
 			field := v.Field(i)
 			fieldType := t.Field(i)
@@ -364,37 +423,74 @@ func filterZeroValues(v reflect.Value) interface{} {
 			}
 
 			yamlTag := fieldType.Tag.Get("yaml")
+
 			if yamlTag == "" || yamlTag == "-" {
 				continue
 			}
+
 			name := strings.Split(yamlTag, ",")[0]
 
+			// Keep explicit false for enabled flags —
+			// absent vs false is semantically distinct
+			// (e.g. tools.sudo.enabled=false must be
+			// backfilled). Other zero booleans
+			// (e.g. context.offload_to_memory) stay
+			// omitted to keep the file lean; see
+			// exhaustive vs filtered
+			// discussion.
+			if field.Kind() == reflect.Bool && name == "enabled" {
+				result[name] = field.Bool()
+
+				continue
+			}
+
 			if field.IsZero() {
+				// For structs, still check for nested
+				// explicit booleans so tools.sudo
+				// (which is zero when only Enabled=false)
+				// is not dropped entirely.
+				if field.Kind() == reflect.Struct {
+					nested := filterZeroValues(field)
+
+					if m, ok := nested.(map[string]interface{}); ok && len(m) > 0 {
+						result[name] = nested
+					}
+
+					continue
+				}
+
 				continue
 			}
 
 			result[name] = filterZeroValues(field)
 		}
+
 		return result
 
 	case reflect.Map:
 		result := make(map[string]interface{})
+
 		for _, key := range v.MapKeys() {
 			val := v.MapIndex(key)
+
 			if !val.IsNil() && !val.IsZero() {
 				result[fmt.Sprintf("%v", key.Interface())] = filterZeroValues(val)
 			}
 		}
+
 		return result
 
 	case reflect.Slice:
 		if v.IsNil() {
 			return nil
 		}
+
 		result := make([]interface{}, v.Len())
+
 		for i := 0; i < v.Len(); i++ {
 			result[i] = filterZeroValues(v.Index(i))
 		}
+
 		return result
 
 	default:

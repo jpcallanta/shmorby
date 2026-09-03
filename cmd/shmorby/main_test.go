@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"shmorby/internal/ledger"
 )
 
 // Tests that --help output contains all expected sections.
@@ -230,5 +232,58 @@ func TestRootCmd_ValidateFlag_InvalidConfig_ExitsOne(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "config invalid:") {
 		t.Errorf("want 'config invalid:' prefix in error, got: %v", err)
+	}
+}
+
+// TestLedgerSetCLI_RedactionAndCaps verifies `shmorby ledger set`
+// applies the same redaction and size caps as the ledger_set agent
+// tool (review fix: CLI previously bypassed both).
+func TestLedgerSetCLI_RedactionAndCaps(t *testing.T) {
+
+	baseDir := t.TempDir()
+	dataDir := filepath.Join(baseDir, "shmorby")
+	t.Setenv("XDG_DATA_HOME", baseDir)
+	t.Setenv("LOCALAPPDATA", baseDir)
+
+	// JSON-keyed secrets must be redacted before storage.
+	err := runLedgerSet(nil, []string{
+		"creds", `{"password":"hunter2","host":"web1"}`,
+	})
+	if err != nil {
+		t.Fatalf("runLedgerSet: %v", err)
+	}
+
+	l, err := ledger.OpenAt(dataDir)
+	if err != nil {
+		t.Fatalf("open ledger: %v", err)
+	}
+	data, ok := l.Get("creds")
+	if err := l.Close(); err != nil {
+		t.Fatalf("close ledger: %v", err)
+	}
+	if !ok {
+		t.Fatal("creds section not found")
+	}
+	if strings.Contains(string(data), "hunter2") {
+		t.Errorf("secret not redacted via CLI: %s", data)
+	}
+	if !strings.Contains(string(data), "[REDACTED]") {
+		t.Errorf("expected [REDACTED] marker, got: %s", data)
+	}
+	if !strings.Contains(string(data), "web1") {
+		t.Errorf("non-secret data lost: %s", data)
+	}
+
+	// Oversized payloads must be rejected.
+	largeData := make([]byte, ledger.MaxSectionBytes+100)
+	for i := range largeData {
+		largeData[i] = 'x'
+	}
+	err = runLedgerSet(nil, []string{"big", `"` + string(largeData) + `"`})
+	if err == nil {
+		t.Error("want error for oversized payload, got nil")
+	}
+	if !strings.Contains(err.Error(), "cap") {
+		t.Errorf("error should mention cap: %v", err)
 	}
 }

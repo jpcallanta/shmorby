@@ -30,6 +30,8 @@
 - Set permission presets to **read-only** or **locked** when not actively
   operating.
 - Configure tools like `sudo` and `aws` to **ask** (require approval).
+- Tool output is automatically redacted before being sent to the LLM
+  provider, preventing credential leakage to external APIs.
 - Never give Shmorby access to systems you are not prepared to lose.
 - Audit all configuration and SCOPE.md contents before granting access.
 

@@ -68,13 +68,13 @@ func TestTick_WhenInactive(t *testing.T) {
 	}
 }
 
-func TestFrames(t *testing.T) {
+func TestFrames_Validate(t *testing.T) {
 	if len(Frames) == 0 {
 		t.Error("Frames should not be empty")
 	}
 }
 
-func TestFrameRotation(t *testing.T) {
+func TestFrame_Rotation(t *testing.T) {
 	m := Model{}
 	m.Start("test")
 	seen := make(map[int]bool)

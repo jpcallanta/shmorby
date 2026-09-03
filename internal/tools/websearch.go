@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"shmorby/internal/audit"
+	"shmorby/internal/health"
 )
 
 //go:embed websearch.txt
@@ -65,7 +66,7 @@ type exaResponse struct {
 // WebSearchTool implements Tool for web search via SearXNG or Exa backend.
 type WebSearchTool struct {
 	perm           string
-	client         HTTPClient
+	client         *http.Client
 	baseURL        string // SearXNG instance URL
 	engine         string // "searxng" or "exa"
 	exaAPIKey      string // Exa API key
@@ -73,10 +74,10 @@ type WebSearchTool struct {
 	auditLogger    *audit.Logger
 }
 
-// NewWebSearchTool creates a WebSearchTool with the given permission
+// Creates a WebSearchTool with the given permission
 // level and HTTP client. Pass nil client to use a default http.Client
 // (no timeout — the context deadline in Run controls the timeout).
-func NewWebSearchTool(permLevel string, client HTTPClient) *WebSearchTool {
+func NewWebSearchTool(permLevel string, client *http.Client) *WebSearchTool {
 	if client == nil {
 		client = &http.Client{}
 	}
@@ -88,7 +89,7 @@ func NewWebSearchTool(permLevel string, client HTTPClient) *WebSearchTool {
 	}
 }
 
-// SetDefaultTimeout sets the default timeout in seconds for this tool.
+// Sets the default timeout in seconds for this tool.
 func (w *WebSearchTool) SetDefaultTimeout(t int) {
 	if t > 0 {
 		w.defaultTimeout = t
@@ -104,27 +105,27 @@ func (w *WebSearchTool) Description() string { return websearchDescription }
 // Parameters returns the JSON schema for websearch parameters.
 func (w *WebSearchTool) Parameters() json.RawMessage { return websearchParams }
 
-// PermLevel returns the configured permission level.
+// Returns the configured permission level.
 func (w *WebSearchTool) PermLevel() string { return w.perm }
 
-// SetPerm updates the permission level at runtime.
+// Updates the permission level at runtime.
 func (w *WebSearchTool) SetPerm(level string) { w.perm = level }
 
-// SetAuditLogger sets the audit logger for this tool.
+// Sets the audit logger for this tool.
 func (w *WebSearchTool) SetAuditLogger(l *audit.Logger) {
 	w.auditLogger = l
 }
 
-// SetBaseURL sets the SearXNG instance URL.
+// Sets the SearXNG instance URL.
 func (w *WebSearchTool) SetBaseURL(u string) { w.baseURL = u }
 
-// SetEngine sets the search backend: "searxng" or "exa".
+// Sets the search backend: "searxng" or "exa".
 func (w *WebSearchTool) SetEngine(e string) { w.engine = e }
 
-// SetExaAPIKey sets the Exa API key for the Exa backend.
+// Sets the Exa API key for the Exa backend.
 func (w *WebSearchTool) SetExaAPIKey(k string) { w.exaAPIKey = k }
 
-// Run executes a web search using the configured backend.
+// Executes a web search using the configured backend.
 func (w *WebSearchTool) Run(
 	ctx context.Context, args json.RawMessage,
 ) (string, error) {
@@ -187,13 +188,13 @@ func (w *WebSearchTool) Run(
 	w.logAudit(string(args), elapsed, errMsg)
 
 	if err != nil {
-		return result, err
+		return result, health.Wrap("websearch", elapsed, err)
 	}
 
 	return string(TruncateOutput([]byte(result))), nil
 }
 
-// searchSearXNG queries a SearXNG instance for search results.
+// Queries a SearXNG instance for search results.
 func (w *WebSearchTool) searchSearXNG(
 	ctx context.Context, query string, maxResults int,
 ) (string, error) {
@@ -242,10 +243,19 @@ func (w *WebSearchTool) searchSearXNG(
 		searxResp.Results = searxResp.Results[:maxResults]
 	}
 
-	return formatSearchResults(searxResp.Results), nil
+	results := make([]searchResult, len(searxResp.Results))
+	for i, r := range searxResp.Results {
+		results[i] = searchResult{
+			Title:   r.Title,
+			URL:     r.URL,
+			Content: r.Content,
+		}
+	}
+
+	return formatResults(results), nil
 }
 
-// searchExa queries the Exa API for search results.
+// Queries the Exa API for search results.
 func (w *WebSearchTool) searchExa(
 	ctx context.Context, query string, maxResults int,
 ) (string, error) {
@@ -300,11 +310,28 @@ func (w *WebSearchTool) searchExa(
 		)
 	}
 
-	return formatExaResults(exaResp.Results), nil
+	results := make([]searchResult, len(exaResp.Results))
+	for i, r := range exaResp.Results {
+		results[i] = searchResult{
+			Title:   r.Title,
+			URL:     r.URL,
+			Content: r.Snippet,
+		}
+	}
+
+	return formatResults(results), nil
 }
 
-// formatSearchResults formats SearXNG results into a numbered list.
-func formatSearchResults(results []searxngResult) string {
+// searchResult holds the common fields extracted from any search backend
+// result for formatting purposes.
+type searchResult struct {
+	Title   string
+	URL     string
+	Content string
+}
+
+// Formats a list of search results into a numbered list.
+func formatResults(results []searchResult) string {
 	if len(results) == 0 {
 		return "no results found"
 	}
@@ -322,36 +349,20 @@ func formatSearchResults(results []searxngResult) string {
 	return sb.String()
 }
 
-// formatExaResults formats Exa results into a numbered list.
-func formatExaResults(results []exaResult) string {
-	if len(results) == 0 {
-		return "no results found"
-	}
-
-	var sb strings.Builder
-	for i, r := range results {
-		if i > 0 {
-			sb.WriteString("\n\n")
-		}
-		sb.WriteString(fmt.Sprintf("%d. %s\n   %s\n   %s",
-			i+1, r.Title, r.URL, r.Snippet,
-		))
-	}
-
-	return sb.String()
-}
-
-// logAudit sends a tool-run entry to the audit logger if configured.
+// Sends a tool-run entry to the audit logger if configured.
 func (w *WebSearchTool) logAudit(
 	args string, duration time.Duration, errMsg string,
 ) {
 	if w.auditLogger == nil {
 		return
 	}
+	// Redact args before audit logging to prevent secrets embedded
+	// in search URLs from persisting in plaintext in the SQLite
+	// audit database.
 	w.auditLogger.LogToolRun(
 		audit.AuditEntry{
 			Tool:       "websearch",
-			Args:       args,
+			Args:       string(RedactArgs([]byte(args))),
 			DurationMs: duration.Milliseconds(),
 			Error:      errMsg,
 		},

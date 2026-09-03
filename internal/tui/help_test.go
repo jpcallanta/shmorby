@@ -521,7 +521,7 @@ func TestHelpOverlay_ConfigParamsRendered(t *testing.T) {
 	co := agent.NewConfigOverrider(&config.Config{
 		Provider: "ollama",
 		Model:    "test-model",
-	}, nil, nil, nil, nil)
+	}, nil, nil, nil)
 	params := co.OverrideableParams()
 	if len(params) == 0 {
 		t.Fatal("expected live overrideable params")

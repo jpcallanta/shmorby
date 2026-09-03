@@ -15,15 +15,3 @@ type MemoryEntry struct {
 	Summary   string
 	Tags      []string
 }
-
-// OffloadedMessage represents a message that was offloaded from the session
-// to make room for new context.
-type OffloadedMessage struct {
-	ID         string
-	SessionID  string
-	Role       string
-	Content    string
-	Tokens     int
-	Timestamp  time.Time
-	Compressed bool
-}

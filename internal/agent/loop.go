@@ -7,11 +7,14 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"time"
 
 	"shmorby/internal/audit"
 	ctxcomp "shmorby/internal/context"
+	"shmorby/internal/health"
 	"shmorby/internal/llm"
 	"shmorby/internal/memory"
+	"shmorby/internal/redact"
 	"shmorby/internal/session"
 	"shmorby/internal/tools"
 )
@@ -47,6 +50,9 @@ type ToolPermissionFunc func(toolName, command, reason string) ToolPermissionRes
 // Runs a single chat turn: builds system prompt, retrieves relevant memory,
 // sends user text to LLM with session history, and on success stores both
 // user and assistant messages to session.
+// ledgerCtx is pre-formatted ledger context for injection (empty if disabled).
+// projectRoot is the resolved project directory for the env
+// hint (empty = default).
 func RunTurn(
 	ctx context.Context,
 	p llm.Provider,
@@ -56,14 +62,19 @@ func RunTurn(
 	retriever *memory.Retriever,
 	compressor *ctxcomp.Compressor,
 	modelInfo llm.ModelInfo,
+	ledgerCtx string,
+	projectRoot string,
 ) (string, error) {
-	sys, err := SystemPrompt(mode, scope, override)
+	sys, err := SystemPrompt(mode, scope, override, projectRoot)
 	if err != nil {
 		return "", fmt.Errorf("build system prompt: %w", err)
 	}
 
 	// Compress session before LLM call if configured.
 	if compressor != nil {
+		// No tools in this path; reset any cached tool estimate
+		// so a stale value is never reused (F1).
+		compressor.SetRequestContext(sys, nil)
 		if cErr := compressor.Compress(ctx, sess, modelInfo); cErr != nil {
 			slog.Warn("compression failed", "err", cErr)
 		}
@@ -74,7 +85,9 @@ func RunTurn(
 	if retriever != nil {
 		result, rErr := retriever.Retrieve(ctx, userText)
 		if rErr == nil && len(result.Entries) > 0 {
-			contextMsg = memory.FormatMemoryContext(result.Entries)
+			contextMsg = memory.FormatMemoryContext(
+				result.Entries, retriever.ContextBudget(),
+			)
 		}
 	}
 
@@ -83,6 +96,10 @@ func RunTurn(
 	history := sess.Messages()
 	if contextMsg != "" {
 		history = memory.InjectMemoryContext(history, contextMsg)
+	}
+	// Inject ledger context after memory context.
+	if ledgerCtx != "" {
+		history = memory.InjectMemoryContext(history, ledgerCtx)
 	}
 	msgs := make([]llm.Message, 0, len(history)+1)
 	for _, m := range history {
@@ -111,6 +128,16 @@ func RunTurn(
 		return "", fmt.Errorf("chat: %w", err)
 	}
 
+	// Log token usage for cost visibility when available.
+	if resp.Usage.TotalTokens > 0 {
+		slog.Debug("chat usage",
+			"model", model,
+			"prompt_tokens", resp.Usage.PromptTokens,
+			"completion_tokens", resp.Usage.CompletionTokens,
+			"total_tokens", resp.Usage.TotalTokens,
+		)
+	}
+
 	// Only persist messages on successful chat.
 	sess.Append("user", userText)
 	sess.Append("assistant", resp.Text())
@@ -120,11 +147,90 @@ func RunTurn(
 
 // Runs chat turns with tool execution loop up to max iterations.
 // Buffers all messages locally and only persists on success,
+// turnState holds the mutable state for a single turn's iteration loop.
+// Both RunTurnWithTools and RunTurnWithToolsStream build one via
+// initTurnState, then drive it with their respective LLM call style.
+type turnState struct {
+	sys             string
+	toolDefs        []llm.ToolDef
+	pending         []session.Message
+	cacheablePrefix []llm.Message
+	toolOverrides   map[string]bool
+	degraded        []*health.Degraded
+	iterStart       time.Time
+	iterBudget      time.Duration
+	maxIterations   int
+}
+
+// initTurnState builds the common setup shared by streaming and
+// non-streaming turn runs: system prompt, tool defs, pending messages,
+// memory context, cacheable prefix, and compressor registration.
+func initTurnState(
+	ctx context.Context,
+	sess *session.Session,
+	mode, scope, override, model, userText string,
+	registry *tools.Registry,
+	maxIterations int,
+	shellEnabled bool,
+	retriever *memory.Retriever,
+	compressor *ctxcomp.Compressor,
+	ledgerCtx, projectRoot string,
+) (*turnState, error) {
+	if maxIterations < 1 {
+		maxIterations = 1
+	}
+
+	sys, err := SystemPrompt(mode, scope, override, projectRoot)
+	if err != nil {
+		return nil, fmt.Errorf("build system prompt: %w", err)
+	}
+
+	toolDefs := buildToolDefs(registry, mode, shellEnabled)
+
+	pending := make([]session.Message, 0, 8)
+	pending = append(pending, session.Message{
+		Role:    "user",
+		Content: userText,
+	})
+
+	memoryCtx := retrieveMemoryContext(ctx, userText, sess, retriever)
+	baseHistory := buildBaseHistory(sess, memoryCtx, ledgerCtx)
+	cacheablePrefix := buildCacheablePrefix(sys, baseHistory)
+
+	// Marshal tool definitions once per turn: they are byte-identical
+	// across iterations, so the compressor estimate is cached and
+	// reused (F1: full request estimation).
+	if compressor != nil {
+		toolsJSON, mErr := json.Marshal(toolDefs)
+		if mErr != nil {
+			slog.Warn("marshal tool defs for compressor failed",
+				"err", mErr)
+		}
+
+		compressor.SetRequestContext(sys, toolsJSON)
+	}
+
+	return &turnState{
+		sys:             sys,
+		toolDefs:        toolDefs,
+		pending:         pending,
+		cacheablePrefix: cacheablePrefix,
+		toolOverrides:   make(map[string]bool),
+		degraded:        nil,
+		iterStart:       time.Now(),
+		iterBudget:      time.Duration(maxIterations) * 240 * time.Second,
+		maxIterations:   maxIterations,
+	}, nil
+}
+
 // avoiding partial state on mid-loop LLM failure.
 // Returns final assistant text or iteration-limit message.
 // onEvent receives tool status updates; may be nil.
 // permFunc is called when a tool's permission evaluates to "ask"
 // (nil = always allow). toolRules are per-tool RuleSets from config.
+// ledgerCtx is pre-formatted ledger context for injection (empty if disabled).
+// projectRoot is the resolved project directory for the env
+// hint (empty = default).
 func RunTurnWithTools(
 	ctx context.Context,
 	p llm.Provider,
@@ -141,93 +247,25 @@ func RunTurnWithTools(
 	permFunc ToolPermissionFunc,
 	toolRules map[string]*tools.RuleSet,
 	statusGen *StatusGenerator,
+	ledgerCtx string,
+	projectRoot string,
 ) (string, error) {
-	// Ensure at least one iteration runs.
-	if maxIterations < 1 {
-		maxIterations = 1
-	}
-
-	sys, err := SystemPrompt(mode, scope, override)
+	ts, err := initTurnState(ctx, sess, mode, scope, override, model, userText,
+		registry, maxIterations, shellEnabled, retriever, compressor,
+		ledgerCtx, projectRoot)
 	if err != nil {
-		return "", fmt.Errorf("build system prompt: %w", err)
+		return "", err
 	}
 
-	// Filter tool schemas by mode; always advertise non-shell tools
-	// even when shell is disabled.
-	var toolDefs []llm.ToolDef
-	schemas := registry.Schemas()
-	if mode == "diagnose" {
-		schemas = filterDiagnoseSchemas(schemas)
-	}
-	if mode == "chat" {
-		schemas = filterChatSchemas(schemas)
-	}
-	if !shellEnabled {
-		filtered := make([]tools.ToolSchema, 0, len(schemas))
-		for _, s := range schemas {
-			if s.Name != "shell" {
-				filtered = append(filtered, s)
-			}
-		}
-		schemas = filtered
-	}
-	for _, ts := range schemas {
-		toolDefs = append(toolDefs, llm.ToolDef{
-			Name:        ts.Name,
-			Description: ts.Description,
-			Parameters:  ts.Parameters,
-		})
-	}
-
-	// Buffer all messages for this turn; flush to session only on success.
-	pending := make([]session.Message, 0, 8)
-	pending = append(pending, session.Message{
-		Role:    "user",
-		Content: userText,
-	})
-
-	// Retrieve relevant memory before tool loop.
-	var memoryCtx string
-	if retriever != nil {
-		result, rErr := retriever.Retrieve(ctx, userText)
-		if rErr == nil && len(result.Entries) > 0 {
-			deduped := memory.DedupMemoryContext(
-				result.Entries, sess.Messages(),
+	for i := 0; i < ts.maxIterations; i++ {
+		if ts.iterBudget > 0 && time.Since(ts.iterStart) > ts.iterBudget {
+			slog.Warn("agent iteration budget exceeded",
+				"elapsed", time.Since(ts.iterStart),
+				"budget", ts.iterBudget,
+				"iteration", i,
 			)
-			memoryCtx = memory.FormatMemoryContext(deduped)
+			break
 		}
-	}
-
-	// Build base history once: session with memory context injected.
-	baseHistory := sess.Messages()
-	if memoryCtx != "" {
-		baseHistory = memory.InjectMemoryContext(
-			baseHistory, memoryCtx,
-		)
-	}
-
-	// Build cacheable prefix once: system + base history (with memory)
-	// + tool schemas. Byte-identical across iterations for provider
-	// prompt caching.
-	var cacheablePrefix []llm.Message
-	cacheablePrefix = append(cacheablePrefix, llm.Message{
-		Role:    "system",
-		Content: sys,
-	})
-	for _, m := range baseHistory {
-		cacheablePrefix = append(cacheablePrefix, llm.Message{
-			Role:       m.Role,
-			Content:    m.Content,
-			ToolName:   m.ToolName,
-			ToolCallID: m.ToolCallID,
-			ToolCalls:  m.ToolCalls,
-		})
-	}
-
-	// Session-level overrides persist across iterations within one turn.
-	toolOverrides := make(map[string]bool)
-
-	for i := 0; i < maxIterations; i++ {
 		// Compress session before LLM call if configured.
 		if compressor != nil {
 			if cErr := compressor.Compress(ctx, sess, modelInfo); cErr != nil {
@@ -235,25 +273,13 @@ func RunTurnWithTools(
 			}
 		}
 
-		// Build messages: cacheable prefix + pending.
-		msgs := make([]llm.Message, len(cacheablePrefix),
-			len(cacheablePrefix)+len(pending))
-		copy(msgs, cacheablePrefix)
-		for _, m := range pending {
-			msgs = append(msgs, llm.Message{
-				Role:       m.Role,
-				Content:    m.Content,
-				ToolName:   m.ToolName,
-				ToolCallID: m.ToolCallID,
-				ToolCalls:  m.ToolCalls,
-			})
-		}
+		msgs := buildIterationMessages(ts.cacheablePrefix, ts.pending)
 
 		req := llm.ChatRequest{
 			Model:    model,
-			System:   sys,
+			System:   ts.sys,
 			Messages: msgs,
-			Tools:    toolDefs,
+			Tools:    ts.toolDefs,
 		}
 
 		if err := checkContextWindow(modelInfo, compressor, &req, ctx, sess); err != nil {
@@ -266,192 +292,45 @@ func RunTurnWithTools(
 			return "", fmt.Errorf("chat: %w", err)
 		}
 
+		// Log token usage for cost visibility when available.
+		if resp.Usage.TotalTokens > 0 {
+			slog.Debug("chat usage",
+				"model", model,
+				"prompt_tokens", resp.Usage.PromptTokens,
+				"completion_tokens", resp.Usage.CompletionTokens,
+				"total_tokens", resp.Usage.TotalTokens,
+			)
+		}
+
 		// No tool calls: final assistant text, flush everything.
 		if len(resp.ToolCalls) == 0 {
-			pending = append(pending, session.Message{
+			text := resp.Text()
+			// Surface degraded tooling at top of response.
+			if pfx := health.FormatPrefix(ts.degraded); pfx != "" {
+				text = pfx + text
+			}
+			ts.pending = append(ts.pending, session.Message{
 				Role:    "assistant",
-				Content: resp.Text(),
+				Content: text,
 			})
-			sess.AppendMessages(pending)
+			sess.AppendMessages(ts.pending)
 
-			return resp.Text(), nil
+			return text, nil
 		}
 
 		// Persist assistant message with tool calls in pending buffer.
-		pending = append(pending, session.Message{
+		ts.pending = append(ts.pending, session.Message{
 			Role:      "assistant",
 			Content:   resp.Text(),
 			ToolCalls: resp.ToolCalls,
 		})
 
 		for _, tc := range resp.ToolCalls {
-			cmd := extractCommand(tc.Name, tc.Args)
-			argsBytes := json.RawMessage(tc.Args)
-
-			// Emit tool-start event.
-			if onEvent != nil {
-				onEvent(AgentEvent{
-					Type: "tool-start",
-					Name: tc.Name,
-					Info: cmd,
-				})
-			}
-
-			// Async status description generation: fire-and-forget.
-			// The goroutine produces a short present-tense label and
-			// emits a tool-status event when ready.
-			if statusGen != nil && onEvent != nil {
-				go func(name, desc, command string) {
-					desc = statusGen.Generate(ctx, name, desc, command)
-					if desc == "" {
-						return
-					}
-					select {
-					case <-ctx.Done():
-					default:
-						onEvent(AgentEvent{
-							Type:   "tool-status",
-							Name:   name,
-							Status: desc,
-						})
-					}
-				}(tc.Name, toolDescription(registry, tc.Name), cmd)
-			}
-
-			var result string
-			var runErr error
-
-			// Permission evaluation (phase 26): check tool-level
-			// perm + rule set before execution.
-			tool, ok := registry.Lookup(tc.Name)
-			if !ok {
-				result = "error: tool not found"
-			} else if !toolOverrides[tc.Name] {
-				action, reason, rulePattern, ruleAction, pErr := tools.EvaluateToolPermission(
-					tool.PermLevel(), cmd, toolRules[tc.Name],
-				)
-				if pErr != nil {
-					result = "error: " + pErr.Error()
-				} else if action == "ask" {
-					// Default allow preserves v1 behavior
-					// when no interactive func is wired.
-					resp := PermAllow
-					if permFunc != nil {
-						resp = permFunc(tc.Name, cmd, reason)
-					}
-					switch resp {
-					case PermDeny:
-						result = fmt.Sprintf(
-							"error: permission denied for %s: %s",
-							tc.Name, cmd,
-						)
-					case PermAllowAll:
-						toolOverrides[tc.Name] = true
-					case PermAllow:
-						// fall through to execute
-					}
-				}
-
-				if auditLog := tools.AuditLoggerFrom(ctx); auditLog != nil {
-					decision := "allow"
-					if result != "" && strings.HasPrefix(result, "error: permission denied") {
-						decision = "deny"
-					}
-					auditLog.LogPermission(audit.PermissionAudit{
-						SessionID:   tools.SessionIDFrom(ctx),
-						Tool:        tc.Name,
-						Command:     string(tools.RedactArgs(argsBytes)),
-						RulePattern: rulePattern,
-						RuleAction:  ruleAction,
-						Decision:    decision,
-						Reason:      reason,
-					})
-				}
-			}
-
-			// Execute tool if no permission error.
-			if result == "" {
-				// Reject shell tool when not enabled; other
-				// tools (ssh/sudo/aws) still work.
-				if tc.Name == "shell" && !shellEnabled {
-					result = "error: shell tool disabled " +
-						"(shell_enabled=false)"
-				} else if mode == "diagnose" &&
-					tc.Name == "shell" {
-					var sa struct {
-						Command string `json:"command"`
-					}
-					if uErr := json.Unmarshal(
-						argsBytes, &sa,
-					); uErr == nil && sa.Command != "" {
-						if mErr := tools.CheckMutating(
-							sa.Command,
-						); mErr != nil {
-							result = "error: " + mErr.Error()
-						} else {
-							result, runErr = registry.Run(
-								ctx, tc.Name,
-								argsBytes,
-							)
-						}
-					} else {
-						result = "error: diagnose mode " +
-							"rejected shell call with " +
-							"invalid or empty command"
-					}
-				} else {
-					result, runErr = registry.Run(
-						ctx, tc.Name,
-						argsBytes,
-					)
-				}
-			}
-
-			// Capture to memory store after successful execution.
-			if store != nil && runErr == nil && result != "" {
-				var parsed struct {
-					Command string `json:"command"`
-				}
-				commandStr := tc.Args
-				if json.Unmarshal(argsBytes, &parsed) == nil &&
-					parsed.Command != "" {
-					commandStr = parsed.Command
-				}
-				memory.CaptureToolResult(
-					store, memory.DefaultSessionID,
-					tc.Name, commandStr, tc.Args, result, 0,
-				)
-			}
-
-			// Preserve partial output on error; else pure error string.
-			if runErr != nil {
-				if result != "" {
-					result = result + "\nerror: " + runErr.Error()
-				} else {
-					result = "error: " + runErr.Error()
-				}
-			}
-
-			// Compress large tool outputs.
-			if compressor != nil {
-				result = compressor.CompressToolOutput(result)
-			}
-
-			// Emit tool-end event.
-			if onEvent != nil {
-				status := "done"
-				if runErr != nil {
-					status = "error: " + runErr.Error()
-				}
-				onEvent(AgentEvent{
-					Type:   "tool-end",
-					Name:   tc.Name,
-					Info:   status,
-					Output: result,
-				})
-			}
-
-			pending = append(pending, session.Message{
+			result := processToolCall(ctx, tc, registry,
+				ts.toolOverrides, toolRules, permFunc,
+				shellEnabled, mode, store, compressor,
+				onEvent, statusGen, &ts.degraded)
+			ts.pending = append(ts.pending, session.Message{
 				Role:       "tool",
 				Content:    result,
 				ToolName:   tc.Name,
@@ -460,66 +339,25 @@ func RunTurnWithTools(
 		}
 	}
 
-	// Iteration limit reached: append summary request as user message,
-	// make one final Chat without tools, return summary.
-	pending = append(pending, session.Message{
-		Role:    "user",
-		Content: MaxStepsPrompt,
-	})
-
-	msgs := make([]llm.Message, len(cacheablePrefix),
-		len(cacheablePrefix)+len(pending))
-	copy(msgs, cacheablePrefix)
-	for _, m := range pending {
-		msgs = append(msgs, llm.Message{
-			Role:       m.Role,
-			Content:    m.Content,
-			ToolName:   m.ToolName,
-			ToolCallID: m.ToolCallID,
-			ToolCalls:  m.ToolCalls,
-		})
-	}
-
-	req := llm.ChatRequest{
-		Model:    model,
-		System:   sys,
-		Messages: msgs,
-	}
-
-	// Apply MaxTokens via side effect; discard context-overflow error
-	// intentionally — this path already falls back to a generic limit
-	// message on any Chat failure below.
-	_ = checkContextWindow(modelInfo, nil, &req, ctx, sess)
-
-	resp, err := p.Chat(ctx, req)
+	// Iteration cap reached; include degraded note if any.
+	text, err := finishIterationLimit(ctx, p, sess, ts.pending,
+		ts.cacheablePrefix, model, ts.sys, modelInfo, ts.maxIterations)
 	if err != nil {
-		slog.Warn("summary LLM call failed, falling back to "+
-			"generic limit message",
-			"error", err,
-		)
-		reply := "Tool iteration limit reached (" +
-			strconv.Itoa(maxIterations) + " iterations)."
-		pending = append(pending, session.Message{
-			Role:    "assistant",
-			Content: reply,
-		})
-		sess.AppendMessages(pending)
-
-		return reply, nil
+		return "", err
+	}
+	if pfx := health.FormatPrefix(ts.degraded); pfx != "" {
+		text = pfx + text
 	}
 
-	pending = append(pending, session.Message{
-		Role:    "assistant",
-		Content: resp.Text(),
-	})
-	sess.AppendMessages(pending)
-
-	return resp.Text(), nil
+	return text, nil
 }
 
 // RunTurnWithToolsStream is like RunTurnWithTools but uses ChatStream
 // for progressive text output. Calls onDelta for each text/reasoning
 // chunk as it arrives from the provider.
+// ledgerCtx is pre-formatted ledger context for injection (empty if disabled).
+// projectRoot is the resolved project directory for the env
+// hint (empty = default).
 func RunTurnWithToolsStream(
 	ctx context.Context,
 	p llm.Provider,
@@ -537,109 +375,45 @@ func RunTurnWithToolsStream(
 	permFunc ToolPermissionFunc,
 	toolRules map[string]*tools.RuleSet,
 	statusGen *StatusGenerator,
+	ledgerCtx string,
+	projectRoot string,
 ) (string, error) {
-	if maxIterations < 1 {
-		maxIterations = 1
+	// Stream variant safely handles nil registry for tool defs.
+	registryForDefs := registry
+	if registryForDefs == nil {
+		registryForDefs = tools.NewRegistry()
 	}
 
-	sys, err := SystemPrompt(mode, scope, override)
+	ts, err := initTurnState(ctx, sess, mode, scope, override, model, userText,
+		registryForDefs, maxIterations, shellEnabled, retriever, compressor,
+		ledgerCtx, projectRoot)
 	if err != nil {
-		return "", fmt.Errorf("build system prompt: %w", err)
+		return "", err
 	}
 
-	var toolDefs []llm.ToolDef
-	if registry != nil {
-		schemas := registry.Schemas()
-		if mode == "diagnose" {
-			schemas = filterDiagnoseSchemas(schemas)
-		}
-		if mode == "chat" {
-			schemas = filterChatSchemas(schemas)
-		}
-		if !shellEnabled {
-			filtered := make([]tools.ToolSchema, 0, len(schemas))
-			for _, s := range schemas {
-				if s.Name != "shell" {
-					filtered = append(filtered, s)
-				}
-			}
-			schemas = filtered
-		}
-		for _, ts := range schemas {
-			toolDefs = append(toolDefs, llm.ToolDef{
-				Name:        ts.Name,
-				Description: ts.Description,
-				Parameters:  ts.Parameters,
-			})
-		}
-	}
-
-	pending := make([]session.Message, 0, 8)
-	pending = append(pending, session.Message{
-		Role:    "user",
-		Content: userText,
-	})
-
-	var memoryCtx string
-	if retriever != nil {
-		result, rErr := retriever.Retrieve(ctx, userText)
-		if rErr == nil && len(result.Entries) > 0 {
-			deduped := memory.DedupMemoryContext(
-				result.Entries, sess.Messages(),
+	for i := 0; i < ts.maxIterations; i++ {
+		if ts.iterBudget > 0 && time.Since(ts.iterStart) > ts.iterBudget {
+			slog.Warn("agent iteration budget exceeded (stream)",
+				"elapsed", time.Since(ts.iterStart),
+				"budget", ts.iterBudget,
+				"iteration", i,
 			)
-			memoryCtx = memory.FormatMemoryContext(deduped)
+			break
 		}
-	}
 
-	baseHistory := sess.Messages()
-	if memoryCtx != "" {
-		baseHistory = memory.InjectMemoryContext(
-			baseHistory, memoryCtx,
-		)
-	}
-
-	var cacheablePrefix []llm.Message
-	cacheablePrefix = append(cacheablePrefix, llm.Message{
-		Role:    "system",
-		Content: sys,
-	})
-	for _, m := range baseHistory {
-		cacheablePrefix = append(cacheablePrefix, llm.Message{
-			Role:       m.Role,
-			Content:    m.Content,
-			ToolName:   m.ToolName,
-			ToolCallID: m.ToolCallID,
-			ToolCalls:  m.ToolCalls,
-		})
-	}
-
-	toolOverrides := make(map[string]bool)
-
-	for i := 0; i < maxIterations; i++ {
 		if compressor != nil {
 			if cErr := compressor.Compress(ctx, sess, modelInfo); cErr != nil {
 				slog.Warn("compression failed", "err", cErr)
 			}
 		}
 
-		msgs := make([]llm.Message, len(cacheablePrefix),
-			len(cacheablePrefix)+len(pending))
-		copy(msgs, cacheablePrefix)
-		for _, m := range pending {
-			msgs = append(msgs, llm.Message{
-				Role:       m.Role,
-				Content:    m.Content,
-				ToolName:   m.ToolName,
-				ToolCallID: m.ToolCallID,
-				ToolCalls:  m.ToolCalls,
-			})
-		}
+		msgs := buildIterationMessages(ts.cacheablePrefix, ts.pending)
 
 		req := llm.ChatRequest{
 			Model:    model,
-			System:   sys,
+			System:   ts.sys,
 			Messages: msgs,
-			Tools:    toolDefs,
+			Tools:    ts.toolDefs,
 		}
 
 		if err := checkContextWindow(modelInfo, compressor, &req, ctx, sess); err != nil {
@@ -656,11 +430,27 @@ func RunTurnWithToolsStream(
 
 		for event := range stream {
 			switch event.Type {
-			case "text", "reasoning":
+			case "text":
 				text.WriteString(event.Delta)
 				if onDelta != nil {
 					onDelta(event.Delta)
 				}
+			case "reasoning":
+				// Reasoning deltas are surfaced via onDelta
+				// for UI display but NOT concatenated into the
+				// persisted assistant content (CoT tokens
+				// would leak into the session message).
+				if onDelta != nil {
+					onDelta(event.Delta)
+				}
+			case "usage":
+				// Log token usage from stream_options for
+				// cost visibility. The chunk contains JSON
+				// with prompt/completion/total tokens.
+				slog.Debug("stream usage",
+					"model", model,
+					"usage", event.Content,
+				)
 			case "tool-call":
 				toolCalls = append(toolCalls, llm.ToolCall{
 					ID:   event.ToolID,
@@ -673,177 +463,31 @@ func RunTurnWithToolsStream(
 		}
 
 		if len(toolCalls) == 0 {
-			pending = append(pending, session.Message{
+			textStr := text.String()
+			if pfx := health.FormatPrefix(ts.degraded); pfx != "" {
+				textStr = pfx + textStr
+			}
+			ts.pending = append(ts.pending, session.Message{
 				Role:    "assistant",
-				Content: text.String(),
+				Content: textStr,
 			})
-			sess.AppendMessages(pending)
+			sess.AppendMessages(ts.pending)
 
-			return text.String(), nil
+			return textStr, nil
 		}
 
-		pending = append(pending, session.Message{
+		ts.pending = append(ts.pending, session.Message{
 			Role:      "assistant",
 			Content:   text.String(),
 			ToolCalls: toolCalls,
 		})
 
 		for _, tc := range toolCalls {
-			cmd := extractCommand(tc.Name, tc.Args)
-			argsBytes := json.RawMessage(tc.Args)
-
-			if onEvent != nil {
-				onEvent(AgentEvent{
-					Type: "tool-start",
-					Name: tc.Name,
-					Info: cmd,
-				})
-			}
-
-			// Async status description generation: fire-and-forget.
-			if statusGen != nil && onEvent != nil {
-				go func(name, desc, command string) {
-					desc = statusGen.Generate(ctx, name, desc, command)
-					if desc == "" {
-						return
-					}
-					select {
-					case <-ctx.Done():
-					default:
-						onEvent(AgentEvent{
-							Type:   "tool-status",
-							Name:   name,
-							Status: desc,
-						})
-					}
-				}(tc.Name, toolDescription(registry, tc.Name), cmd)
-			}
-
-			var result string
-			var runErr error
-
-			if registry == nil {
-				result = "error: tool not found"
-			} else if tool, ok := registry.Lookup(tc.Name); ok {
-				if !toolOverrides[tc.Name] {
-					action, reason, rulePattern, ruleAction, pErr := tools.EvaluateToolPermission(
-						tool.PermLevel(), cmd, toolRules[tc.Name],
-					)
-					if pErr != nil {
-						result = "error: " + pErr.Error()
-					} else if action == "ask" {
-						resp := PermAllow
-						if permFunc != nil {
-							resp = permFunc(tc.Name, cmd, reason)
-						}
-						switch resp {
-						case PermDeny:
-							result = fmt.Sprintf(
-								"error: permission denied for %s: %s",
-								tc.Name, cmd,
-							)
-						case PermAllowAll:
-							toolOverrides[tc.Name] = true
-						case PermAllow:
-						}
-					}
-
-					if auditLog := tools.AuditLoggerFrom(ctx); auditLog != nil {
-						decision := "allow"
-						if result != "" && strings.HasPrefix(result, "error: permission denied") {
-							decision = "deny"
-						}
-						auditLog.LogPermission(audit.PermissionAudit{
-							SessionID:   tools.SessionIDFrom(ctx),
-							Tool:        tc.Name,
-							Command:     string(tools.RedactArgs(argsBytes)),
-							RulePattern: rulePattern,
-							RuleAction:  ruleAction,
-							Decision:    decision,
-							Reason:      reason,
-						})
-					}
-				}
-			} else {
-				result = "error: tool not found"
-			}
-
-			if result == "" && registry != nil {
-				if tc.Name == "shell" && !shellEnabled {
-					result = "error: shell tool disabled " +
-						"(shell_enabled=false)"
-				} else if mode == "diagnose" &&
-					tc.Name == "shell" {
-					var sa struct {
-						Command string `json:"command"`
-					}
-					if uErr := json.Unmarshal(
-						argsBytes, &sa,
-					); uErr == nil && sa.Command != "" {
-						if mErr := tools.CheckMutating(
-							sa.Command,
-						); mErr != nil {
-							result = "error: " + mErr.Error()
-						} else {
-							result, runErr = registry.Run(
-								ctx, tc.Name,
-								argsBytes,
-							)
-						}
-					} else {
-						result = "error: diagnose mode " +
-							"rejected shell call with " +
-							"invalid or empty command"
-					}
-				} else {
-					result, runErr = registry.Run(
-						ctx, tc.Name,
-						argsBytes,
-					)
-				}
-			}
-
-			if store != nil && runErr == nil && result != "" {
-				var parsed struct {
-					Command string `json:"command"`
-				}
-				commandStr := tc.Args
-				if json.Unmarshal(argsBytes, &parsed) == nil &&
-					parsed.Command != "" {
-					commandStr = parsed.Command
-				}
-				memory.CaptureToolResult(
-					store, memory.DefaultSessionID,
-					tc.Name, commandStr, tc.Args, result, 0,
-				)
-			}
-
-			if runErr != nil {
-				if result != "" {
-					result = result + "\nerror: " + runErr.Error()
-				} else {
-					result = "error: " + runErr.Error()
-				}
-			}
-
-			if compressor != nil {
-				result = compressor.CompressToolOutput(result)
-			}
-
-			if onEvent != nil {
-				status := "done"
-				if runErr != nil {
-					status = "error: " + runErr.Error()
-				}
-				onEvent(AgentEvent{
-					Type:   "tool-end",
-					Name:   tc.Name,
-					Info:   status,
-					Output: result,
-				})
-			}
-
-			pending = append(pending, session.Message{
+			result := processToolCall(ctx, tc, registry,
+				ts.toolOverrides, toolRules, permFunc,
+				shellEnabled, mode, store, compressor,
+				onEvent, statusGen, &ts.degraded)
+			ts.pending = append(ts.pending, session.Message{
 				Role:       "tool",
 				Content:    result,
 				ToolName:   tc.Name,
@@ -852,14 +496,144 @@ func RunTurnWithToolsStream(
 		}
 	}
 
-	pending = append(pending, session.Message{
-		Role:    "user",
-		Content: MaxStepsPrompt,
+	// Iteration cap reached; include degraded note if any.
+	txt, err := finishIterationLimit(ctx, p, sess, ts.pending,
+		ts.cacheablePrefix, model, ts.sys, modelInfo, ts.maxIterations)
+	if err != nil {
+		return "", err
+	}
+	if pfx := health.FormatPrefix(ts.degraded); pfx != "" {
+		txt = pfx + txt
+	}
+
+	return txt, nil
+}
+
+// Filters tool schemas by agent mode and shell enabled flag, then
+// converts them to LLM tool definitions. Always advertises non-shell
+// tools even when shell is disabled.
+func buildToolDefs(
+	registry *tools.Registry,
+	mode string,
+	shellEnabled bool,
+) []llm.ToolDef {
+	schemas := registry.Schemas()
+	if mode == "diagnose" {
+		schemas = filterDiagnoseSchemas(schemas)
+	}
+	if mode == "chat" {
+		schemas = filterChatSchemas(schemas)
+	}
+	if mode == "code" {
+		schemas = filterCodeSchemas(schemas)
+	}
+	if !shellEnabled {
+		filtered := make([]tools.ToolSchema, 0, len(schemas))
+		for _, s := range schemas {
+			if s.Name != "shell" {
+				filtered = append(filtered, s)
+			}
+		}
+		schemas = filtered
+	}
+
+	var defs []llm.ToolDef
+	for _, ts := range schemas {
+		defs = append(defs, llm.ToolDef{
+			Name:        ts.Name,
+			Description: ts.Description,
+			Parameters:  ts.Parameters,
+		})
+	}
+
+	return defs
+}
+
+// Retrieves relevant memory entries for the user text and formats
+// them for injection. Returns empty string if no retriever or no
+// results. Deduplicates against existing session messages to avoid
+// redundant context.
+func retrieveMemoryContext(
+	ctx context.Context,
+	userText string,
+	sess *session.Session,
+	retriever *memory.Retriever,
+) string {
+	if retriever == nil {
+		return ""
+	}
+
+	result, rErr := retriever.Retrieve(ctx, userText)
+	if rErr != nil || len(result.Entries) == 0 {
+		return ""
+	}
+
+	deduped := memory.DedupMemoryContext(
+		result.Entries, sess.Messages(),
+	)
+
+	return memory.FormatMemoryContext(
+		deduped, retriever.ContextBudget(),
+	)
+}
+
+// Returns session messages with memory and ledger context injected,
+// forming the stable base for the cacheable prefix.
+func buildBaseHistory(
+	sess *session.Session,
+	memoryCtx, ledgerCtx string,
+) []session.Message {
+	baseHistory := sess.Messages()
+	if memoryCtx != "" {
+		baseHistory = memory.InjectMemoryContext(
+			baseHistory, memoryCtx,
+		)
+	}
+	// Inject ledger context after memory context.
+	if ledgerCtx != "" {
+		baseHistory = memory.InjectMemoryContext(
+			baseHistory, ledgerCtx,
+		)
+	}
+
+	return baseHistory
+}
+
+// Constructs the message prefix that is byte-identical across all
+// iterations within a single turn. Includes system prompt and base
+// history (with memory/ledger). Used for provider prompt caching.
+func buildCacheablePrefix(
+	sys string,
+	baseHistory []session.Message,
+) []llm.Message {
+	prefix := make([]llm.Message, 0, 1+len(baseHistory))
+	prefix = append(prefix, llm.Message{
+		Role:    "system",
+		Content: sys,
 	})
 
-	msgs := make([]llm.Message, len(cacheablePrefix),
-		len(cacheablePrefix)+len(pending))
-	copy(msgs, cacheablePrefix)
+	for _, m := range baseHistory {
+		prefix = append(prefix, llm.Message{
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolName:   m.ToolName,
+			ToolCallID: m.ToolCallID,
+			ToolCalls:  m.ToolCalls,
+		})
+	}
+
+	return prefix
+}
+
+// Constructs the full message list for an LLM request by combining
+// the cacheable prefix with pending messages.
+func buildIterationMessages(
+	prefix []llm.Message,
+	pending []session.Message,
+) []llm.Message {
+	msgs := make([]llm.Message, len(prefix), len(prefix)+len(pending))
+	copy(msgs, prefix)
+
 	for _, m := range pending {
 		msgs = append(msgs, llm.Message{
 			Role:       m.Role,
@@ -869,6 +643,287 @@ func RunTurnWithToolsStream(
 			ToolCalls:  m.ToolCalls,
 		})
 	}
+
+	return msgs
+}
+
+// Handles the full lifecycle of a single tool call: permission
+// evaluation, execution, memory capture, error formatting, output
+// compression, secret redaction, and event emission. Returns the
+// final redacted result string to append to the pending messages.
+// Any execution errors are already incorporated into the returned
+// string. The UI event receives the raw (unredacted) result, while
+// the returned string has secrets stripped via redact.SecretString
+// so the LLM provider never sees credentials.
+// degraded, when non-nil, collects structured degraded diagnostics
+// for surfacing at the top of the final response.
+//
+// Key design: permission evaluation and tool execution are kept as
+// sequential operations within this function rather than separate
+// helpers because they share mutable state (toolOverrides) and the
+// control flow (early returns on permission deny) is tightly coupled.
+func processToolCall(
+	ctx context.Context,
+	tc llm.ToolCall,
+	registry *tools.Registry,
+	toolOverrides map[string]bool,
+	toolRules map[string]*tools.RuleSet,
+	permFunc ToolPermissionFunc,
+	shellEnabled bool,
+	mode string,
+	store memory.Store,
+	compressor *ctxcomp.Compressor,
+	onEvent AgentEventFunc,
+	statusGen *StatusGenerator,
+	degraded *[]*health.Degraded,
+) string {
+	cmd := extractCommand(tc.Name, tc.Args)
+	argsBytes := json.RawMessage(tc.Args)
+
+	// Emit tool-start event.
+	if onEvent != nil {
+		onEvent(AgentEvent{
+			Type: "tool-start",
+			Name: tc.Name,
+			Info: cmd,
+		})
+	}
+
+	// Async status description generation: fire-and-forget.
+	// The goroutine produces a short present-tense label and
+	// emits a tool-status event when ready. Context checks
+	// prevent goroutine leaks on cancellation.
+	if statusGen != nil && onEvent != nil {
+		go func(name, desc, command string) {
+			// Exit early if context is already cancelled
+			// to avoid unnecessary Generate calls.
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			desc = statusGen.Generate(ctx, name, desc, command)
+			if desc == "" {
+				return
+			}
+			select {
+			case <-ctx.Done():
+			default:
+				onEvent(AgentEvent{
+					Type:   "tool-status",
+					Name:   name,
+					Status: desc,
+				})
+			}
+		}(tc.Name, toolDescription(registry, tc.Name), cmd)
+	}
+
+	var result string
+	var runErr error
+
+	// Permission evaluation: check tool-level perm + rule set
+	// before execution. When registry is nil or tool is not found,
+	// short-circuit to error without further checks.
+	if registry == nil {
+		result = "error: tool not found"
+	} else if tool, ok := registry.Lookup(tc.Name); ok {
+		if !toolOverrides[tc.Name] {
+			action, reason, rulePattern, ruleAction, pErr := tools.EvaluateToolPermission(
+				tool.PermLevel(), cmd, toolRules[tc.Name],
+			)
+			if pErr != nil {
+				result = "error: " + pErr.Error()
+			} else if action == "ask" {
+				// Default allow preserves v1 behavior
+				// when no interactive func is wired.
+				resp := PermAllow
+				if permFunc != nil {
+					resp = permFunc(tc.Name, cmd, reason)
+				}
+				switch resp {
+				case PermDeny:
+					result = fmt.Sprintf(
+						"error: permission denied for %s: %s",
+						tc.Name, cmd,
+					)
+				case PermAllowAll:
+					toolOverrides[tc.Name] = true
+				case PermAllow:
+					// fall through to execute
+				}
+			}
+
+			if auditLog := tools.AuditLoggerFrom(ctx); auditLog != nil {
+				decision := "allow"
+				if result != "" && strings.HasPrefix(result, "error: permission denied") {
+					decision = "deny"
+				}
+				auditLog.LogPermission(audit.PermissionAudit{
+					SessionID:   tools.SessionIDFrom(ctx),
+					Tool:        tc.Name,
+					Command:     string(tools.RedactArgs(argsBytes)),
+					RulePattern: rulePattern,
+					RuleAction:  ruleAction,
+					Decision:    decision,
+					Reason:      reason,
+				})
+			}
+		}
+	} else {
+		result = "error: tool not found"
+	}
+
+	// Execute tool if no permission error.
+	if result == "" && registry != nil {
+		// Reject shell tool when not enabled; other
+		// tools (ssh/sudo/aws) still work.
+		if tc.Name == "shell" && !shellEnabled {
+			result = "error: shell tool disabled " +
+				"(shell_enabled=false)"
+		} else if mode == "diagnose" &&
+			(tc.Name == "shell" ||
+				tc.Name == "sudo" || tc.Name == "ssh") {
+			// CheckMutating guard for tools that accept a
+			// command field in diagnose mode.
+			var sa struct {
+				Command string `json:"command"`
+			}
+			if uErr := json.Unmarshal(
+				argsBytes, &sa,
+			); uErr == nil && sa.Command != "" {
+				if mErr := tools.CheckMutating(
+					sa.Command,
+				); mErr != nil {
+					result = "error: " + mErr.Error()
+				} else {
+					result, runErr = registry.Run(
+						ctx, tc.Name,
+						argsBytes,
+					)
+				}
+			} else {
+				result = "error: diagnose mode " +
+					"rejected " + tc.Name +
+					" call with invalid or" +
+					" empty command"
+			}
+		} else {
+			result, runErr = registry.Run(
+				ctx, tc.Name,
+				argsBytes,
+			)
+		}
+	}
+
+	// Capture to memory store after tool execution. Failures
+	// are stored with exit code 1 so outcome summaries
+	// distinguish failures from successes (F2).
+	// Heuristic: strings.HasPrefix(result, "error:") marks
+	// permission denials / tool-not-found; a successful
+	// command whose stdout begins with "error:" is a known
+	// false-positive edge case (documented, accepted).
+	captureMemory(store, tc, argsBytes, result, runErr)
+
+	// Collect degraded diagnostics for prefix surfacing.
+	if runErr != nil && degraded != nil {
+		if d, ok := health.AsDegraded(runErr); ok {
+			*degraded = append(*degraded, d)
+		}
+	}
+
+	// Preserve partial output on error; else pure error string.
+	if runErr != nil {
+		if result != "" {
+			result = result + "\nerror: " + runErr.Error()
+		} else {
+			result = "error: " + runErr.Error()
+		}
+	}
+
+	// Compress large tool outputs.
+	if compressor != nil {
+		result = compressor.CompressToolOutput(result)
+	}
+
+	// Emit tool-end event with the raw result so the UI displays
+	// the full tool output (including any secrets) to the user.
+	if onEvent != nil {
+		status := "done"
+		if runErr != nil {
+			status = "error: " + runErr.Error()
+		}
+		onEvent(AgentEvent{
+			Type:   "tool-end",
+			Name:   tc.Name,
+			Info:   status,
+			Output: result,
+		})
+	}
+
+	// Redact secrets from tool output before returning to the LLM
+	// context. The raw result is emitted to the UI above, but the
+	// LLM must never see credentials captured in tool output such
+	// as API keys, passwords, or tokens.
+	return redact.SecretString(result)
+}
+
+// Records a tool execution result in the memory store. Failures
+// are stored with exit code 1 so outcome summaries can distinguish
+// failures from successes. The "command" field is extracted from
+// tool args when available.
+func captureMemory(
+	store memory.Store,
+	tc llm.ToolCall,
+	argsBytes json.RawMessage,
+	result string,
+	runErr error,
+) {
+	if store == nil || result == "" {
+		return
+	}
+
+	var parsed struct {
+		Command string `json:"command"`
+	}
+
+	commandStr := tc.Args
+	if json.Unmarshal(argsBytes, &parsed) == nil &&
+		parsed.Command != "" {
+		commandStr = parsed.Command
+	}
+
+	exitCode := 0
+	if runErr != nil ||
+		strings.HasPrefix(result, "error:") {
+		exitCode = 1
+	}
+
+	memory.CaptureToolResult(
+		store, memory.DefaultSessionID,
+		tc.Name, commandStr, tc.Args, result, exitCode,
+	)
+}
+
+// Handles the case where the tool loop exhausted all iterations.
+// Appends a summary prompt, makes one final Chat without tools, and
+// returns the summary. Falls back to a generic limit message if the
+// summary LLM call fails.
+func finishIterationLimit(
+	ctx context.Context,
+	p llm.Provider,
+	sess *session.Session,
+	pending []session.Message,
+	cacheablePrefix []llm.Message,
+	model, sys string,
+	modelInfo llm.ModelInfo,
+	maxIterations int,
+) (string, error) {
+	pending = append(pending, session.Message{
+		Role:    "user",
+		Content: MaxStepsPrompt,
+	})
+
+	msgs := buildIterationMessages(cacheablePrefix, pending)
 
 	req := llm.ChatRequest{
 		Model:    model,
@@ -881,11 +936,11 @@ func RunTurnWithToolsStream(
 	// message on any Chat failure below.
 	_ = checkContextWindow(modelInfo, nil, &req, ctx, sess)
 
-	resp, cErr := p.Chat(ctx, req)
-	if cErr != nil {
+	resp, err := p.Chat(ctx, req)
+	if err != nil {
 		slog.Warn("summary LLM call failed, falling back to "+
 			"generic limit message",
-			"error", cErr,
+			"error", err,
 		)
 		reply := "Tool iteration limit reached (" +
 			strconv.Itoa(maxIterations) + " iterations)."
@@ -960,17 +1015,16 @@ func checkContextWindow(
 		return nil
 	}
 
-	// Emergency compression: temporarily switch to aggressive mode and
-	// re-estimate after rebuilding messages from the compressed session.
+	// Emergency compression: force one aggressive pass and re-estimate
+	// after rebuilding messages from the compressed session. The pass
+	// carries its mode override per-call — mutating the shared
+	// compressor would race with concurrent subagents.
 	if compressor != nil {
 		slog.Warn("request exceeds 90% of context window, forcing compression",
 			"estimated", estimated, "limit", limit)
-		origMode := compressor.Config().Mode
-		compressor.SetMode("aggressive")
-		if cErr := compressor.Compress(ctx, sess, modelInfo); cErr != nil {
+		if cErr := compressor.CompressForced(ctx, sess, modelInfo); cErr != nil {
 			slog.Warn("emergency compression failed", "err", cErr)
 		}
-		compressor.SetMode(origMode)
 
 		history := sess.Messages()
 		rebuilt := make([]llm.Message, 0, len(history)+len(req.Messages))
@@ -1003,15 +1057,17 @@ func checkContextWindow(
 }
 
 // Only returns schemas for tools allowed in diagnose mode: shell, ssh,
-// sudo/aws (the latter only if registered), and websearch/webfetch.
+// sudo/aws (the latter only if registered), websearch/webfetch, and
+// ledger_get (read-only, for consulting known-good state).
 func filterDiagnoseSchemas(schemas []tools.ToolSchema) []tools.ToolSchema {
 	allowed := map[string]bool{
-		"shell":     true,
-		"ssh":       true,
-		"sudo":      true,
-		"aws":       true,
-		"websearch": true,
-		"webfetch":  true,
+		"shell":      true,
+		"ssh":        true,
+		"sudo":       true,
+		"aws":        true,
+		"websearch":  true,
+		"webfetch":   true,
+		"ledger_get": true,
 	}
 	filtered := make([]tools.ToolSchema, 0, len(schemas))
 	for _, s := range schemas {
@@ -1029,6 +1085,30 @@ func filterChatSchemas(schemas []tools.ToolSchema) []tools.ToolSchema {
 	allowed := map[string]bool{
 		"websearch": true,
 		"webfetch":  true,
+	}
+	filtered := make([]tools.ToolSchema, 0, len(schemas))
+	for _, s := range schemas {
+		if allowed[s.Name] {
+			filtered = append(filtered, s)
+		}
+	}
+
+	return filtered
+}
+
+// Only returns schemas for tools allowed in code mode: file operations,
+// search, shell, task, and web tools.
+func filterCodeSchemas(schemas []tools.ToolSchema) []tools.ToolSchema {
+	allowed := map[string]bool{
+		"file_read":  true,
+		"file_edit":  true,
+		"file_write": true,
+		"find":       true,
+		"grep":       true,
+		"shell":      true,
+		"task":       true,
+		"websearch":  true,
+		"webfetch":   true,
 	}
 	filtered := make([]tools.ToolSchema, 0, len(schemas))
 	for _, s := range schemas {
@@ -1058,26 +1138,50 @@ func toolDescription(registry *tools.Registry, name string) string {
 func extractCommand(toolName, argsJSON string) string {
 	argsBytes := []byte(argsJSON)
 	switch toolName {
-	case "shell", "sudo":
+	// shell, sudo, and ssh all carry a "command" JSON field.
+	case tools.ToolShell, tools.ToolSudo, tools.ToolSSH:
 		var sa struct {
 			Command string `json:"command"`
 		}
 		if json.Unmarshal(argsBytes, &sa) == nil {
 			return sa.Command
 		}
-	case "ssh":
-		var sa struct {
-			Command string `json:"command"`
-		}
-		if json.Unmarshal(argsBytes, &sa) == nil {
-			return sa.Command
-		}
-	case "aws":
+	case tools.ToolAWS:
 		var sa struct {
 			Args []string `json:"args"`
 		}
 		if json.Unmarshal(argsBytes, &sa) == nil && len(sa.Args) > 0 {
 			return "aws " + strings.Join(sa.Args, " ")
+		}
+	// File tools carry a "path" JSON field.
+	case tools.ToolFileRead, tools.ToolFileEdit, tools.ToolFileWrite:
+		var sa struct {
+			Path string `json:"path"`
+		}
+		if json.Unmarshal(argsBytes, &sa) == nil && sa.Path != "" {
+			return toolName + " " + sa.Path
+		}
+	case tools.ToolGrep:
+		var sa struct {
+			Pattern string `json:"pattern"`
+			Path    string `json:"path"`
+		}
+		if json.Unmarshal(argsBytes, &sa) == nil && sa.Pattern != "" {
+			if sa.Path != "" {
+				return "grep " + sa.Pattern + " " + sa.Path
+			}
+			return "grep " + sa.Pattern
+		}
+	case tools.ToolFind:
+		var sa struct {
+			Pattern string `json:"pattern"`
+			Path    string `json:"path"`
+		}
+		if json.Unmarshal(argsBytes, &sa) == nil && sa.Pattern != "" {
+			if sa.Path != "" {
+				return "find " + sa.Pattern + " " + sa.Path
+			}
+			return "find " + sa.Pattern
 		}
 	}
 	return toolName

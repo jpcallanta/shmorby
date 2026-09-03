@@ -26,7 +26,7 @@ type Model struct {
 	sel            Selection
 }
 
-// New creates a Model with the given dimensions.
+// Creates a Model with the given dimensions.
 func New(width, height int) Model {
 	vp := viewport.New(width, height)
 	return Model{
@@ -35,37 +35,37 @@ func New(width, height int) Model {
 	}
 }
 
-// Update delegates to the underlying viewport for key events.
+// Delegates to the underlying viewport for key events.
 func (m *Model) Update(msg tea.Msg) {
 	m.vp, _ = m.vp.Update(msg)
 }
 
-// View returns the viewport's rendered content.
+// Returns the viewport's rendered content.
 func (m Model) View() string {
 	return m.vp.View()
 }
 
-// Width returns the viewport width.
+// Returns the viewport width.
 func (m Model) Width() int {
 	return m.vp.Width
 }
 
-// SetWidth updates the viewport width without recreating it.
+// Updates the viewport width without recreating it.
 func (m *Model) SetWidth(w int) {
 	m.vp.Width = w
 }
 
-// Height returns the viewport height.
+// Returns the viewport height.
 func (m Model) Height() int {
 	return m.vp.Height
 }
 
-// SetHeight updates the viewport height without recreating it.
+// Updates the viewport height without recreating it.
 func (m *Model) SetHeight(h int) {
 	m.vp.Height = h
 }
 
-// SetContent replaces the content and re-enables follow mode.
+// Replaces the content and re-enables follow mode.
 func (m *Model) SetContent(content string) {
 	m.vp.SetContent(content)
 	if m.followMode {
@@ -73,22 +73,22 @@ func (m *Model) SetContent(content string) {
 	}
 }
 
-// ScrollPercent returns the current scroll position as a percentage.
+// Returns the current scroll position as a percentage.
 func (m Model) ScrollPercent() float64 {
 	return m.vp.ScrollPercent()
 }
 
-// AtBottom returns true if viewport is scrolled to the very bottom.
+// Reports whether the viewport is scrolled to the very bottom.
 func (m Model) AtBottom() bool {
 	return m.vp.ScrollPercent() >= 1.0
 }
 
-// FollowMode returns whether follow mode is enabled.
+// Reports whether follow mode is enabled.
 func (m Model) FollowMode() bool {
 	return m.followMode
 }
 
-// SetFollowMode enables or disables follow mode.
+// Enables or disables follow mode.
 func (m *Model) SetFollowMode(enabled bool) {
 	m.followMode = enabled
 	if enabled {
@@ -97,18 +97,18 @@ func (m *Model) SetFollowMode(enabled bool) {
 	}
 }
 
-// NewContent returns whether new content has arrived while paused.
+// Reports whether new content has arrived while paused.
 func (m Model) NewContent() bool {
 	return m.newContent
 }
 
-// ScrollUp scrolls up by the given number of lines.
+// Scrolls up by the given number of lines.
 func (m *Model) ScrollUp(n int) {
 	m.vp.ScrollUp(n)
 	m.checkFollowMode()
 }
 
-// ScrollDown scrolls down by the given number of lines.
+// Scrolls down by the given number of lines.
 // Re-enables follow mode if the user reaches the bottom.
 func (m *Model) ScrollDown(n int) {
 	m.vp.ScrollDown(n)
@@ -117,13 +117,13 @@ func (m *Model) ScrollDown(n int) {
 	}
 }
 
-// ScrollHalfPageUp scrolls up by half the viewport height.
+// Scrolls up by half the viewport height.
 func (m *Model) ScrollHalfPageUp() {
 	m.vp.HalfPageUp()
 	m.checkFollowMode()
 }
 
-// ScrollHalfPageDown scrolls down by half the viewport height.
+// Scrolls down by half the viewport height.
 // Re-enables follow mode if the user reaches the bottom.
 func (m *Model) ScrollHalfPageDown() {
 	m.vp.HalfPageDown()
@@ -132,25 +132,25 @@ func (m *Model) ScrollHalfPageDown() {
 	}
 }
 
-// GotoTop scrolls to the top of the content.
+// Scrolls to the top of the content.
 func (m *Model) GotoTop() {
 	m.vp.GotoTop()
 	m.followMode = false
 }
 
-// GotoBottom scrolls to the bottom and re-enables follow mode.
+// Scrolls to the bottom and re-enables follow mode.
 func (m *Model) GotoBottom() {
 	m.SetFollowMode(true)
 }
 
-// checkFollowMode turns off follow mode if user has scrolled away from bottom.
+// Turns off follow mode if user has scrolled away from bottom.
 func (m *Model) checkFollowMode() {
 	if m.followMode && !m.AtBottom() {
 		m.followMode = false
 	}
 }
 
-// NotifyContentAdded should be called after new content is appended.
+// Should be called after new content is appended.
 // If follow mode is paused, it sets the new-content indicator.
 func (m *Model) NotifyContentAdded() {
 	if !m.followMode {
@@ -158,12 +158,12 @@ func (m *Model) NotifyContentAdded() {
 	}
 }
 
-// SelectionMode returns whether output selection is active.
+// Reports whether output selection is active.
 func (m Model) SelectionMode() bool {
 	return m.selectionMode
 }
 
-// SetSelectionMode toggles selection mode.
+// Toggles selection mode.
 func (m *Model) SetSelectionMode(enabled bool) {
 	m.selectionMode = enabled
 	if !enabled {
@@ -173,17 +173,17 @@ func (m *Model) SetSelectionMode(enabled bool) {
 	}
 }
 
-// SelectionStart returns the start index of the selection.
+// Returns the start index of the selection.
 func (m Model) SelectionStart() int {
 	return m.selectionStart
 }
 
-// SelectionEnd returns the end index of the selection.
+// Returns the end index of the selection.
 func (m Model) SelectionEnd() int {
 	return m.selectionEnd
 }
 
-// MouseMsg handles mouse events for selection when mouse tracking is enabled.
+// Handles mouse events for selection when mouse tracking is enabled.
 func (m *Model) MouseMsg(msg tea.MouseMsg) {
 	// Dragging in selection mode: track mouse position.
 	if m.selectionMode && m.sel.Dragging {
@@ -209,17 +209,17 @@ func (m *Model) MouseMsg(msg tea.MouseMsg) {
 	m.checkFollowMode()
 }
 
-// DragSelection returns the selection boundaries from a mouse drag.
+// Returns the selection boundaries from a mouse drag.
 func (m *Model) DragSelection() (start, end int, active bool) {
 	return m.sel.StartLine, m.sel.EndLine, m.sel.Active
 }
 
-// IsDragging reports whether a mouse drag is in progress.
+// Reports whether a mouse drag is in progress.
 func (m *Model) IsDragging() bool {
 	return m.sel.Dragging
 }
 
-// handleDrag updates selection during mouse drag.
+// Updates selection during mouse drag.
 func (m *Model) handleDrag(msg tea.MouseMsg) {
 	if msg.Action == tea.MouseActionRelease &&
 		msg.Button == tea.MouseButtonLeft {

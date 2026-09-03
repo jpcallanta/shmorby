@@ -7,7 +7,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"runtime"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"golang.org/x/term"
@@ -52,6 +56,13 @@ type REPL struct {
 	oldState     *term.State
 	inRaw        bool
 
+	// Suspension state for SIGTSTP/SIGCONT handling.
+	// Track whether we were suspended so readLine can
+	// handle the interrupted stdin read gracefully.
+	suspended      atomic.Bool
+	savedOld       atomic.Value  // stores *term.State (atomic, race-free)
+	jobControlDone chan struct{} // closed in Run's defer to stop handler
+
 	// Streaming support for non-TUI mode.
 	streamEnabled       bool
 	thinkingDone        chan struct{}
@@ -62,14 +73,22 @@ type REPL struct {
 	// NoTUI disables raw mode, spinners, and ANSI formatting.
 	NoTUI bool
 
-	// Phase 32: runtime config overrides.
+	// Runtime config overrides.
 	ConfigOverrider *ConfigOverrider
 
-	// Phase 34: subagent orchestrator for permission propagation.
+	// Subagent orchestrator for permission propagation.
 	Orchestrator *tools.TaskOrchestrator
 
-	// Phase 37: async status description generator.
+	// Async status description generator.
 	StatusGen *StatusGenerator
+
+	// Pre-formatted ledger context for injection.
+	// Empty string disables ledger context injection.
+	LedgerCtx string
+
+	// ProjectRoot is the resolved project directory for the
+	// environment hint in the system prompt (empty = default).
+	ProjectRoot string
 }
 
 // Starts the interactive REPL loop reading from In and writing to Out.
@@ -87,15 +106,34 @@ func (r *REPL) Run(ctx context.Context) error {
 			oldState, termErr := term.MakeRaw(int(os.Stdin.Fd()))
 			if termErr == nil {
 				r.oldState = oldState
+				r.savedOld.Store(oldState)
 				r.inRaw = true
 			}
 		}
 	}
 
+	// Set up SIGTSTP/SIGCONT handling for proper job control.
+	// Without this, suspending (Ctrl+Z) leaves the terminal in raw
+	// mode and resuming (fg) corrupts the display.
+	if r.inRaw {
+		r.setupJobControl()
+	}
+
 	defer func() {
+		// Tear down job control handler before restoring the
+		// terminal so the signal goroutine cannot race with
+		// the restore below.
+		if r.jobControlDone != nil {
+			close(r.jobControlDone)
+		}
 		r.killSpinners()
 		if r.inRaw {
-			term.Restore(int(os.Stdin.Fd()), r.oldState)
+			// Load from savedOld (atomic) — the signal handler
+			// updates savedOld after each resume, so this is
+			// always the most recent cooked-mode state.
+			if saved, ok := r.savedOld.Load().(*term.State); ok && saved != nil {
+				term.Restore(int(os.Stdin.Fd()), saved)
+			}
 		}
 		if r.streamEnabled {
 			fmt.Fprint(r.Out, ansiReset)
@@ -204,6 +242,99 @@ func (r *REPL) killSpinners() {
 	}
 }
 
+// setupJobControl installs SIGTSTP/SIGCONT handlers to properly
+// support Ctrl+Z suspend/resume when the terminal is in raw mode.
+//
+// On SIGTSTP: restores the terminal to cooked mode so the shell can
+// display its prompt, then re-raises SIGTSTP to actually stop.
+//
+// On SIGCONT: re-enters raw mode, redraws the prompt, and sets a
+// flag so readLine knows the stdin read was interrupted by a stop.
+//
+// Teardown: closing jobControlDone stops the signal handler and
+// unregisters from the signal package.
+func (r *REPL) setupJobControl() {
+	if runtime.GOOS == "windows" {
+		return
+	}
+
+	sigCh := make(chan os.Signal, 1)
+	done := make(chan struct{})
+	r.jobControlDone = done
+
+	// Guard: only store if oldState is non-nil to avoid a typed-nil
+	// that would pass the type assertion but panic term.Restore.
+	if r.oldState != nil {
+		r.savedOld.Store(r.oldState)
+	}
+
+	signal.Notify(sigCh, sigTSTP, sigCONT)
+
+	go func() {
+		for {
+			select {
+			case <-done:
+				signal.Stop(sigCh)
+				return
+			case sig := <-sigCh:
+				if sig != sigTSTP {
+					continue
+				}
+				// Restore terminal to cooked mode before the
+				// kernel suspends the process. Without this
+				// the tty stays in raw mode and the shell's
+				// "suspended" message is garbled.
+				if r.inRaw {
+					if saved, ok := r.savedOld.Load().(*term.State); ok && saved != nil {
+						term.Restore(int(os.Stdin.Fd()), saved)
+					}
+				}
+				r.suspended.Store(true)
+
+				// Re-raise SIGTSTP with default handler so the
+				// process actually stops. This call does not
+				// return until SIGCONT arrives.
+				signal.Stop(sigCh)
+				p, _ := os.FindProcess(os.Getpid())
+				if err := p.Signal(sigTSTP); err != nil {
+					// Terminal already restored; log and
+					// leave suspended=true so the REPL can
+					// detect the broken state.
+					fmt.Fprintf(r.Out,
+						"warning: re-raise SIGTSTP failed: %v\n",
+						err,
+					)
+				}
+
+				// --- process resumes here after SIGCONT ---
+
+				// Re-enter raw mode now that we're running again.
+				if r.inRaw {
+					oldState, err := term.MakeRaw(int(os.Stdin.Fd()))
+					if err == nil {
+						// Only write savedOld — never
+						// oldState. The defer in Run
+						// loads from savedOld, so this
+						// is the single source of truth
+						// and avoids a data race.
+						r.savedOld.Store(oldState)
+					}
+				}
+
+				// Clear the interrupted-read flag and redraw the
+				// prompt so the user sees a clean input line.
+				r.suspended.Store(false)
+				fmt.Fprint(r.Out, Prompt())
+
+				// Re-register for both signals — signal.Stop
+				// above removed all registrations, so both
+				// must be re-added for the next cycle.
+				signal.Notify(sigCh, sigTSTP, sigCONT)
+			}
+		}
+	}()
+}
+
 // runPlainTurn executes a turn with plain text output — no spinners,
 // no streaming, no ANSI. Used in --no-tui mode.
 // In terminal mode a dot progress indicator replaces the spinner.
@@ -282,7 +413,8 @@ func (r *REPL) runPlainTurn(ctx context.Context, line string) (string, error) {
 			r.Store, r.Retriever,
 			r.Compressor, r.ModelInfo,
 			onEvent, permFunc, r.ToolRules,
-			r.StatusGen,
+			r.StatusGen, r.LedgerCtx,
+			r.ProjectRoot,
 		)
 	} else {
 		reply, err = RunTurn(
@@ -290,6 +422,8 @@ func (r *REPL) runPlainTurn(ctx context.Context, line string) (string, error) {
 			r.Mode, r.Scope, r.Override, r.Model, line,
 			r.Store, r.Retriever,
 			r.Compressor, r.ModelInfo,
+			r.LedgerCtx,
+			r.ProjectRoot,
 		)
 	}
 
@@ -400,7 +534,8 @@ func (r *REPL) runStreamTurn(
 			r.Store, r.Retriever,
 			r.Compressor, r.ModelInfo,
 			onEvent, onDelta, permFunc, r.ToolRules,
-			r.StatusGen,
+			r.StatusGen, r.LedgerCtx,
+			r.ProjectRoot,
 		)
 
 		if err != nil && strings.Contains(err.Error(), "streaming not") {
@@ -411,7 +546,8 @@ func (r *REPL) runStreamTurn(
 				r.Store, r.Retriever,
 				r.Compressor, r.ModelInfo,
 				onEvent, permFunc, r.ToolRules,
-				r.StatusGen,
+				r.StatusGen, r.LedgerCtx,
+				r.ProjectRoot,
 			)
 		}
 	} else {
@@ -420,6 +556,8 @@ func (r *REPL) runStreamTurn(
 			r.Mode, r.Scope, r.Override, r.Model, line,
 			r.Store, r.Retriever,
 			r.Compressor, r.ModelInfo,
+			r.LedgerCtx,
+			r.ProjectRoot,
 		)
 	}
 
@@ -444,6 +582,11 @@ func (r *REPL) runStreamTurn(
 	return reply, err
 }
 
+// maxLineBytes bounds the raw-mode input line so a multi-megabyte
+// paste cannot grow the line buffer without limit. Non-raw
+// mode is already bounded by bufio.Scanner's 64 KiB token limit.
+const maxLineBytes = 1 << 20
+
 // readLine reads one line of input. In raw mode (terminal) it reads
 // character-by-character with history navigation via up/down arrows.
 // In non-raw mode (piped stdin) it falls back to bufio.Scanner.
@@ -464,12 +607,34 @@ func (r *REPL) readLine() (string, error) {
 	line := make([]byte, 0, 256)
 	buf := make([]byte, 1)
 
+	// Once the cap is hit the remainder of the line is consumed and
+	// discarded until the newline, so the error cannot truncate an
+	// otherwise valid next command.
+	tooLong := false
+
+	// Bound EINTR retries to avoid an infinite loop if the OS
+	// keeps delivering signals. 10 retries covers the normal
+	// suspend/resume case with ample margin.
+	eintrRetries := 0
+	const maxEintrRetries = 10
+
 	for {
 		n, err := os.Stdin.Read(buf)
 		if err != nil {
+			// EINTR means a signal interrupted the read (e.g.
+			// SIGTSTP). The job-control handler restores the
+			// terminal; retry the read. We don't gate on the
+			// suspended flag because there's a race: the handler
+			// may clear it before readLine checks, which would
+			// otherwise kill the REPL.
+			if errors.Is(err, syscall.EINTR) && eintrRetries < maxEintrRetries {
+				eintrRetries++
+				continue
+			}
 
 			return "", err
 		}
+		eintrRetries = 0 // reset on successful read
 		if n == 0 {
 			continue
 		}
@@ -478,6 +643,14 @@ func (r *REPL) readLine() (string, error) {
 		switch {
 		case c == '\r' || c == '\n':
 			fmt.Fprint(r.Out, "\r\n")
+			if tooLong {
+				fmt.Fprintf(r.Out, "error: input too long "+
+					"(limit %d bytes); line discarded\r\n",
+					maxLineBytes)
+				line = line[:0]
+				tooLong = false
+				continue
+			}
 			result := string(line)
 			if result != "" {
 				r.history.Add(result)
@@ -533,16 +706,52 @@ func (r *REPL) readLine() (string, error) {
 			}
 
 		case c == '\t':
-			line = append(line, c)
-			fmt.Fprint(r.Out, "\t")
+			if !tooLong && len(line) < maxLineBytes {
+				line = append(line, c)
+				fmt.Fprint(r.Out, "\t")
+			} else {
+				tooLong = true
+			}
 
 		default:
 			if c >= 32 {
+				// Stop appending (and echoing) at the cap so
+				// a huge paste cannot grow the buffer or the
+				// scrollback.
+				if tooLong || len(line) >= maxLineBytes {
+					tooLong = true
+					continue
+				}
 				line = append(line, c)
 				fmt.Fprint(r.Out, string(c))
 			}
 		}
 	}
+}
+
+// Prompts for and reads one secret line. In raw (terminal) mode the
+// echo is suppressed via term.ReadPassword, which briefly re-enables
+// canonical mode and restores the raw state on return. In piped mode
+// stdin is not a terminal — there is nothing to mask — so the line
+// comes from the scanner instead.
+func (r *REPL) readSecret(prompt string) (string, error) {
+	fmt.Fprint(r.Out, prompt)
+
+	if !r.inRaw {
+		if r.scanner == nil || !r.scanner.Scan() {
+			return "", fmt.Errorf("no input")
+		}
+
+		return strings.TrimSpace(r.scanner.Text()), nil
+	}
+
+	keyBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprint(r.Out, "\r\n")
+	if err != nil {
+		return "", fmt.Errorf("read secret: %w", err)
+	}
+
+	return strings.TrimSpace(string(keyBytes)), nil
 }
 
 // Handles slash commands. Returns (handled, shouldQuit, error).
@@ -617,26 +826,37 @@ func (r *REPL) handleCommand(line string) (bool, bool, error) {
 		return true, false, nil
 
 	case "/apikey":
-		if len(parts) >= 2 {
-			if r.ConfigOverrider == nil {
-				fmt.Fprintln(
-					r.Out, "Config override not available.",
-				)
-				return true, false, nil
-			}
-			value := strings.Join(parts[1:], " ")
-			msg, err := r.ConfigOverrider.Set("apikey", value)
-			if err != nil {
-				fmt.Fprintf(r.Out, "error: %v\n", err)
-				return true, false, nil
-			}
-			fmt.Fprintln(r.Out, msg)
+		if r.ConfigOverrider == nil {
+			fmt.Fprintln(r.Out, "Config override not available.")
+
 			return true, false, nil
 		}
-		fmt.Fprintln(
-			r.Out,
-			"apikey is set (use /apikey <key> to change)",
-		)
+		// The old inline form echoed the key onto the screen and
+		// into terminal scrollback; it is ignored now and the key
+		// always comes from a masked prompt.
+		if len(parts) >= 2 {
+			fmt.Fprintln(r.Out,
+				"note: inline keys are visible in scrollback; "+
+					"using the prompt instead")
+		}
+		key, err := r.readSecret("Enter API key: ")
+		if err != nil {
+			fmt.Fprintf(r.Out, "error: %v\n", err)
+
+			return true, false, nil
+		}
+		if key == "" {
+			fmt.Fprintln(r.Out, "empty input; apikey unchanged.")
+
+			return true, false, nil
+		}
+		msg, err := r.ConfigOverrider.Set("apikey", key)
+		if err != nil {
+			fmt.Fprintf(r.Out, "error: %v\n", err)
+
+			return true, false, nil
+		}
+		fmt.Fprintln(r.Out, msg)
 
 		return true, false, nil
 
@@ -890,7 +1110,7 @@ func (r *REPL) handleContextCommand(parts []string) (bool, bool, error) {
 		fmt.Fprintf(r.Out, "  Compression threshold: %.0f%%\n", cfg.Threshold*100)
 		fmt.Fprintf(r.Out,
 			"  Compressions this session: %d\n",
-			r.Compressor.CompressionCount)
+			r.Compressor.CompressionCount.Load())
 		fmt.Fprintf(r.Out, "  Mode: %s\n", cfg.Mode)
 		return true, false, nil
 
@@ -907,7 +1127,7 @@ func (r *REPL) handleContextCommand(parts []string) (bool, bool, error) {
 			fmt.Fprintln(r.Out, "Context compression not enabled.")
 			return true, false, nil
 		}
-		offloaded := r.Compressor.OffloadCount
+		offloaded := r.Compressor.OffloadCount.Load()
 		fmt.Fprintf(r.Out, "Offloaded messages: %d\n", offloaded)
 		return true, false, nil
 
@@ -969,7 +1189,7 @@ SLASH COMMANDS
   /reset             Clear conversation history
   /model <name>      Switch LLM model
   /platform <name>   Switch LLM provider
-  /apikey <key>      Set API key for current provider
+  /apikey            Set API key (hidden prompt)
   /agent <mode>      Switch agent mode
   /scope             Show loaded scope context
   /memory            Memory management
@@ -998,6 +1218,7 @@ SLASH COMMANDS
   ctrl+p             Command palette
   ctrl+r             Reverse-i-search input history
   ctrl+c             Quit shmorby
+  ctrl+z             Suspend (fg to resume)
   ctrl+v             Paste from clipboard
   ctrl+l             Toggle log section
   ctrl+t             Toggle thinking block
@@ -1076,11 +1297,24 @@ func (r *REPL) toolPermissionFunc(
 
 	if r.inRaw {
 		buf := make([]byte, 1)
+		// Bound EINTR retries for the same reason as readLine:
+		// Ctrl+Z during a permission prompt must not silently
+		// return PermDeny.
+		eintrRetries := 0
+		const maxEintrRetries = 10
 		for {
 			n, err := os.Stdin.Read(buf)
-			if err != nil || n == 0 {
+			if err != nil {
+				if errors.Is(err, syscall.EINTR) && eintrRetries < maxEintrRetries {
+					eintrRetries++
+					continue
+				}
 
 				return PermDeny
+			}
+			eintrRetries = 0
+			if n == 0 {
+				continue
 			}
 			switch buf[0] {
 			case 'y', 'Y':
@@ -1100,7 +1334,7 @@ func (r *REPL) toolPermissionFunc(
 	}
 
 	// Use single-byte reads for non-raw mode to avoid bufio.Scanner
-	// over-reading past the permission response (issue #21).
+	// over-reading past the permission response.
 	buf := make([]byte, 1)
 	var line []byte
 	for {

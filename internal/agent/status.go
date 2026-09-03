@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"unicode/utf8"
+
+	"shmorby/internal/tools"
 )
 
 const (
@@ -17,10 +19,9 @@ const (
 // metadata and arguments without any LLM call.
 type StatusGenerator struct{}
 
-// NewStatusGenerator creates a generator. The provider parameter is
-// accepted for API compatibility but ignored — descriptions are
-// generated from tool metadata.
-func NewStatusGenerator(_ interface{}, _ string) *StatusGenerator {
+// NewStatusGenerator creates a generator. Descriptions are generated
+// from tool metadata — no provider or model name is needed.
+func NewStatusGenerator() *StatusGenerator {
 	return &StatusGenerator{}
 }
 
@@ -39,19 +40,19 @@ func (g *StatusGenerator) Generate(
 // tool name and the raw command/args string.
 func describeTool(toolName, command string) string {
 	switch toolName {
-	case "shell", "sudo":
+	case tools.ToolShell, tools.ToolSudo:
 		return describeShellCommand(command)
-	case "ssh":
+	case tools.ToolSSH:
 		return describeSSHCommand(command)
-	case "aws":
+	case tools.ToolAWS:
 		return describeAWSCommand(command)
-	case "find":
+	case tools.ToolFind:
 		return describeFindCommand(command)
-	case "websearch":
+	case tools.ToolWebSearch:
 		return describeWebSearch(command)
-	case "webfetch":
+	case tools.ToolWebFetch:
 		return describeWebFetch(command)
-	case "task":
+	case tools.ToolTask:
 		return describeTask(command)
 	default:
 		return describeGeneric(toolName, command)
@@ -153,19 +154,10 @@ func summarizeCommand(command string) string {
 	if cmd == "" {
 		return command
 	}
-	// For common commands, show the subcommand too.
+	// For common commands, show the subcommand (and next token)
+	// too — e.g. "git commit -m" or "docker ps -a".
 	switch cmd {
-	case "git":
-		tokens := strings.Fields(command)
-		if len(tokens) >= 2 {
-			return strings.Join(tokens[:min(3, len(tokens))], " ")
-		}
-	case "docker":
-		tokens := strings.Fields(command)
-		if len(tokens) >= 2 {
-			return strings.Join(tokens[:min(3, len(tokens))], " ")
-		}
-	case "kubectl":
+	case "git", "docker", "kubectl":
 		tokens := strings.Fields(command)
 		if len(tokens) >= 2 {
 			return strings.Join(tokens[:min(3, len(tokens))], " ")
@@ -194,11 +186,4 @@ func truncate(s string) string {
 	}
 	runes := []rune(s)
 	return string(runes[:statusMaxLen-1]) + "…"
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

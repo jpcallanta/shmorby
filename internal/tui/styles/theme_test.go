@@ -60,7 +60,7 @@ func TestGetTheme_Unknown(t *testing.T) {
 	}
 }
 
-func TestAllThemesHaveKeys(t *testing.T) {
+func TestAllThemes_HaveKeys(t *testing.T) {
 	expected := []string{
 		"catppuccin-mocha",
 		"catppuccin-latte",

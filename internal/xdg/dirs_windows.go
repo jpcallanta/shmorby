@@ -4,16 +4,23 @@ package xdg
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 )
 
-// DefaultWorkDir returns the default working directory for shell tool
+// Returns the default working directory for shell tool
 // commands.
 func DefaultWorkDir() string {
-	return filepath.Join(os.Getenv("LOCALAPPDATA"), "shmorby", "workdir")
+	localAppData := os.Getenv("LOCALAPPDATA")
+	if localAppData == "" {
+		home, _ := os.UserHomeDir()
+		localAppData = filepath.Join(home, "AppData", "Local")
+	}
+
+	return filepath.Join(localAppData, "shmorby", "workdir")
 }
 
-// SystemConfigDir returns the system-level config directory.
+// Returns the system-level config directory.
 func SystemConfigDir() string {
 	progData := os.Getenv("ProgramData")
 	if progData == "" {
@@ -27,7 +34,7 @@ func SystemConfigDir() string {
 	return filepath.Join(progData, "shmorby")
 }
 
-// UserConfigDir returns the user-level config directory.
+// Returns the user-level config directory.
 func UserConfigDir() string {
 	appData := os.Getenv("APPDATA")
 	if appData == "" {
@@ -37,7 +44,7 @@ func UserConfigDir() string {
 	return filepath.Join(appData, "shmorby")
 }
 
-// UserDataDir returns the user-local data directory.
+// Returns the user-local data directory.
 func UserDataDir() string {
 	localAppData := os.Getenv("LOCALAPPDATA")
 	if localAppData == "" {
@@ -47,7 +54,7 @@ func UserDataDir() string {
 	return filepath.Join(localAppData, "shmorby")
 }
 
-// RootPrefix returns the filesystem root prefix for scope walking.
+// Returns the filesystem root prefix for scope walking.
 func RootPrefix() string {
 	wd, err := os.Getwd()
 	if err != nil {
@@ -60,11 +67,21 @@ func RootPrefix() string {
 	return vol + `\`
 }
 
-// DefaultShell returns the OS-preferred shell command.
+// Returns the OS-preferred shell command, preferring
+// pwsh over powershell when available.
 func DefaultShell() string {
+	if _, err := exec.LookPath("pwsh.exe"); err == nil {
+		return "pwsh.exe"
+	}
+
+	if _, err := exec.LookPath("powershell.exe"); err == nil {
+		return "powershell.exe"
+	}
+
 	comspec := os.Getenv("ComSpec")
 	if comspec != "" {
 		return comspec
 	}
+
 	return "powershell.exe"
 }

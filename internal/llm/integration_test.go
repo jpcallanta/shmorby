@@ -12,7 +12,7 @@ import (
 )
 
 // Tests that the Ollama provider can connect to a running local instance.
-// Requires OLLAMA_BASE_URL to be set (per SPEC §11).
+// Requires OLLAMA_BASE_URL to be set.
 // Skipped when unset or when Ollama is not available.
 func TestIntegration_OllamaChat(t *testing.T) {
 	baseURL := os.Getenv("OLLAMA_BASE_URL")

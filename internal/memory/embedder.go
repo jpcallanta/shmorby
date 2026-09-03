@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"shmorby/internal/redact"
 )
 
 // Embedder generates vector embeddings for text.
@@ -19,91 +21,101 @@ type Embedder interface {
 	Dimension() int
 }
 
-// OllamaEmbedder calls Ollama's /api/embeddings endpoint.
+// OllamaEmbedder calls Ollama's /api/embed endpoint (batch-capable,
+// supports Matryoshka dimension truncation for nomic-embed-text).
 type OllamaEmbedder struct {
-	baseURL string
-	model   string
+	baseURL   string
+	model     string
+	dimension int
 }
 
-// NewOllamaEmbedder creates an Ollama-based embedder.
-func NewOllamaEmbedder(baseURL, model string) *OllamaEmbedder {
+// NewOllamaEmbedder creates an Ollama-based embedder. When dimension
+// is 0 the server default is used (no dimensions field sent).
+func NewOllamaEmbedder(baseURL, model string, dimension int) *OllamaEmbedder {
 	if model == "" {
 		model = "nomic-embed-text"
 	}
 
 	return &OllamaEmbedder{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		model:   model,
+		baseURL:   strings.TrimRight(baseURL, "/"),
+		model:     model,
+		dimension: dimension,
 	}
 }
 
 type ollamaEmbedRequest struct {
-	Model  string `json:"model"`
-	Prompt string `json:"prompt"`
+	Model      string   `json:"model"`
+	Input      []string `json:"input"`
+	Dimensions int      `json:"dimensions,omitempty"`
 }
 
 type ollamaEmbedResponse struct {
-	Embedding []float32 `json:"embedding"`
+	Embeddings [][]float32 `json:"embeddings"`
 }
 
-// Embed calls Ollama once per text (no batch support).
+// Embed sends all texts in a single batch request to /api/embed.
+// The endpoint accepts an input array and returns embeddings in
+// index-aligned order. When dimensions is configured (non-zero) the
+// response is Matryoshka-truncated at the server.
 func (e *OllamaEmbedder) Embed(
 	ctx context.Context, texts []string,
 ) ([][]float32, error) {
-	results := make([][]float32, len(texts))
-
-	for i, text := range texts {
-		emb, err := e.embedOne(ctx, text)
-		if err != nil {
-			return nil, fmt.Errorf("embed text %d: %w", i, err)
-		}
-		results[i] = emb
+	req := ollamaEmbedRequest{
+		Model: e.model,
+		Input: texts,
+	}
+	if e.dimension > 0 {
+		req.Dimensions = e.dimension
 	}
 
-	return results, nil
-}
-
-func (e *OllamaEmbedder) embedOne(
-	ctx context.Context, text string,
-) ([]float32, error) {
-	body, err := json.Marshal(ollamaEmbedRequest{
-		Model:  e.model,
-		Prompt: text,
-	})
+	body, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	url := e.baseURL + "/api/embeddings"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url,
-		bytes.NewReader(body))
+	url := e.baseURL + "/api/embed"
+	httpReq, err := http.NewRequestWithContext(
+		ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("exec request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("ollama %d: %s", resp.StatusCode, b)
+		// Limit error response read to prevent OOM from a rogue
+		// server, and redact the body to prevent API key echo-back
+		// from leaking into logs.
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("ollama %d: %s",
+			resp.StatusCode, redact.SecretString(string(b)))
 	}
 
+	// Limit response body to 10 MiB to prevent OOM from a rogue
+	// embedding server returning an extremely large JSON response.
 	var oResp ollamaEmbedResponse
-	if err := json.NewDecoder(resp.Body).Decode(&oResp); err != nil {
+	limitedBody := io.LimitReader(resp.Body, 10<<20)
+	if err := json.NewDecoder(limitedBody).Decode(&oResp); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 
-	return oResp.Embedding, nil
+	if len(oResp.Embeddings) != len(texts) {
+		return nil, fmt.Errorf(
+			"embeddings count mismatch: want %d, got %d",
+			len(texts), len(oResp.Embeddings))
+	}
+
+	return oResp.Embeddings, nil
 }
 
-// Dimension returns the default dimension for nomic-embed-text.
+// Dimension returns the configured vector dimension.
 func (e *OllamaEmbedder) Dimension() int {
-	return 768
+	return e.dimension
 }
 
 // OpenAIEmbedder calls OpenAI's /v1/embeddings endpoint.
@@ -172,12 +184,19 @@ func (e *OpenAIEmbedder) Embed(
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("openai %d: %s", resp.StatusCode, b)
+		// Limit error response read to prevent OOM from a rogue
+		// server, and redact the body to prevent API key echo-back
+		// from leaking into logs.
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("openai %d: %s",
+			resp.StatusCode, redact.SecretString(string(b)))
 	}
 
+	// Limit response body to 10 MiB to prevent OOM from a rogue
+	// embedding server returning an extremely large JSON response.
 	var oResp openaiEmbedResponse
-	if err := json.NewDecoder(resp.Body).Decode(&oResp); err != nil {
+	limitedBody := io.LimitReader(resp.Body, 10<<20)
+	if err := json.NewDecoder(limitedBody).Decode(&oResp); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 

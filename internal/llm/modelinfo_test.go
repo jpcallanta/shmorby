@@ -55,8 +55,16 @@ func TestFetchModelInfo_OpenAI_BuiltinFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetchModelInfo: %v", err)
 	}
-	if info.ContextWindow != 272000 {
-		t.Errorf("want 272000, got %d", info.ContextWindow)
+	// gpt-5.4-mini has a 400K context window per OpenAI docs
+	// (272K max input, 400K total). Previously this was 272000
+	// (the pricing tier threshold, not the actual window).
+	if info.ContextWindow != 400000 {
+		t.Errorf("want 400000, got %d", info.ContextWindow)
+	}
+	// gpt-5.4-mini supports 128K max output tokens.
+	if info.MaxOutputTokens != 128000 {
+		t.Errorf("want 128000 MaxOutputTokens, got %d",
+			info.MaxOutputTokens)
 	}
 }
 
@@ -218,6 +226,108 @@ func TestFetchModelInfo_Ollama_Success(t *testing.T) {
 	}
 	if info.ContextWindow != 8192 {
 		t.Errorf("want 8192, got %d", info.ContextWindow)
+	}
+}
+
+// Tests Ollama fetchModelInfo returns error when context_length is
+// missing from the /api/show response. This forces
+// FetchModelInfo to fall through to config override → fallback.
+func TestFetchModelInfo_Ollama_MissingContextLength(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, _ *http.Request) {
+			// Omit context_length — common for most Ollama models.
+			json.NewEncoder(w).Encode(map[string]any{
+				"model_info": map[string]any{
+					"family": "llama",
+				},
+			})
+		},
+	))
+	defer srv.Close()
+
+	p := newOllamaProvider(srv.URL, "test-model", config.Config{})
+
+	_, err := p.fetchModelInfo(context.Background(), "test-model")
+	if err == nil {
+		t.Fatal(
+			"expected error for missing context_length, got nil",
+		)
+	}
+}
+
+// Tests FetchModelInfo uses config override when Ollama API
+// returns no context_length.
+func TestFetchModelInfo_Ollama_MissingContextLength_Override(t *testing.T) {
+	resetModelInfoCache()
+	defer resetModelInfoCache()
+
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, _ *http.Request) {
+			json.NewEncoder(w).Encode(map[string]any{
+				"model_info": map[string]any{
+					"family": "llama",
+				},
+			})
+		},
+	))
+	defer srv.Close()
+
+	p := newOllamaProvider(srv.URL, "test-model", config.Config{})
+	cfg := config.Config{
+		Models: map[string]config.ModelOverride{
+			"test-model": {
+				ContextWindow:   128000,
+				MaxOutputTokens: 128000,
+			},
+		},
+	}
+
+	info, err := FetchModelInfo(
+		context.Background(), p, "test-model", cfg,
+	)
+	if err != nil {
+		t.Fatalf("FetchModelInfo: %v", err)
+	}
+	if info.ContextWindow != 128000 {
+		t.Errorf("want 128000, got %d", info.ContextWindow)
+	}
+	if info.MaxOutputTokens != 128000 {
+		t.Errorf("want 128000, got %d", info.MaxOutputTokens)
+	}
+}
+
+// Tests FetchModelInfo falls back to fallback_context_window when
+// Ollama API returns no context_length and no override is set.
+func TestFetchModelInfo_Ollama_MissingContextLength_Fallback(t *testing.T) {
+	resetModelInfoCache()
+	defer resetModelInfoCache()
+
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, _ *http.Request) {
+			json.NewEncoder(w).Encode(map[string]any{
+				"model_info": map[string]any{
+					"family": "llama",
+				},
+			})
+		},
+	))
+	defer srv.Close()
+
+	p := newOllamaProvider(srv.URL, "test-model", config.Config{})
+	cfg := config.Config{
+		Context: config.ContextConfig{
+			FallbackContextWindow: 32000,
+		},
+	}
+
+	info, err := FetchModelInfo(
+		context.Background(), p, "test-model", cfg,
+	)
+	if err != ErrModelInfoFallback {
+		t.Errorf("want ErrModelInfoFallback, got %v", err)
+	}
+	if info.ContextWindow != 32000 {
+		t.Errorf("want 32000, got %d", info.ContextWindow)
 	}
 }
 
@@ -477,4 +587,82 @@ func (f *failingFetcher) fetchModelInfo(
 ) (ModelInfo, error) {
 	*f.count++
 	return ModelInfo{}, fmt.Errorf("api down")
+}
+
+// --- Zen GPT-5.x context window consistency ---
+
+// Checks Zen registry GPT-5.x context windows match the OpenAI
+// registry (openai.go). Both must be kept in sync.
+func TestZenModelContextWindows_GPT5Consistency(t *testing.T) {
+	// Spot-check that Zen and OpenAI registries agree on key
+	// GPT-5.x models. Full sync is enforced by code comments.
+	cases := []struct {
+		model string
+		want  int
+	}{
+		{"gpt-5.6-sol", 1050000},
+		{"gpt-5.5", 1050000},
+		{"gpt-5.4", 1050000},
+		{"gpt-5.4-mini", 400000},
+		{"gpt-5.3-codex", 400000},
+		{"gpt-5.2", 400000},
+		{"gpt-5.1", 400000},
+		{"gpt-5", 272000},
+		{"gpt-5-nano", 272000},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.model, func(t *testing.T) {
+			zenCW, ok := zenModelContextWindows[tc.model]
+			if !ok {
+				t.Fatalf(
+					"model %q not in zenModelContextWindows",
+					tc.model,
+				)
+			}
+			if zenCW != tc.want {
+				t.Errorf(
+					"zen: model %q: want %d, got %d",
+					tc.model, tc.want, zenCW,
+				)
+			}
+
+			openaiCW, ok := openAIModelContextWindows[tc.model]
+			if !ok {
+				t.Fatalf(
+					"model %q not in openAIModelContextWindows",
+					tc.model,
+				)
+			}
+			if openaiCW != zenCW {
+				t.Errorf(
+					"drift for %q: want %d, got %d",
+					tc.model, zenCW, openaiCW,
+				)
+			}
+		})
+	}
+}
+
+// Checks dead GPT-5.x codex models removed from Zen registry.
+func TestZenModelContextWindows_DeadModelsRemoved(t *testing.T) {
+	dead := []string{
+		"gpt-5-codex",
+		"gpt-5.1-codex",
+		"gpt-5.1-codex-max",
+		"gpt-5.1-codex-mini",
+		"gpt-5.2-codex",
+	}
+
+	for _, model := range dead {
+		t.Run(model, func(t *testing.T) {
+			_, ok := zenModelContextWindows[model]
+			if ok {
+				t.Errorf(
+					"dead model %q should be removed "+
+						"from Zen registry", model,
+				)
+			}
+		})
+	}
 }

@@ -4,8 +4,11 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
+
+	"shmorby/internal/util"
 )
 
 // TestNewStore_CreatesDB verifies the store creates a database at the
@@ -326,18 +329,6 @@ func TestTruncateResult_LongTruncates(t *testing.T) {
 	}
 }
 
-// TestNewUUID_GeneratesUniqueIDs checks generated UUIDs are unique.
-func TestNewUUID_GeneratesUniqueIDs(t *testing.T) {
-	ids := make(map[string]bool)
-	for i := 0; i < 100; i++ {
-		id := newUUID()
-		if ids[id] {
-			t.Fatalf("duplicate UUID: %s", id)
-		}
-		ids[id] = true
-	}
-}
-
 // TestExpandPath_Tilde expands ~/ to home directory.
 func TestExpandPath_Tilde(t *testing.T) {
 	home, err := os.UserHomeDir()
@@ -345,7 +336,7 @@ func TestExpandPath_Tilde(t *testing.T) {
 		t.Skip("no home dir:", err)
 	}
 
-	got := expandPath("~/test.db")
+	got := util.ExpandPath("~/test.db")
 	want := filepath.Join(home, "test.db")
 	if got != want {
 		t.Errorf("want %q, got %q", want, got)
@@ -354,7 +345,7 @@ func TestExpandPath_Tilde(t *testing.T) {
 
 // TestExpandPath_AbsoluteDoesNotExpand checks non-tilde paths unchanged.
 func TestExpandPath_AbsoluteDoesNotExpand(t *testing.T) {
-	got := expandPath("/tmp/test.db")
+	got := util.ExpandPath("/tmp/test.db")
 	if got != "/tmp/test.db" {
 		t.Errorf("want %q, got %q", "/tmp/test.db", got)
 	}
@@ -612,4 +603,37 @@ func newTestStore(t *testing.T) Store {
 	t.Cleanup(func() { s.Close() })
 
 	return s
+}
+
+// TestTagsJSON_RoundTrip checks quoteJoin/parseTagsJSON preserve
+// tags containing quotes, backslashes, commas, and spaces.
+func TestTagsJSON_RoundTrip(t *testing.T) {
+	cases := [][]string{
+		{"simple"},
+		{"a", "b", "c"},
+		{`foo"bar`},
+		{`back\slash`},
+		{`quote"a"`, `a,b`, `with space`},
+		{`esc"\`},
+	}
+	for _, tags := range cases {
+		joined := "[" + quoteJoin(tags, ",") + "]"
+		got := parseTagsJSON(joined)
+		if !reflect.DeepEqual(got, tags) {
+			t.Errorf("round-trip %v via %s: got %v", tags, joined, got)
+		}
+	}
+}
+
+// TestParseTagsJSON_Legacy checks ordinary (non-escaped) rows and
+// padded separators still parse, matching the old naive behavior.
+func TestParseTagsJSON_Legacy(t *testing.T) {
+	got := parseTagsJSON(`["a", "b" , "c"]`)
+	want := []string{"a", "b", "c"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("want %v, got %v", want, got)
+	}
+	if parseTagsJSON("[]") != nil {
+		t.Error("want nil for empty array")
+	}
 }

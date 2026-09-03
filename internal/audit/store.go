@@ -144,7 +144,7 @@ type AuditStore struct {
 	db *sql.DB
 }
 
-// NewAuditStore opens or creates an audit database at the given path.
+// Opens or creates an audit database at the given path.
 // Pass ":memory:" for an in-memory store (testing).
 func NewAuditStore(dbPath string) (*AuditStore, error) {
 	if dbPath != ":memory:" {
@@ -177,12 +177,12 @@ func NewAuditStore(dbPath string) (*AuditStore, error) {
 	return &AuditStore{db: db}, nil
 }
 
-// Close releases the database connection.
+// Releases the database connection.
 func (s *AuditStore) Close() error {
 	return s.db.Close()
 }
 
-// InsertEntry inserts a single audit entry and returns its ID.
+// Inserts a single audit entry and returns its ID.
 func (s *AuditStore) InsertEntry(e AuditEntry) (int64, error) {
 	res, err := s.db.Exec(
 		`INSERT INTO audit_entries
@@ -197,7 +197,7 @@ func (s *AuditStore) InsertEntry(e AuditEntry) (int64, error) {
 	return res.LastInsertId()
 }
 
-// BatchInsert inserts multiple entries in a single transaction.
+// Inserts multiple entries in a single transaction.
 func (s *AuditStore) BatchInsert(entries []AuditEntry) error {
 	if len(entries) == 0 {
 		return nil
@@ -231,7 +231,7 @@ func (s *AuditStore) BatchInsert(entries []AuditEntry) error {
 	return tx.Commit()
 }
 
-// InsertPermission records a permission decision.
+// Records a permission decision.
 func (s *AuditStore) InsertPermission(p PermissionAudit) (int64, error) {
 	res, err := s.db.Exec(
 		`INSERT INTO audit_permissions
@@ -246,7 +246,7 @@ func (s *AuditStore) InsertPermission(p PermissionAudit) (int64, error) {
 	return res.LastInsertId()
 }
 
-// InsertOutput stores captured stdout/stderr for an entry.
+// Stores captured stdout/stderr for an entry.
 func (s *AuditStore) InsertOutput(o OutputCapture) error {
 	_, err := s.db.Exec(
 		`INSERT INTO audit_output
@@ -261,7 +261,7 @@ func (s *AuditStore) InsertOutput(o OutputCapture) error {
 	return nil
 }
 
-// InsertSubagent records a subagent dispatch.
+// Records a subagent dispatch.
 func (s *AuditStore) InsertSubagent(sa SubagentAudit) (int64, error) {
 	res, err := s.db.Exec(
 		`INSERT INTO audit_subagents
@@ -276,7 +276,7 @@ func (s *AuditStore) InsertSubagent(sa SubagentAudit) (int64, error) {
 	return res.LastInsertId()
 }
 
-// CompleteSubagent updates a subagent record with completion info.
+// Updates a subagent record with completion info.
 func (s *AuditStore) CompleteSubagent(
 	childSessionID string, durationMs int64, status string,
 ) error {
@@ -292,7 +292,7 @@ func (s *AuditStore) CompleteSubagent(
 	return nil
 }
 
-// QueryEntries returns entries matching the given filter.
+// Returns entries matching the given filter.
 func (s *AuditStore) QueryEntries(f QueryFilter) ([]AuditEntry, error) {
 	query := `SELECT id, session_id, tool, args, duration_ms, exit_code, error, output_hash, captured_at
 	           FROM audit_entries WHERE 1=1`
@@ -346,7 +346,7 @@ func (s *AuditStore) QueryEntries(f QueryFilter) ([]AuditEntry, error) {
 	return entries, rows.Err()
 }
 
-// QueryPermissions returns permission decisions matching the filter.
+// Returns permission decisions matching the filter.
 func (s *AuditStore) QueryPermissions(f QueryFilter) ([]PermissionAudit, error) {
 	query := `SELECT id, session_id, entry_id, tool, command, rule_pattern, rule_action, decision, reason, decided_at
 	           FROM audit_permissions WHERE 1=1`
@@ -396,7 +396,7 @@ func (s *AuditStore) QueryPermissions(f QueryFilter) ([]PermissionAudit, error) 
 	return perms, rows.Err()
 }
 
-// GetEntry returns a single entry by ID.
+// Returns a single entry by ID.
 func (s *AuditStore) GetEntry(id int64) (*AuditEntry, error) {
 	var e AuditEntry
 	err := s.db.QueryRow(
@@ -416,7 +416,7 @@ func (s *AuditStore) GetEntry(id int64) (*AuditEntry, error) {
 	return &e, nil
 }
 
-// GetOutput returns the captured output for an entry.
+// Returns the captured output for an entry.
 func (s *AuditStore) GetOutput(entryID int64) (*OutputCapture, error) {
 	var o OutputCapture
 	err := s.db.QueryRow(
@@ -435,7 +435,7 @@ func (s *AuditStore) GetOutput(entryID int64) (*OutputCapture, error) {
 	return &o, nil
 }
 
-// GetSessionEntries returns all entries for a session, including child sessions.
+// Returns all entries for a session, including child sessions.
 func (s *AuditStore) GetSessionEntries(sessionID string) ([]AuditEntry, error) {
 	query := `SELECT id, session_id, tool, args, duration_ms, exit_code, error, output_hash, captured_at
 	           FROM audit_entries
@@ -467,7 +467,7 @@ func (s *AuditStore) GetSessionEntries(sessionID string) ([]AuditEntry, error) {
 	return entries, rows.Err()
 }
 
-// GetSubagents returns all subagent records for a parent session.
+// Returns all subagent records for a parent session.
 func (s *AuditStore) GetSubagents(parentSessionID string) ([]SubagentAudit, error) {
 	rows, err := s.db.Query(
 		`SELECT id, parent_session_id, child_session_id, parent_entry_id, tool, status, duration_ms, started_at, completed_at
@@ -499,7 +499,7 @@ func (s *AuditStore) GetSubagents(parentSessionID string) ([]SubagentAudit, erro
 	return subs, rows.Err()
 }
 
-// ExportJSON writes matching entries as JSON to the writer.
+// Writes matching entries as JSON to the writer.
 func (s *AuditStore) ExportJSON(w io.Writer, f QueryFilter) error {
 	entries, err := s.QueryEntries(f)
 	if err != nil {
@@ -516,7 +516,7 @@ func (s *AuditStore) ExportJSON(w io.Writer, f QueryFilter) error {
 	return nil
 }
 
-// ExportCSV writes matching entries as CSV to the writer.
+// Writes matching entries as CSV to the writer.
 func (s *AuditStore) ExportCSV(w io.Writer, f QueryFilter) error {
 	entries, err := s.QueryEntries(f)
 	if err != nil {
@@ -555,7 +555,7 @@ func (s *AuditStore) ExportCSV(w io.Writer, f QueryFilter) error {
 	return nil
 }
 
-// Vacuum removes entries older than the given duration.
+// Removes entries older than the given duration.
 func (s *AuditStore) Vacuum(before time.Duration) (entries, permissions, output, subagents int64, err error) {
 	cutoff := time.Now().UTC().Add(-before).Format("2006-01-02 15:04:05")
 
@@ -626,13 +626,13 @@ func (s *AuditStore) Stats() (*AuditStats, error) {
 	return st, nil
 }
 
-// ComputeChecksum returns a SHA256 hex string of the input.
+// Returns a SHA256 hex string of the input.
 func ComputeChecksum(data string) string {
 	h := sha256.Sum256([]byte(data))
 	return fmt.Sprintf("%x", h)
 }
 
-// DefaultDBPath returns the default audit database path.
+// Returns the default audit database path.
 func DefaultDBPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {

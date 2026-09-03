@@ -20,7 +20,6 @@ type Logger struct {
 }
 
 type auditEvent struct {
-	entry       *AuditEntry
 	toolRun     *toolRunEvent
 	permission  *PermissionAudit
 	subagent    *SubagentAudit
@@ -165,7 +164,7 @@ func (l *Logger) flushLoop(interval time.Duration) {
 // LogToolRun enqueues a tool execution audit entry with optional
 // captured output. Non-blocking: drops the event if the buffer is full.
 // Output is redacted before storage to prevent secrets from persisting
-// in the audit log (issue #45).
+// in the audit log.
 func (l *Logger) LogToolRun(entry AuditEntry, output *OutputCapture) {
 	if output != nil {
 		// CRITICAL FIX: Redact secrets BEFORE truncation and checksum

@@ -866,3 +866,618 @@ func TestOpenAIChat_ContextCancel(t *testing.T) {
 		t.Fatal("expected error for context cancel, got nil")
 	}
 }
+
+// --- OpenAI API compliance tests ---
+
+// Checks context window registry has correct values per OpenAI docs.
+func TestMatchOpenAIContextWindow_CorrectValues(t *testing.T) {
+	cases := []struct {
+		model string
+		want  int
+	}{
+		{"gpt-5.6-sol", 1050000},
+		{"gpt-5.6-terra", 1050000},
+		{"gpt-5.6-luna", 1050000},
+		{"gpt-5.5", 1050000},
+		{"gpt-5.5-pro", 1050000},
+		{"gpt-5.4", 1050000},
+		{"gpt-5.4-pro", 1050000},
+		{"gpt-5.4-mini", 400000},
+		{"gpt-5.4-nano", 400000},
+		{"gpt-5.3-codex", 400000},
+		{"gpt-5.3-codex-spark", 400000},
+		{"gpt-5.2", 400000},
+		{"gpt-5.1", 400000},
+		{"gpt-5.1-mini", 400000},
+		{"gpt-5", 272000},
+		{"gpt-5-nano", 272000},
+		{"gpt-4.1", 1048576},
+		{"gpt-4.1-mini", 1048576},
+		{"gpt-4.1-nano", 1048576},
+		{"o1", 200000},
+		{"o3", 200000},
+		{"o4-mini", 200000},
+		{"gpt-4o", 128000},
+		{"gpt-4o-mini", 128000},
+		{"gpt-4", 8192},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.model, func(t *testing.T) {
+			cw, ok := matchOpenAIContextWindow(tc.model)
+			if !ok {
+				t.Fatalf(
+					"model %q not found in registry",
+					tc.model,
+				)
+			}
+			if cw != tc.want {
+				t.Errorf(
+					"model %q: want %d, got %d",
+					tc.model, tc.want, cw,
+				)
+			}
+		})
+	}
+}
+
+// Checks MaxOutputTokens registry has correct values.
+func TestMatchOpenAIMaxOutputTokens_CorrectValues(t *testing.T) {
+	cases := []struct {
+		model string
+		want  int
+	}{
+		{"gpt-5.6-sol", 128000},
+		{"gpt-5.4-mini", 128000},
+		{"gpt-5", 128000},
+		{"gpt-4.1", 32768},
+		{"gpt-4.1-mini", 32768},
+		{"o1", 32768},
+		{"o1-mini", 65536},
+		{"o3", 32768},
+		{"o3-mini", 65536},
+		{"o4-mini", 65536},
+		{"gpt-4o", 16384},
+		{"gpt-4o-mini", 16384},
+		{"gpt-4-turbo", 4096},
+		{"gpt-4", 4096},
+		{"gpt-3.5-turbo", 4096},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.model, func(t *testing.T) {
+			mot, ok := matchOpenAIMaxOutputTokens(tc.model)
+			if !ok {
+				t.Fatalf(
+					"model %q not found in MaxOutputTokens "+
+						"registry", tc.model,
+				)
+			}
+			if mot != tc.want {
+				t.Errorf(
+					"model %q: want %d, got %d",
+					tc.model, tc.want, mot,
+				)
+			}
+		})
+	}
+}
+
+// Checks dead models have been removed from the registry. Exact
+// matches must fail; prefix matches via gpt-5/5.1 are expected
+// (snapshot resolution).
+func TestMatchOpenAIContextWindow_DeadModelsRemoved(t *testing.T) {
+	// Exact dead keys — these models are fully shut down.
+	dead := []string{
+		"chatgpt-4o-latest",
+		"gpt-4o-search",
+	}
+
+	for _, model := range dead {
+		t.Run(model, func(t *testing.T) {
+			_, ok := openAIModelContextWindows[model]
+			if ok {
+				t.Errorf(
+					"dead model %q should be removed "+
+						"from registry", model,
+				)
+			}
+		})
+	}
+
+	// These codex models were shut down 2026-07-23 but may still
+	// resolve via prefix matching (gpt-5-codex → gpt-5). Verify
+	// they are NOT direct registry keys.
+	deadPrefix := []string{
+		"gpt-5-codex",
+		"gpt-5.1-codex",
+		"gpt-5.1-codex-max",
+		"gpt-5.1-codex-mini",
+		"gpt-5.2-codex",
+	}
+
+	for _, model := range deadPrefix {
+		t.Run(model+"/exact", func(t *testing.T) {
+			_, ok := openAIModelContextWindows[model]
+			if ok {
+				t.Errorf(
+					"dead model %q should not be an "+
+						"exact registry key", model,
+				)
+			}
+		})
+	}
+}
+
+// Checks IsReasoningModel correctly identifies reasoning models,
+// including vendor-prefixed IDs used by OpenRouter/Zen.
+func TestIsReasoningModel_IdentifiesModels(t *testing.T) {
+	reasoning := []string{
+		"o1", "o1-mini", "o1-preview",
+		"o3", "o3-mini",
+		"o4-mini", "o4-mini-high",
+		"gpt-5", "gpt-5-nano",
+		"gpt-5.1", "gpt-5.1-mini",
+		"gpt-5.2",
+		"gpt-5.3-codex", "gpt-5.3-codex-spark",
+		"gpt-5.4", "gpt-5.4-pro",
+		"gpt-5.4-mini", "gpt-5.4-nano",
+		"gpt-5.5", "gpt-5.5-pro",
+		"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna",
+		// Vendor-prefixed IDs (OpenRouter / Zen).
+		"openai/o1", "openai/o3-mini",
+		"openai/gpt-5.4-pro", "openai/gpt-5.5",
+	}
+	nonReasoning := []string{
+		"gpt-4", "gpt-4-turbo", "gpt-4o", "gpt-4o-mini",
+		"gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano",
+		"gpt-3.5-turbo",
+		"llama3.2", "claude-sonnet-4",
+		// Vendor-prefixed non-reasoning.
+		"openai/gpt-4o", "openai/gpt-4.1",
+	}
+
+	for _, model := range reasoning {
+		t.Run("reasoning/"+model, func(t *testing.T) {
+			if !IsReasoningModel(model) {
+				t.Errorf(
+					"want %q to be a reasoning model",
+					model,
+				)
+			}
+		})
+	}
+	for _, model := range nonReasoning {
+		t.Run("non-reasoning/"+model, func(t *testing.T) {
+			if IsReasoningModel(model) {
+				t.Errorf(
+					"want %q to NOT be a reasoning model",
+					model,
+				)
+			}
+		})
+	}
+}
+
+// Checks reasoning model uses max_completion_tokens instead of
+// max_tokens in the outbound request.
+func TestOpenAIChat_ReasoningModel_MaxCompletionTokens(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			var req openaiRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+
+			if req.MaxCompletionTokens != 4096 {
+				t.Errorf(
+					"want max_completion_tokens 4096, got %d",
+					req.MaxCompletionTokens,
+				)
+			}
+			if req.MaxTokens != 0 {
+				t.Errorf(
+					"want max_tokens 0 (not sent), got %d",
+					req.MaxTokens,
+				)
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(openaiResponseJSON(t,
+				openaiMessage{
+					Role:    "assistant",
+					Content: strPtr("ok"),
+				},
+				"stop",
+			)))
+		},
+	))
+	defer srv.Close()
+
+	p := newOpenAIProvider(srv.URL, "key", "", "gpt-5.4", 120, config.Config{})
+
+	_, err := p.Chat(context.Background(), ChatRequest{
+		Model: "gpt-5.4",
+		Messages: []Message{
+			{Role: "user", Content: "Hello"},
+		},
+		MaxTokens: 4096,
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+}
+
+// Checks non-reasoning model uses max_tokens (legacy) in the
+// outbound request.
+func TestOpenAIChat_NonReasoningModel_MaxTokens(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			var req openaiRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+
+			if req.MaxTokens != 2048 {
+				t.Errorf(
+					"want max_tokens 2048, got %d",
+					req.MaxTokens,
+				)
+			}
+			if req.MaxCompletionTokens != 0 {
+				t.Errorf(
+					"want max_completion_tokens 0 (not sent), got %d",
+					req.MaxCompletionTokens,
+				)
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(openaiResponseJSON(t,
+				openaiMessage{
+					Role:    "assistant",
+					Content: strPtr("ok"),
+				},
+				"stop",
+			)))
+		},
+	))
+	defer srv.Close()
+
+	p := newOpenAIProvider(srv.URL, "key", "", "gpt-4o", 120, config.Config{})
+
+	_, err := p.Chat(context.Background(), ChatRequest{
+		Model: "gpt-4o",
+		Messages: []Message{
+			{Role: "user", Content: "Hello"},
+		},
+		MaxTokens: 2048,
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+}
+
+// Checks reasoning model uses developer role for system prompt.
+func TestOpenAIChat_ReasoningModel_DeveloperRole(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			var req openaiRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+
+			var found bool
+			for _, m := range req.Messages {
+				if m.Role == "developer" && m.Content != nil &&
+					*m.Content == "You are helpful." {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf(
+					"developer message not found in request; "+
+						"roles: %v", messageRoles(req.Messages),
+				)
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(openaiResponseJSON(t,
+				openaiMessage{
+					Role:    "assistant",
+					Content: strPtr("ok"),
+				},
+				"stop",
+			)))
+		},
+	))
+	defer srv.Close()
+
+	p := newOpenAIProvider(srv.URL, "key", "", "o3", 120, config.Config{})
+
+	_, err := p.Chat(context.Background(), ChatRequest{
+		Model:  "o3",
+		System: "You are helpful.",
+		Messages: []Message{
+			{Role: "user", Content: "Hello"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+}
+
+// Checks non-reasoning model still uses system role.
+func TestOpenAIChat_NonReasoningModel_SystemRole(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			var req openaiRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+
+			var found bool
+			for _, m := range req.Messages {
+				if m.Role == "system" && m.Content != nil &&
+					*m.Content == "You are helpful." {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf(
+					"system message not found; roles: %v",
+					messageRoles(req.Messages),
+				)
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(openaiResponseJSON(t,
+				openaiMessage{
+					Role:    "assistant",
+					Content: strPtr("ok"),
+				},
+				"stop",
+			)))
+		},
+	))
+	defer srv.Close()
+
+	p := newOpenAIProvider(srv.URL, "key", "", "gpt-4o", 120, config.Config{})
+
+	_, err := p.Chat(context.Background(), ChatRequest{
+		Model:  "gpt-4o",
+		System: "You are helpful.",
+		Messages: []Message{
+			{Role: "user", Content: "Hello"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+}
+
+// Checks streaming reasoning deltas are emitted as "reasoning" events.
+func TestOpenAIChatStream_ReasoningDeltas(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprint(w,
+				`data: {"choices":[{"delta":{"reasoning":"Let me think"},"finish_reason":null}]}`+"\n\n")
+			_, _ = fmt.Fprint(w,
+				`data: {"choices":[{"delta":{"content":"The answer is 42"},"finish_reason":null}]}`+"\n\n")
+			_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+		},
+	))
+	defer srv.Close()
+
+	p := newOpenAIProvider(srv.URL, "key", "", "o3", 120, config.Config{})
+
+	events, err := p.ChatStream(context.Background(), ChatRequest{
+		Model: "o3",
+		Messages: []Message{
+			{Role: "user", Content: "What is 6*7?"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+
+	var reasoningEvents []StreamEvent
+	var textEvents []StreamEvent
+	for ev := range events {
+		switch ev.Type {
+		case "reasoning":
+			reasoningEvents = append(reasoningEvents, ev)
+		case "text":
+			textEvents = append(textEvents, ev)
+		case "done":
+			goto done
+		}
+	}
+done:
+	if len(reasoningEvents) != 1 {
+		t.Fatalf("want 1 reasoning event, got %d",
+			len(reasoningEvents))
+	}
+	if reasoningEvents[0].Delta != "Let me think" {
+		t.Errorf(
+			"want reasoning delta 'Let me think', got %q",
+			reasoningEvents[0].Delta,
+		)
+	}
+	if len(textEvents) != 1 {
+		t.Fatalf("want 1 text event, got %d", len(textEvents))
+	}
+	if textEvents[0].Delta != "The answer is 42" {
+		t.Errorf(
+			"want text delta 'The answer is 42', got %q",
+			textEvents[0].Delta,
+		)
+	}
+}
+
+// Checks streaming usage chunk is emitted when stream_options
+// include_usage is set.
+func TestOpenAIChatStream_UsageChunk(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			// Verify stream_options.include_usage is sent.
+			var req openaiRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			if req.StreamOptions == nil || !req.StreamOptions.IncludeUsage {
+				t.Errorf("want stream_options.include_usage true")
+			}
+
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprint(w,
+				`data: {"choices":[{"delta":{"content":"ok"},"finish_reason":null}]}`+"\n\n")
+			// Final usage chunk (empty choices).
+			_, _ = fmt.Fprint(w,
+				`data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`+"\n\n")
+			_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+		},
+	))
+	defer srv.Close()
+
+	p := newOpenAIProvider(srv.URL, "key", "", "gpt-5.4", 120, config.Config{})
+
+	events, err := p.ChatStream(context.Background(), ChatRequest{
+		Model: "gpt-5.4",
+		Messages: []Message{
+			{Role: "user", Content: "Hi"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+
+	var usageEvent *StreamEvent
+	for ev := range events {
+		if ev.Type == "usage" {
+			usageEvent = &ev
+		}
+	}
+	if usageEvent == nil {
+		t.Fatal("expected usage event, got none")
+	}
+	if !strings.Contains(usageEvent.Content, `"total_tokens":15`) {
+		t.Errorf(
+			"want usage with total_tokens 15, got %q",
+			usageEvent.Content,
+		)
+	}
+}
+
+// Checks non-streaming response captures usage and ID.
+func TestOpenAIChat_ResponseUsageAndID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			resp := map[string]any{
+				"id": "chatcmpl-test123",
+				"choices": []map[string]any{{
+					"index": 0,
+					"message": map[string]any{
+						"role":    "assistant",
+						"content": "Hello!",
+					},
+					"finish_reason": "stop",
+				}},
+				"usage": map[string]any{
+					"prompt_tokens":     10,
+					"completion_tokens": 5,
+					"total_tokens":      15,
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(resp)
+		},
+	))
+	defer srv.Close()
+
+	p := newOpenAIProvider(srv.URL, "key", "", "test-model", 120, config.Config{})
+
+	resp, err := p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{
+			{Role: "user", Content: "Hi"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+
+	if resp.ID != "chatcmpl-test123" {
+		t.Errorf("want ID 'chatcmpl-test123', got %q", resp.ID)
+	}
+	if resp.Usage.TotalTokens != 15 {
+		t.Errorf("want TotalTokens 15, got %d", resp.Usage.TotalTokens)
+	}
+	if resp.Usage.PromptTokens != 10 {
+		t.Errorf("want PromptTokens 10, got %d", resp.Usage.PromptTokens)
+	}
+	if resp.Usage.CompletionTokens != 5 {
+		t.Errorf(
+			"want CompletionTokens 5, got %d",
+			resp.Usage.CompletionTokens,
+		)
+	}
+}
+
+// Checks streaming tool calls work alongside reasoning deltas.
+func TestOpenAIChatStream_ReasoningModel_ToolCalls(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprint(w,
+				`data: {"choices":[{"delta":{"reasoning":"I should check the weather"},"finish_reason":null}]}`+"\n\n")
+			_, _ = fmt.Fprint(w,
+				`data: {"choices":[{"delta":{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"get_weather","arguments":"{\"loc\":"}}]},"finish_reason":null}]}`+"\n\n")
+			_, _ = fmt.Fprint(w,
+				`data: {"choices":[{"delta":{"tool_calls":[{"id":"call_1","type":"function","function":{"arguments":"\"NYC\"}"}}]},"finish_reason":null}]}`+"\n\n")
+			_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+		},
+	))
+	defer srv.Close()
+
+	p := newOpenAIProvider(srv.URL, "key", "", "gpt-5.4", 120, config.Config{})
+
+	events, err := p.ChatStream(context.Background(), ChatRequest{
+		Model: "gpt-5.4",
+		Messages: []Message{
+			{Role: "user", Content: "Weather?"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+
+	var reasoningCount, toolCount int
+	for ev := range events {
+		switch ev.Type {
+		case "reasoning":
+			reasoningCount++
+		case "tool-call":
+			toolCount++
+		case "done":
+			goto done
+		}
+	}
+done:
+	if reasoningCount != 1 {
+		t.Errorf("want 1 reasoning event, got %d", reasoningCount)
+	}
+	if toolCount != 2 {
+		t.Errorf("want 2 tool-call events, got %d", toolCount)
+	}
+}
+
+// helper: extracts roles from a message slice for test diagnostics.
+func messageRoles(msgs []openaiMessage) []string {
+	roles := make([]string, len(msgs))
+	for i, m := range msgs {
+		roles[i] = m.Role
+	}
+	return roles
+}

@@ -292,3 +292,83 @@ func TestOrchestrator_DepthBelowLimit(t *testing.T) {
 		t.Errorf("want ok status below max depth, got %s", results[0].Status)
 	}
 }
+
+func TestOrchestrator_SubtaskTimeout(t *testing.T) {
+	// SubtaskTimeout should apply a per-subtask deadline and cause
+	// DispatchTasks to return an error when subtasks exceed it.
+	orch := &TaskOrchestrator{
+		SubtaskTimeout: 20 * time.Millisecond,
+		RunSubtask:     slowSubtask(500 * time.Millisecond),
+	}
+	tasks := []Subtask{
+		{ID: "a", Prompt: "do a"},
+		{ID: "b", Prompt: "do b"},
+	}
+	start := time.Now()
+	_, err := orch.DispatchTasks(context.Background(), tasks, true)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("want error for subtask timeout, got nil")
+	}
+	// Should return promptly, not wait for the full subtask duration.
+	if elapsed >= 500*time.Millisecond {
+		t.Errorf("timeout took too long (%v), subtask deadline not enforced", elapsed)
+	}
+}
+
+func TestOrchestrator_TotalTimeout(t *testing.T) {
+	// TotalTimeout caps the entire DispatchTasks wall-clock time.
+	orch := &TaskOrchestrator{
+		TotalTimeout: 30 * time.Millisecond,
+		RunSubtask:   slowSubtask(1 * time.Second),
+	}
+	tasks := []Subtask{
+		{ID: "a", Prompt: "do a"},
+		{ID: "b", Prompt: "do b"},
+	}
+	start := time.Now()
+	_, err := orch.DispatchTasks(context.Background(), tasks, true)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("want error for total timeout, got nil")
+	}
+	if elapsed >= 200*time.Millisecond {
+		t.Errorf("total timeout took too long (%v), hard deadline not enforced", elapsed)
+	}
+}
+
+func TestOrchestrator_TotalTimeoutPrecedence(t *testing.T) {
+	// TotalTimeout takes precedence over SubtaskTimeout.
+	// Even though SubtaskTimeout is 1s, TotalTimeout at 20ms
+	// should fire first.
+	orch := &TaskOrchestrator{
+		SubtaskTimeout: 1 * time.Second,
+		TotalTimeout:   20 * time.Millisecond,
+		RunSubtask:     slowSubtask(500 * time.Millisecond),
+	}
+	tasks := []Subtask{{ID: "a", Prompt: "do a"}}
+	start := time.Now()
+	_, err := orch.DispatchTasks(context.Background(), tasks, true)
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatal("want error for total timeout, got nil")
+	}
+	if elapsed >= 200*time.Millisecond {
+		t.Errorf("total timeout precedence not enforced (%v)", elapsed)
+	}
+}
+
+func TestOrchestrator_SubtaskTimeoutZero(t *testing.T) {
+	// Zero SubtaskTimeout means no per-subtask deadline (legacy).
+	orch := &TaskOrchestrator{
+		RunSubtask: slowSubtask(10 * time.Millisecond),
+	}
+	tasks := []Subtask{{ID: "a", Prompt: "do a"}}
+	results, err := orch.DispatchTasks(context.Background(), tasks, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].Status != "ok" {
+		t.Errorf("want ok with zero timeout, got %s", results[0].Status)
+	}
+}

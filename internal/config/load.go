@@ -126,7 +126,7 @@ func loadYAMLIfExists(cfg *Config, path string) ([]byte, error) {
 }
 
 // Reads a single YAML file into cfg. Unknown fields are ignored.
-// Uses size-limited reads to prevent OOM from oversized files (issue #46).
+// Uses size-limited reads to prevent OOM from oversized files.
 func loadYAML(cfg *Config, path string) ([]byte, error) {
 	b, err := fileread.ReadFileLimited(path, 0)
 	if err != nil {
@@ -219,26 +219,28 @@ func validateConfig(cfg Config) error {
 	if err := ValidateAgent(cfg.Agent.Default); err != nil {
 		return fmt.Errorf("agent.default: %w", err)
 	}
-	if err := ValidatePermissionLevel(
-		"permission.shell", cfg.Permission.Shell,
-	); err != nil {
-		return err
+
+	// Validate all permission levels in a single loop.
+	permFields := []struct {
+		name  string
+		value string
+	}{
+		{"permission.shell", cfg.Permission.Shell},
+		{"permission.ssh", cfg.Permission.SSH},
+		{"permission.sudo", cfg.Permission.Sudo},
+		{"permission.aws", cfg.Permission.AWS},
+		{"permission.find", cfg.Permission.Find},
+		{"permission.file_read", cfg.Permission.FileRead},
+		{"permission.file_edit", cfg.Permission.FileEdit},
+		{"permission.file_write", cfg.Permission.FileWrite},
+		{"permission.grep", cfg.Permission.Grep},
 	}
-	if err := ValidatePermissionLevel(
-		"permission.ssh", cfg.Permission.SSH,
-	); err != nil {
-		return err
+	for _, f := range permFields {
+		if err := ValidatePermissionLevel(f.name, f.value); err != nil {
+			return err
+		}
 	}
-	if err := ValidatePermissionLevel(
-		"permission.sudo", cfg.Permission.Sudo,
-	); err != nil {
-		return err
-	}
-	if err := ValidatePermissionLevel(
-		"permission.aws", cfg.Permission.AWS,
-	); err != nil {
-		return err
-	}
+
 	if err := ValidateContextMode(cfg.Context.Mode); err != nil {
 		return fmt.Errorf("context.mode: %w", err)
 	}
@@ -254,7 +256,24 @@ func validateConfig(cfg Config) error {
 			cfg.Agent.MaxToolIterations,
 		)
 	}
+	if cfg.Session.RetentionDays < 0 {
+		return fmt.Errorf(
+			"session.retention_days: must be >= 0, got %d",
+			cfg.Session.RetentionDays,
+		)
+	}
+	if cfg.Session.MaxSessions < 0 {
+		return fmt.Errorf(
+			"session.max_sessions: must be >= 0, got %d",
+			cfg.Session.MaxSessions,
+		)
+	}
 
+	return validateProviderKey(cfg)
+}
+
+// validateProviderKey ensures the API key is set for the selected provider.
+func validateProviderKey(cfg Config) error {
 	switch cfg.Provider {
 	case "openai":
 		if cfg.OpenAI.APIKey == "" {

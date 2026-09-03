@@ -4,14 +4,12 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
-	"os/exec"
-	"strings"
 	"time"
 
 	"shmorby/internal/audit"
+	cmdexec "shmorby/internal/exec"
 )
 
 //go:embed ssh.txt
@@ -54,30 +52,22 @@ type sshArgs struct {
 
 // SSHTool implements Tool for remote command execution via SSH.
 type SSHTool struct {
-	perm           string
-	executor       Executor
-	defaultTimeout int
-	auditLogger    *audit.Logger
-}
-
-// SetDefaultTimeout sets the default timeout in seconds for this tool.
-func (s *SSHTool) SetDefaultTimeout(t int) {
-	if t > 0 {
-		s.defaultTimeout = t
-	}
+	ExecTool
 }
 
 // Creates an SSHTool with the given permission level and executor.
 // Pass nil executor to use the real OS executor.
-func NewSSHTool(permLevel string, executor Executor) *SSHTool {
+func NewSSHTool(permLevel string, executor cmdexec.Executor) *SSHTool {
 	if executor == nil {
-		executor = OSExecutor{}
+		executor = cmdexec.OSExecutor{}
 	}
 
 	return &SSHTool{
-		perm:           permLevel,
-		executor:       executor,
-		defaultTimeout: 120,
+		ExecTool: ExecTool{
+			perm:           permLevel,
+			executor:       executor,
+			defaultTimeout: 120,
+		},
 	}
 }
 
@@ -96,9 +86,6 @@ func (s *SSHTool) PermLevel() string { return s.perm }
 // SetPerm updates the permission level at runtime.
 func (s *SSHTool) SetPerm(level string) { s.perm = level }
 
-// SetAuditLogger sets the audit logger for this tool.
-func (s *SSHTool) SetAuditLogger(l *audit.Logger) { s.auditLogger = l }
-
 // Parses args, executes SSH with timeout, truncates output, and
 // redacts secrets. Permission is enforced by the agent loop.
 func (s *SSHTool) Run(
@@ -114,6 +101,14 @@ func (s *SSHTool) Run(
 	if a.Command == "" {
 		return "", fmt.Errorf("ssh: missing required field \"command\"")
 	}
+	// A nonzero port outside 1-65535 can never connect; reject it
+	// with a clean tool-level error instead of spawning ssh and
+	// surfacing its confusing failure. Port 0 means unset.
+	if a.Port != 0 && (a.Port < 1 || a.Port > 65535) {
+		return "", fmt.Errorf(
+			"ssh: port must be 1-65535, got %d", a.Port,
+		)
+	}
 
 	sshArgs := []string{
 		"-o", "BatchMode=yes",
@@ -125,7 +120,7 @@ func (s *SSHTool) Run(
 	if a.User != "" {
 		sshArgs = append(sshArgs, "-l", a.User)
 	}
-	// SECURITY (#43): "--" terminates option parsing so a Host
+	// SECURITY: "--" terminates option parsing so a Host
 	// starting with "-" is treated as a hostname, not an SSH flag.
 	// Without this, a Host like "-oProxyCommand=malicious" would
 	// be interpreted as an SSH option (CWE-88 / CWE-77).
@@ -134,6 +129,10 @@ func (s *SSHTool) Run(
 	timeout := s.defaultTimeout
 	if a.TimeoutSeconds > 0 {
 		timeout = a.TimeoutSeconds
+	}
+	// Clamp to hard ceiling to prevent resource exhaustion.
+	if timeout > maxTimeoutSeconds {
+		timeout = maxTimeoutSeconds
 	}
 
 	cmdCtx, cancel := context.WithTimeout(ctx,
@@ -145,69 +144,27 @@ func (s *SSHTool) Run(
 	out, err := s.executor.Run(cmdCtx, "ssh", sshArgs...)
 	elapsed := time.Since(start)
 
-	exitStr := "0"
-	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) {
-			exitStr = fmt.Sprintf("%d", exitErr.ExitCode())
-		} else {
-			exitStr = fmt.Sprintf("error: %v", err)
-		}
-	}
-
 	slog.Info("tool run",
-		"tool", "ssh",
+		"tool", ToolSSH,
 		"host", a.Host,
 		"duration_ms", elapsed.Milliseconds(),
-		"exit", exitStr,
+		"exit", formatExitStatus(err),
 		"args", string(RedactArgs(args)),
 	)
 
-	if s.auditLogger != nil {
-		exitCode := 0
-		if err != nil {
-			var exitErr *exec.ExitError
-			if errors.As(err, &exitErr) {
-				exitCode = exitErr.ExitCode()
-			}
-		}
-		errMsg := ""
-		if err != nil {
-			errMsg = err.Error()
-		}
-		s.auditLogger.LogToolRun(
-			audit.AuditEntry{
-				SessionID:  SessionIDFrom(ctx),
-				Tool:       "ssh",
-				Args:       string(RedactArgs(args)),
-				DurationMs: elapsed.Milliseconds(),
-				ExitCode:   &exitCode,
-				Error:      errMsg,
-			},
-			&audit.OutputCapture{
-				SessionID:  SessionIDFrom(ctx),
-				Stdout:     string(out),
-				StdoutSize: len(out),
-				Checksum:   audit.ComputeChecksum(string(out)),
-			},
-		)
-	}
+	logAuditEvent(s.auditLogger, ctx, ToolSSH, args, elapsed, err, out,
+		&audit.OutputCapture{
+			SessionID:  SessionIDFrom(ctx),
+			Stdout:     string(out),
+			StdoutSize: len(out),
+			Checksum:   audit.ComputeChecksum(string(out)),
+		},
+	)
 
 	result := string(TruncateOutput(out))
 
 	if err != nil {
-		var exitErr *exec.ExitError
-		if errors.As(err, &exitErr) && exitErr.ExitCode() > 0 {
-			if result != "" && !strings.HasSuffix(result, "\n") {
-				result += "\n"
-			}
-			result += fmt.Sprintf("exit code: %d",
-				exitErr.ExitCode())
-
-			return result, nil
-		}
-
-		return result, fmt.Errorf("ssh exec: %w", err)
+		return exitCodeResult(result, err, elapsed, ToolSSH)
 	}
 
 	return result, nil

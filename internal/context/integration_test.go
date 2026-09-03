@@ -14,7 +14,7 @@ import (
 
 // Tests the compressor end-to-end: insert enough messages to cross the
 // threshold, then verify compression reduces message history.
-func TestCompressorIntegration(t *testing.T) {
+func TestCompressor_Integration(t *testing.T) {
 	dir := t.TempDir()
 	store, err := memory.NewStore(memory.Config{
 		Enabled: true,
@@ -60,7 +60,7 @@ func TestCompressorIntegration(t *testing.T) {
 	if len(messages) == 0 {
 		t.Fatal("expected at least one message after compression")
 	}
-	if c.CompressionCount != 1 {
-		t.Errorf("want CompressionCount 1, got %d", c.CompressionCount)
+	if c.CompressionCount.Load() != 1 {
+		t.Errorf("want CompressionCount 1, got %d", c.CompressionCount.Load())
 	}
 }

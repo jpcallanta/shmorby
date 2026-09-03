@@ -744,3 +744,144 @@ func TestOpencodeZenChat_UnprefixedModelUsesConfiguredBaseURL(t *testing.T) {
 		t.Fatalf("Chat: %v", err)
 	}
 }
+
+// Checks X-Opencode-Session header is sent in Chat requests when set.
+func TestOpencodeZenChat_SessionHeader(t *testing.T) {
+	var gotSession string
+
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			gotSession = r.Header.Get("X-Opencode-Session")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(openaiResponseJSON(t,
+				openaiMessage{
+					Role:    "assistant",
+					Content: strPtr("ok"),
+				},
+				"stop",
+			)))
+		},
+	))
+	defer srv.Close()
+
+	p := newOpencodeZenProvider(srv.URL, "zen-key", "zen-model", config.Config{})
+	p.SetSessionID("sess-abc-123")
+
+	_, err := p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{
+			{Role: "user", Content: "Hello"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+
+	if gotSession != "sess-abc-123" {
+		t.Errorf("want X-Opencode-Session sess-abc-123, got %q", gotSession)
+	}
+}
+
+// Checks X-Opencode-Session header is omitted when session ID is empty.
+func TestOpencodeZenChat_NoSessionHeaderWhenEmpty(t *testing.T) {
+	var gotSession string
+	var headerPresent bool
+
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			gotSession = r.Header.Get("X-Opencode-Session")
+			headerPresent = r.Header.Get("X-Opencode-Session") != ""
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(openaiResponseJSON(t,
+				openaiMessage{
+					Role:    "assistant",
+					Content: strPtr("ok"),
+				},
+				"stop",
+			)))
+		},
+	))
+	defer srv.Close()
+
+	p := newOpencodeZenProvider(srv.URL, "zen-key", "zen-model", config.Config{})
+	// No SetSessionID call — session ID should be empty.
+
+	_, err := p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{
+			{Role: "user", Content: "Hello"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+
+	if headerPresent {
+		t.Errorf("want no X-Opencode-Session header, got %q", gotSession)
+	}
+}
+
+// Checks X-Opencode-Session header is sent in fetchModelInfo requests.
+func TestOpencodeZenFetchModelInfo_SessionHeader(t *testing.T) {
+	var gotSession string
+
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			gotSession = r.Header.Get("X-Opencode-Session")
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"data": [
+					{"id": "test-model", "context_length": 128000}
+				]
+			}`))
+		},
+	))
+	defer srv.Close()
+
+	p := newOpencodeZenProvider(srv.URL, "zen-key", "test-model", config.Config{})
+	p.SetSessionID("sess-fetch-456")
+
+	_, err := p.fetchModelInfo(context.Background(), "test-model")
+	if err != nil {
+		t.Fatalf("fetchModelInfo: %v", err)
+	}
+
+	if gotSession != "sess-fetch-456" {
+		t.Errorf("want X-Opencode-Session sess-fetch-456, got %q", gotSession)
+	}
+}
+
+// Checks OpenRouter does NOT send X-Opencode-Session header.
+func TestOpenRouterChat_NoSessionHeader(t *testing.T) {
+	var headerPresent bool
+	var gotSession string
+
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			gotSession = r.Header.Get("X-Opencode-Session")
+			headerPresent = gotSession != ""
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(openaiResponseJSON(t,
+				openaiMessage{
+					Role:    "assistant",
+					Content: strPtr("ok"),
+				},
+				"stop",
+			)))
+		},
+	))
+	defer srv.Close()
+
+	p := newOpenRouterProvider(srv.URL, "or-key", "or-model", config.Config{})
+
+	_, err := p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{
+			{Role: "user", Content: "Hello"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+
+	if headerPresent {
+		t.Errorf("want no X-Opencode-Session header on OpenRouter, got %q", gotSession)
+	}
+}

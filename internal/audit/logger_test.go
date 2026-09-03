@@ -237,7 +237,7 @@ func TestLogger_ToolRunWithOutput(t *testing.T) {
 		t.Fatal("expected output, got nil")
 	}
 	if output.EntryID != entries[0].ID {
-		t.Errorf("output EntryID %d does not match entry ID %d", output.EntryID, entries[0].ID)
+		t.Errorf("output EntryID: want %d, got %d", entries[0].ID, output.EntryID)
 	}
 	if output.Stdout != "hello\n" {
 		t.Errorf("expected stdout 'hello\\n', got %q", output.Stdout)

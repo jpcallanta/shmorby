@@ -13,7 +13,6 @@ import (
 	"shmorby/internal/config"
 	ctxcomp "shmorby/internal/context"
 	"shmorby/internal/llm"
-	"shmorby/internal/session"
 	"shmorby/internal/tools"
 	"shmorby/internal/tui/navigation"
 )
@@ -666,16 +665,40 @@ func TestModelUpdate_TabModeCycle(t *testing.T) {
 	if m.mode != "diagnose" {
 		t.Errorf("want diagnose after Tab, got %q", m.mode)
 	}
-	if cmd == nil {
-		t.Fatal("expected command for mode change")
+	// Tab is now synchronous with immediate feedback; no async
+	// agentModeChangedMsg is required.
+	if cmd != nil {
+		t.Fatalf("want nil cmd for sync switch, got %v", cmd)
 	}
-
-	// Process the agentModeChangedMsg.
-	updated, _ = m.Update(cmd())
-	m = updated.(Model)
-
 	if len(m.output) == 0 {
 		t.Error("expected mode change output")
+	}
+	if !strings.Contains(m.output[len(m.output)-1].text, "diagnose") {
+		t.Errorf("want diagnose in output, got %q",
+			m.output[len(m.output)-1].text)
+	}
+
+	// Verify modeSwitcher and shell guard stay in sync.
+	if got := m.modeSwitcher.Current(); got != "diagnose" {
+		t.Errorf("modeSwitcher desync, want diagnose got %q", got)
+	}
+	// Subsequent Tab should continue cycle: diagnose -> chat.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+	if m.mode != "chat" {
+		t.Errorf("want chat after second Tab, got %q", m.mode)
+	}
+	// Continue: chat -> code.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+	if m.mode != "code" {
+		t.Errorf("want code after third Tab, got %q", m.mode)
+	}
+	// Wrap: code -> operate.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = updated.(Model)
+	if m.mode != "operate" {
+		t.Errorf("want operate after wrap, got %q", m.mode)
 	}
 }
 
@@ -687,8 +710,8 @@ func TestModelUpdate_ShiftTabModeCycle(t *testing.T) {
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
 	m = updated.(Model)
 
-	if m.mode != "chat" {
-		t.Errorf("want chat after Shift+Tab from operate, got %q", m.mode)
+	if m.mode != "code" {
+		t.Errorf("want code after Shift+Tab from operate, got %q", m.mode)
 	}
 }
 
@@ -1275,9 +1298,8 @@ func TestTUI_SetCommand_Valid(t *testing.T) {
 	comp := ctxcomp.NewCompressor(
 		ctxcomp.CompressorConfig{}, nil, nil, nil,
 	)
-	sess := session.New()
 	co := agent.NewConfigOverrider(
-		&cfg, &prov, reg, comp, sess,
+		&cfg, &prov, reg, comp,
 	)
 
 	m := NewModel(Config{
@@ -1314,9 +1336,8 @@ func TestTUI_SetCommand_Invalid(t *testing.T) {
 	comp := ctxcomp.NewCompressor(
 		ctxcomp.CompressorConfig{}, nil, nil, nil,
 	)
-	sess := session.New()
 	co := agent.NewConfigOverrider(
-		&cfg, &prov, reg, comp, sess,
+		&cfg, &prov, reg, comp,
 	)
 
 	m := NewModel(Config{
@@ -1353,9 +1374,8 @@ func TestTUI_SetCommand_MissingValue(t *testing.T) {
 	comp := ctxcomp.NewCompressor(
 		ctxcomp.CompressorConfig{}, nil, nil, nil,
 	)
-	sess := session.New()
 	co := agent.NewConfigOverrider(
-		&cfg, &prov, reg, comp, sess,
+		&cfg, &prov, reg, comp,
 	)
 
 	m := NewModel(Config{
@@ -1392,9 +1412,8 @@ func TestTUI_HelpOverlay_ShowsParams(t *testing.T) {
 	comp := ctxcomp.NewCompressor(
 		ctxcomp.CompressorConfig{}, nil, nil, nil,
 	)
-	sess := session.New()
 	co := agent.NewConfigOverrider(
-		&cfg, &prov, reg, comp, sess,
+		&cfg, &prov, reg, comp,
 	)
 
 	m := NewModel(Config{
@@ -1478,7 +1497,7 @@ func TestTUIModelCommand_Switch(t *testing.T) {
 		Model:    "llama3",
 	}
 	co := agent.NewConfigOverrider(
-		&cfg, nil, nil, nil, nil,
+		&cfg, nil, nil, nil,
 	)
 
 	m := NewModel(Config{
@@ -1583,7 +1602,7 @@ func TestTUI_PlatformCommand_Switch(t *testing.T) {
 	cfg.OpenAI.APIKey = "sk-test"
 	var prov llm.Provider = &fakeProvider{name: "openai"}
 	co := agent.NewConfigOverrider(
-		&cfg, &prov, nil, nil, nil,
+		&cfg, &prov, nil, nil,
 	)
 
 	m := NewModel(Config{
@@ -1624,7 +1643,7 @@ func TestTUI_PlatformCommand_Invalid(t *testing.T) {
 		Model:    "llama3",
 	}
 	co := agent.NewConfigOverrider(
-		&cfg, nil, nil, nil, nil,
+		&cfg, nil, nil, nil,
 	)
 
 	m := NewModel(Config{
@@ -1694,7 +1713,7 @@ func TestTUI_ApikeyCommand_Set(t *testing.T) {
 	cfg.OpenAI.APIKey = "sk-old"
 	var prov llm.Provider = &fakeProvider{name: "openai"}
 	co := agent.NewConfigOverrider(
-		&cfg, &prov, nil, nil, nil,
+		&cfg, &prov, nil, nil,
 	)
 
 	m := NewModel(Config{

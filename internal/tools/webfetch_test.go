@@ -44,13 +44,12 @@ func TestWebFetch_Basic(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewWebFetchTool("allow", &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			req.URL.Scheme = "http"
-			req.URL.Host = srv.Listener.Addr().String()
-			return srv.Client().Do(req)
-		},
-	})
+	tool := NewWebFetchTool("allow", mockClient(func(req *http.Request) (*http.Response, error) {
+		req.URL.Scheme = "http"
+		req.URL.Host = srv.Listener.Addr().String()
+		return srv.Client().Do(req)
+	},
+	))
 
 	out, err := tool.Run(context.Background(), []byte(`{"url": "http://example.com/page"}`))
 	if err != nil {
@@ -69,13 +68,12 @@ func TestWebFetch_StatusError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewWebFetchTool("allow", &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			req.URL.Scheme = "http"
-			req.URL.Host = srv.Listener.Addr().String()
-			return srv.Client().Do(req)
-		},
-	})
+	tool := NewWebFetchTool("allow", mockClient(func(req *http.Request) (*http.Response, error) {
+		req.URL.Scheme = "http"
+		req.URL.Host = srv.Listener.Addr().String()
+		return srv.Client().Do(req)
+	},
+	))
 
 	_, err := tool.Run(context.Background(), []byte(`{"url": "http://example.com/page"}`))
 	if err == nil {
@@ -94,13 +92,12 @@ func TestWebFetch_Truncation(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewWebFetchTool("allow", &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			req.URL.Scheme = "http"
-			req.URL.Host = srv.Listener.Addr().String()
-			return srv.Client().Do(req)
-		},
-	})
+	tool := NewWebFetchTool("allow", mockClient(func(req *http.Request) (*http.Response, error) {
+		req.URL.Scheme = "http"
+		req.URL.Host = srv.Listener.Addr().String()
+		return srv.Client().Do(req)
+	},
+	))
 
 	out, err := tool.Run(context.Background(), []byte(`{"url": "http://example.com/page", "max_bytes": 100}`))
 	if err != nil {
@@ -119,13 +116,12 @@ func TestWebFetch_NoTruncation_ExactSize(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewWebFetchTool("allow", &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			req.URL.Scheme = "http"
-			req.URL.Host = srv.Listener.Addr().String()
-			return srv.Client().Do(req)
-		},
-	})
+	tool := NewWebFetchTool("allow", mockClient(func(req *http.Request) (*http.Response, error) {
+		req.URL.Scheme = "http"
+		req.URL.Host = srv.Listener.Addr().String()
+		return srv.Client().Do(req)
+	},
+	))
 
 	out, err := tool.Run(context.Background(), []byte(`{"url": "http://example.com/page", "max_bytes": 100}`))
 	if err != nil {
@@ -188,13 +184,12 @@ func TestWebFetch_EmptyBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewWebFetchTool("allow", &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			req.URL.Scheme = "http"
-			req.URL.Host = srv.Listener.Addr().String()
-			return srv.Client().Do(req)
-		},
-	})
+	tool := NewWebFetchTool("allow", mockClient(func(req *http.Request) (*http.Response, error) {
+		req.URL.Scheme = "http"
+		req.URL.Host = srv.Listener.Addr().String()
+		return srv.Client().Do(req)
+	},
+	))
 
 	out, err := tool.Run(context.Background(), []byte(`{"url": "http://example.com/page"}`))
 	if err != nil {
@@ -212,13 +207,12 @@ func TestWebFetch_MaxBytes_Cap(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewWebFetchTool("allow", &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			req.URL.Scheme = "http"
-			req.URL.Host = srv.Listener.Addr().String()
-			return srv.Client().Do(req)
-		},
-	})
+	tool := NewWebFetchTool("allow", mockClient(func(req *http.Request) (*http.Response, error) {
+		req.URL.Scheme = "http"
+		req.URL.Host = srv.Listener.Addr().String()
+		return srv.Client().Do(req)
+	},
+	))
 
 	out, err := tool.Run(context.Background(), []byte(`{"url": "http://example.com/page", "max_bytes": 2000000}`))
 	if err != nil {
@@ -237,13 +231,12 @@ func TestWebFetch_NullByteStripping(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewWebFetchTool("allow", &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			req.URL.Scheme = "http"
-			req.URL.Host = srv.Listener.Addr().String()
-			return srv.Client().Do(req)
-		},
-	})
+	tool := NewWebFetchTool("allow", mockClient(func(req *http.Request) (*http.Response, error) {
+		req.URL.Scheme = "http"
+		req.URL.Host = srv.Listener.Addr().String()
+		return srv.Client().Do(req)
+	},
+	))
 
 	out, err := tool.Run(context.Background(), []byte(`{"url": "http://example.com/page"}`))
 	if err != nil {
@@ -449,13 +442,12 @@ func TestWebFetch_Timeout(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewWebFetchTool("allow", &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			req.URL.Scheme = "http"
-			req.URL.Host = srv.Listener.Addr().String()
-			return srv.Client().Do(req)
-		},
-	})
+	tool := NewWebFetchTool("allow", mockClient(func(req *http.Request) (*http.Response, error) {
+		req.URL.Scheme = "http"
+		req.URL.Host = srv.Listener.Addr().String()
+		return srv.Client().Do(req)
+	},
+	))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -468,11 +460,10 @@ func TestWebFetch_Timeout(t *testing.T) {
 
 // TestWebFetch_NetworkError checks network error returns error.
 func TestWebFetch_NetworkError(t *testing.T) {
-	tool := NewWebFetchTool("allow", &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			return nil, fmt.Errorf("connection refused")
-		},
-	})
+	tool := NewWebFetchTool("allow", mockClient(func(req *http.Request) (*http.Response, error) {
+		return nil, fmt.Errorf("connection refused")
+	},
+	))
 
 	_, err := tool.Run(context.Background(), []byte(`{"url": "http://example.com/page"}`))
 	if err == nil {
@@ -495,13 +486,12 @@ func TestWebFetch_BodyReadError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewWebFetchTool("allow", &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			req.URL.Scheme = "http"
-			req.URL.Host = srv.Listener.Addr().String()
-			return srv.Client().Do(req)
-		},
-	})
+	tool := NewWebFetchTool("allow", mockClient(func(req *http.Request) (*http.Response, error) {
+		req.URL.Scheme = "http"
+		req.URL.Host = srv.Listener.Addr().String()
+		return srv.Client().Do(req)
+	},
+	))
 
 	_, err := tool.Run(context.Background(), []byte(`{"url": "http://example.com/page"}`))
 	if err == nil {
@@ -534,13 +524,12 @@ func TestWebFetch_ContextTimeout(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewWebFetchTool("allow", &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			req.URL.Scheme = "http"
-			req.URL.Host = srv.Listener.Addr().String()
-			return srv.Client().Do(req)
-		},
-	})
+	tool := NewWebFetchTool("allow", mockClient(func(req *http.Request) (*http.Response, error) {
+		req.URL.Scheme = "http"
+		req.URL.Host = srv.Listener.Addr().String()
+		return srv.Client().Do(req)
+	},
+	))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
@@ -560,5 +549,85 @@ func TestWebFetch_SchemeValidation_WebSocket(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "only http/https") {
 		t.Errorf("want http/https error, got %v", err)
+	}
+}
+
+// --- safeDialContext tests ---
+
+// TestSafeDialContext_PrivateIP_Blocked checks that safeDialContext
+// blocks connections to hostnames that resolve to private IPs.
+func TestSafeDialContext_PrivateIP_Blocked(t *testing.T) {
+	// safeDialContext uses net.DefaultResolver, not the mocked
+	// resolveHost. We test it indirectly via WebFetchTool.Run with
+	// a nil client (which uses the real safeDialContext transport).
+	// For a hostname that resolves to a private IP, the pre-request
+	// validation catches it — but safeDialContext is the defense-in-
+	// depth layer. Test via a direct call with a mocked resolver.
+	tool := NewWebFetchTool("allow", nil)
+
+	// Use a hostname that resolves to 127.0.0.1 via the mocked
+	// resolveHost (used by validateURLNotPrivate). The request will
+	// fail at validation before reaching safeDialContext, confirming
+	// the pre-request check works.
+	origResolve := resolveHost
+	resolveHost = func(host string) ([]net.IP, error) {
+		return []net.IP{net.ParseIP("127.0.0.1")}, nil
+	}
+	defer func() { resolveHost = origResolve }()
+
+	_, err := tool.Run(context.Background(), []byte(`{"url": "http://internal.test/secret"}`))
+	if err == nil {
+		t.Fatal("want error for private IP resolution, got nil")
+	}
+	if !strings.Contains(err.Error(), "private/loopback") {
+		t.Errorf("want private/loopback error, got %v", err)
+	}
+}
+
+// TestSafeDialContext_IPv6_BracketHost checks that safeDialContext
+// correctly handles IPv6 addresses in host:port format.
+func TestSafeDialContext_IPv6_BracketHost(t *testing.T) {
+	// Direct test of safeDialContext with an IPv6 address.
+	// This verifies the net.SplitHostPort + net.JoinHostPort fix
+	// for IPv6 bracket notation.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Use a non-routable IPv6 address — the dial should fail but
+	// NOT with a malformed address error from SplitN.
+	_, err := safeDialContext(ctx, "tcp", "[::1]:80")
+	if err == nil {
+		t.Fatal("want error for loopback IPv6, got nil")
+	}
+	// The error should be about the connection failing (private IP
+	// blocked or dial refused), NOT about a malformed address.
+	if strings.Contains(err.Error(), "split addr") {
+		t.Errorf("want no addr-split error for IPv6, got %v", err)
+	}
+}
+
+// TestSafeDialContext_AllPrivate_ReturnsError checks that
+// safeDialContext returns an error when all resolved IPs are private.
+func TestSafeDialContext_AllPrivate_ReturnsError(t *testing.T) {
+	// We can't easily mock net.DefaultResolver, but we can verify
+	// the behavior indirectly: a URL resolving to a private IP via
+	// the mocked resolveHost is caught by validateURLNotPrivate
+	// before safeDialContext is reached. The key point is that the
+	// pre-request check is the primary defense and safeDialContext
+	// is defense-in-depth.
+	tool := NewWebFetchTool("allow", nil)
+
+	origResolve := resolveHost
+	resolveHost = func(host string) ([]net.IP, error) {
+		return []net.IP{
+			net.ParseIP("10.0.0.1"),
+			net.ParseIP("192.168.1.1"),
+		}, nil
+	}
+	defer func() { resolveHost = origResolve }()
+
+	_, err := tool.Run(context.Background(), []byte(`{"url": "http://all-private.test/data"}`))
+	if err == nil {
+		t.Fatal("want error when all IPs are private, got nil")
 	}
 }

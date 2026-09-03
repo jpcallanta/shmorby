@@ -1,6 +1,10 @@
 package redact
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
 
 // TestSecretBytes_AKIA verifies AKIA key patterns are redacted in bytes.
 func TestSecretBytes_AKIA(t *testing.T) {
@@ -111,5 +115,155 @@ func TestSecretString_Empty(t *testing.T) {
 	got := SecretString("")
 	if got != "" {
 		t.Errorf("SecretString(empty) = %q, want empty string", got)
+	}
+}
+
+// TestJSONData_JSONKeySecrets verifies JSON object keys like
+// password/api_key/token are redacted, including nested objects.
+func TestJSONData_JSONKeySecrets(t *testing.T) {
+	input := []byte(`{"web1":"nginx","creds":{"password":"hunter2","api_key":"sk-12345678901234567890123456789012"},"auth":{"token":"abc12345"}}`)
+	got, err := JSONData(input)
+	if err != nil {
+		t.Fatalf("JSONData: %v", err)
+	}
+	for _, secret := range []string{
+		"hunter2", "sk-12345678901234567890123456789012", "abc12345",
+	} {
+		if strings.Contains(string(got), secret) {
+			t.Errorf("secret %q not redacted: %s", secret, got)
+		}
+	}
+	if !json.Valid(got) {
+		t.Errorf("redacted output is not valid JSON: %s", got)
+	}
+	if !strings.Contains(string(got), "nginx") {
+		t.Errorf("non-secret data lost: %s", got)
+	}
+}
+
+// TestJSONData_EmbeddedPattern verifies credential patterns inside
+// ordinary string values are still caught (e.g. AKIA keys).
+func TestJSONData_EmbeddedPattern(t *testing.T) {
+	input := []byte(`{"key":"AKIA1234567890ABCDEF","host":"web1"}`)
+	got, err := JSONData(input)
+	if err != nil {
+		t.Fatalf("JSONData: %v", err)
+	}
+	if strings.Contains(string(got), "AKIA1234567890ABCDEF") {
+		t.Errorf("AKIA key not redacted: %s", got)
+	}
+	if !strings.Contains(string(got), "[REDACTED]") {
+		t.Errorf("want [REDACTED] marker, got %s", got)
+	}
+	if !strings.Contains(string(got), "web1") {
+		t.Errorf("non-secret data lost: %s", got)
+	}
+}
+
+// TestJSONData_PrecisionPreserved verifies integers > 2^53 keep full
+// precision through the redaction round-trip.
+func TestJSONData_PrecisionPreserved(t *testing.T) {
+	input := []byte(`{"id":9007199254740993,"name":"web1"}`)
+	got, err := JSONData(input)
+	if err != nil {
+		t.Fatalf("JSONData: %v", err)
+	}
+	if !strings.Contains(string(got), "9007199254740993") {
+		t.Errorf("integer precision lost: %s", got)
+	}
+}
+
+// TestJSONData_NonStringSecretValue verifies non-string values under
+// secret-named keys are replaced too.
+func TestJSONData_NonStringSecretValue(t *testing.T) {
+	input := []byte(`{"port":8080,"password":12345}`)
+	got, err := JSONData(input)
+	if err != nil {
+		t.Fatalf("JSONData: %v", err)
+	}
+	if strings.Contains(string(got), "12345") {
+		t.Errorf("numeric secret not redacted: %s", got)
+	}
+	if !strings.Contains(string(got), "8080") {
+		t.Errorf("non-secret numeric value lost: %s", got)
+	}
+}
+
+// TestJSONData_InvalidInput verifies invalid JSON returns an error.
+func TestJSONData_InvalidInput(t *testing.T) {
+	if _, err := JSONData([]byte(`{"broken":`)); err == nil {
+		t.Error("want error for invalid JSON, got nil")
+	}
+}
+
+// TestJSONData_Arrays verifies redaction inside nested arrays.
+func TestJSONData_Arrays(t *testing.T) {
+	input := []byte(`{"creds":[{"password":"hunter2"},{"username":"alice"}]}`)
+	got, err := JSONData(input)
+	if err != nil {
+		t.Fatalf("JSONData: %v", err)
+	}
+	if strings.Contains(string(got), "hunter2") {
+		t.Errorf("secret in array not redacted: %s", got)
+	}
+	if !strings.Contains(string(got), "alice") {
+		t.Errorf("non-secret array data lost: %s", got)
+	}
+}
+
+// TestSecretString_NewPatterns verifies the patterns added for
+// defense-in-depth (Slack, Stripe, npm, GitLab, JWT, connection
+// strings) are redacted.
+func TestSecretString_NewPatterns(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{
+			"Slack",
+			"token=xoxb-1234567890-1234567890123-abcdefghijklmnopqrst",
+			"token=[REDACTED]",
+		},
+		{
+			"Stripe",
+			"sk_live_4eC39HqLyjWDarjtT1zdp7dc",
+			"[REDACTED]",
+		},
+		{
+			"StripeTestKept",
+			"sk_test_4eC39HqLyjWDarjtT1zdp7dc",
+			"sk_test_4eC39HqLyjWDarjtT1zdp7dc",
+		},
+		{
+			"Npm",
+			"//registry.npmjs.org/:_authToken=npm_" +
+				"abcdefghijklmnopqrstuvwxyz0123456789",
+			"//registry.npmjs.org/:_authToken=[REDACTED]",
+		},
+		{
+			"GitLab",
+			"glpat-abcdefghijklmnopqrstuvwx",
+			"[REDACTED]",
+		},
+		{
+			"JWT",
+			"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9" +
+				".eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4ifQ" +
+				".SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+			"[REDACTED]",
+		},
+		{
+			"ConnStringPostgres",
+			"dsn: postgres://admin:s3cr3t@db.internal:5432/app",
+			"dsn: [REDACTED]",
+		},
+		{
+			"ConnStringMongo",
+			"uri mongodb+srv://user:pass@cluster0.example.mongodb.net/test",
+			"uri [REDACTED]",
+		},
+	}
+	for _, tc := range cases {
+		if got := SecretString(tc.in); got != tc.want {
+			t.Errorf("%s: SecretString() = %q, want %q",
+				tc.name, got, tc.want)
+		}
 	}
 }

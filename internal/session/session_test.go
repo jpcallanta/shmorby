@@ -1,6 +1,7 @@
 package session
 
 import (
+	"fmt"
 	"testing"
 
 	"shmorby/internal/llm"
@@ -250,5 +251,192 @@ func TestAppendAssistant_NilToolCalls(t *testing.T) {
 	}
 	if msgs[0].ToolCalls != nil {
 		t.Errorf("want nil ToolCalls, got %v", msgs[0].ToolCalls)
+	}
+}
+
+// TestSession_Append_ExceedingMax_DropsOldest checks the message
+// count is capped at MaxSessionMessages by dropping the oldest
+// entries.
+func TestSession_Append_ExceedingMax_DropsOldest(t *testing.T) {
+	s := New()
+	for i := 0; i < MaxSessionMessages+50; i++ {
+		s.Append("user", fmt.Sprintf("m%d", i))
+	}
+
+	msgs := s.Messages()
+	if len(msgs) != MaxSessionMessages {
+		t.Fatalf("want %d messages, got %d", MaxSessionMessages,
+			len(msgs))
+	}
+	if msgs[0].Content != "m50" {
+		t.Errorf("want oldest dropped (first=m50), got %q",
+			msgs[0].Content)
+	}
+	last := fmt.Sprintf("m%d", MaxSessionMessages+49)
+	if msgs[len(msgs)-1].Content != last {
+		t.Errorf("want newest kept (%s), got %q", last,
+			msgs[len(msgs)-1].Content)
+	}
+}
+
+// TestSession_AppendMessages_ExceedingMax_Trims checks bulk appends
+// are also bounded.
+func TestSession_AppendMessages_ExceedingMax_Trims(t *testing.T) {
+	s := New()
+	bulk := make([]Message, MaxSessionMessages+1)
+	for i := range bulk {
+		bulk[i] = Message{Role: "user", Content: "x"}
+	}
+	s.AppendMessages(bulk)
+	if len(s.Messages()) != MaxSessionMessages {
+		t.Errorf("want %d, got %d", MaxSessionMessages,
+			len(s.Messages()))
+	}
+}
+
+// TestSession_SetMessages_ExceedingMax_Trims checks the compressor
+// entry point cannot smuggle an oversized history in.
+func TestSession_SetMessages_ExceedingMax_Trims(t *testing.T) {
+	s := New()
+	msgs := make([]Message, MaxSessionMessages+7)
+	for i := range msgs {
+		msgs[i] = Message{Role: "user", Content: "y"}
+	}
+	s.SetMessages(msgs)
+	if len(s.Messages()) != MaxSessionMessages {
+		t.Errorf("want %d, got %d", MaxSessionMessages,
+			len(s.Messages()))
+	}
+}
+
+// TestSession_AppendAssistantAndTool_Bounded checks the remaining
+// append paths trim as well.
+func TestSession_AppendAssistantAndTool_Bounded(t *testing.T) {
+	s := New()
+	for i := 0; i < MaxSessionMessages+5; i++ {
+		s.AppendAssistant("a", nil)
+		s.AppendTool("tool", "t", "shell", "id")
+	}
+	if len(s.Messages()) != MaxSessionMessages {
+		t.Errorf("want %d, got %d", MaxSessionMessages,
+			len(s.Messages()))
+	}
+}
+
+// TestSession_Sync_NoStore verifies Sync is a safe no-op when no
+// store is bound (in-memory session).
+func TestSession_Sync_NoStore(t *testing.T) {
+	s := New()
+
+	if err := s.Sync(); err != nil {
+		t.Fatalf("Sync on in-memory session: want nil, got %v", err)
+	}
+}
+
+// TestSession_Sync_NoRow verifies Sync is a safe no-op when a store
+// is bound but no row has been created yet (no user messages).
+func TestSession_Sync_NoRow(t *testing.T) {
+	s, _ := boundSession(t)
+
+	// Append only assistant messages — no row is created.
+	s.AppendAssistant("thinking", nil)
+
+	if err := s.Sync(); err != nil {
+		t.Fatalf("Sync with no row: want nil, got %v", err)
+	}
+}
+
+// TestSession_Sync_PersistsMeta verifies Sync flushes metadata to
+// the store after a row exists.
+func TestSession_Sync_PersistsMeta(t *testing.T) {
+	s, st := boundSession(t)
+
+	s.Append("user", "hello")
+	s.AppendAssistant("hi", nil)
+
+	// Mutate metadata without triggering a turn.
+	s.UpdateMeta("openai", "gpt-4o", "code")
+
+	if err := s.Sync(); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	// The stored row should reflect the updated metadata.
+	m, ok := st.Latest("/work")
+	if !ok {
+		t.Fatal("row not found after Sync")
+	}
+	if m.Provider != "openai" {
+		t.Errorf("Provider = %q, want %q", m.Provider, "openai")
+	}
+	if m.Model != "gpt-4o" {
+		t.Errorf("Model = %q, want %q", m.Model, "gpt-4o")
+	}
+	if m.AgentMode != "code" {
+		t.Errorf("AgentMode = %q, want %q", m.AgentMode, "code")
+	}
+}
+
+// TestSession_UpdateMeta_PreservesTitle verifies UpdateMeta does
+// not clobber the title set during row creation.
+func TestSession_UpdateMeta_PreservesTitle(t *testing.T) {
+	s, st := boundSession(t)
+
+	s.Append("user", "check disk usage")
+
+	s.UpdateMeta("openrouter", "claude-sonnet-4-20250514", "operate")
+
+	if err := s.Sync(); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	m, ok := st.Latest("/work")
+	if !ok {
+		t.Fatal("row not found after Sync")
+	}
+	if m.Title != "check disk usage" {
+		t.Errorf("Title = %q, want %q", m.Title, "check disk usage")
+	}
+	if m.Provider != "openrouter" {
+		t.Errorf("Provider = %q, want %q", m.Provider, "openrouter")
+	}
+}
+
+// TestSession_Sync_FullExitSequence simulates the real exit path:
+// Sync() must run while the store is still open, then Close() releases
+// it. Confirms the stored row reflects metadata mutations made after
+// the last turn.
+func TestSession_Sync_FullExitSequence(t *testing.T) {
+	s, st := boundSession(t)
+
+	s.Append("user", "hello")
+	s.AppendAssistant("hi", nil)
+
+	// Simulate a /model switch without a subsequent turn.
+	s.UpdateMeta("openai", "gpt-4o", "code")
+
+	// Sync must flush while the store is open.
+	if err := s.Sync(); err != nil {
+		t.Fatalf("Sync: %v", err)
+	}
+
+	// Verify the store has the updated metadata.
+	_, m, err := st.Load(s.ID())
+	if err != nil {
+		t.Fatalf("Load after Sync: %v", err)
+	}
+	if m.Provider != "openai" {
+		t.Errorf("after Sync: Provider = %q, want %q", m.Provider, "openai")
+	}
+	if m.Model != "gpt-4o" {
+		t.Errorf("after Sync: Model = %q, want %q", m.Model, "gpt-4o")
+	}
+	if m.AgentMode != "code" {
+		t.Errorf("after Sync: AgentMode = %q, want %q", m.AgentMode, "code")
+	}
+
+	// Close must succeed without panicking on a post-Sync WAL state.
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close after Sync: %v", err)
 	}
 }

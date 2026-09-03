@@ -18,6 +18,10 @@ func TestModeSwitcher_CycleForward(t *testing.T) {
 		t.Errorf("want chat, got %q", ms.Current())
 	}
 	ms.CycleForward()
+	if ms.Current() != "code" {
+		t.Errorf("want code, got %q", ms.Current())
+	}
+	ms.CycleForward()
 	if ms.Current() != "operate" {
 		t.Errorf("want operate (wrap), got %q", ms.Current())
 	}
@@ -25,6 +29,10 @@ func TestModeSwitcher_CycleForward(t *testing.T) {
 
 func TestModeSwitcher_CycleReverse(t *testing.T) {
 	ms := NewModeSwitcher()
+	ms.CycleReverse()
+	if ms.Current() != "code" {
+		t.Errorf("want code, got %q", ms.Current())
+	}
 	ms.CycleReverse()
 	if ms.Current() != "chat" {
 		t.Errorf("want chat, got %q", ms.Current())
@@ -62,10 +70,11 @@ func TestModeSwitcher_SetCurrent(t *testing.T) {
 func TestModeSwitcher_Modes(t *testing.T) {
 	ms := NewModeSwitcher()
 	modes := ms.Modes()
-	if len(modes) != 3 {
-		t.Fatalf("want 3 modes, got %d", len(modes))
+	if len(modes) != 4 {
+		t.Fatalf("want 4 modes, got %d", len(modes))
 	}
-	if modes[0] != "operate" || modes[1] != "diagnose" || modes[2] != "chat" {
-		t.Errorf("want [operate diagnose chat], got %v", modes)
+	if modes[0] != "operate" || modes[1] != "diagnose" ||
+		modes[2] != "chat" || modes[3] != "code" {
+		t.Errorf("want [operate diagnose chat code], got %v", modes)
 	}
 }

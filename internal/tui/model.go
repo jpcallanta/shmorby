@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"shmorby/internal/agent"
 	ctxcomp "shmorby/internal/context"
+	"shmorby/internal/exec"
 	"shmorby/internal/llm"
 	"shmorby/internal/memory"
 	"shmorby/internal/session"
@@ -112,10 +113,9 @@ type Model struct {
 	streamBuf StreamBuffer
 
 	// Spinner
-	spinner     spinner.Model
-	spinnerText string
-	startTime   time.Time
-	tokensDown  int
+	spinner    spinner.Model
+	startTime  time.Time
+	tokensDown int
 
 	// State
 	running    bool
@@ -181,7 +181,7 @@ type Model struct {
 	pendingClearMemory bool
 	haltPrompt         bool
 
-	// Phase 19: navigation components
+	// Navigation components
 	modeSwitcher      *navigation.ModeSwitcher
 	referenceEngine   *navigation.ReferenceEngine
 	shellCmdHandler   *navigation.ShellCmdHandler
@@ -194,7 +194,7 @@ type Model struct {
 	tabBar            *sessiontab.TabBar
 	showReverseSearch bool
 
-	// Phase 20: logging
+	// Logging
 	logEntries           []LogEntry
 	logExpanded          bool
 	logLevel             slog.Level
@@ -213,27 +213,33 @@ type Model struct {
 	// Subagent event channel (child session lifecycle from orchestrator).
 	subagentEventChan chan tools.SubagentEvent
 
-	// Phase 21: help overlay
+	// Help overlay
 	showHelp *HelpModel
 
-	// Phase 26: interactive permission prompts
+	// Interactive permission prompts
 	permissionReqChan chan PermissionPrompt
 	toolRules         map[string]*tools.RuleSet
 
-	// Phase 32: runtime config overrides.
+	// Runtime config overrides.
 	configOverrider *agent.ConfigOverrider
 
-	// Phase 34: child subagent sessions keyed by session ID.
+	// Child subagent sessions keyed by session ID.
 	childSessions map[string]*session.Session
 
-	// Phase 34: subagent orchestrator for permission propagation.
+	// Subagent orchestrator for permission propagation.
 	orchestrator *tools.TaskOrchestrator
 
 	// Backup of parent output entries for tab switching.
 	parentOutput []outputEntry
 
-	// Phase 37: async status description generator.
+	// Async status description generator.
 	statusGen *agent.StatusGenerator
+
+	// Pre-formatted ledger context for injection.
+	ledgerCtx string
+
+	// Resolved project directory for the env hint (empty = default).
+	projectRoot string
 }
 
 // CtxStats holds compression and token usage statistics for display.
@@ -276,7 +282,7 @@ type Config struct {
 	Compressor     *ctxcomp.Compressor
 	ModelInfo      llm.ModelInfo
 
-	// Phase 19: navigation config
+	// Navigation config
 	Shell         string
 	PermLevel     string
 	LeaderKeyStr  string
@@ -286,7 +292,7 @@ type Config struct {
 	// ToolTimeout is the default timeout in seconds for tool calls.
 	ToolTimeout int
 
-	// Phase 20: logging config
+	// Logging config
 	LogEnabled           bool
 	LogDefaultLevel      string
 	LogMaxEntries        int
@@ -296,23 +302,31 @@ type Config struct {
 	LogChan              chan LogEntry
 	LogHandler           *TUILogHandler
 
-	// Phase 26: per-tool permission rule sets
+	// Per-tool permission rule sets
 	ToolRules map[string]*tools.RuleSet
 
-	// Phase 32: runtime config overrides.
+	// Runtime config overrides.
 	ConfigOverrider *agent.ConfigOverrider
 
-	// Phase 34: subagent lifecycle events channel (nil = no TUI tracking).
+	// Subagent lifecycle events channel (nil = no TUI tracking).
 	SubagentEventChan chan tools.SubagentEvent
 
-	// Phase 34: subagent orchestrator for permission propagation.
+	// Subagent orchestrator for permission propagation.
 	Orchestrator *tools.TaskOrchestrator
 
-	// Phase 37: async status description generator (nil = random text).
+	// Async status description generator (nil = random text).
 	StatusGen *agent.StatusGenerator
+
+	// Pre-formatted ledger context for injection.
+	// Empty string disables ledger context injection.
+	LedgerCtx string
+
+	// ProjectRoot is the resolved project directory for the
+	// environment hint in the system prompt (empty = default).
+	ProjectRoot string
 }
 
-// NewModel creates a Bubbletea model ready to run.
+// Creates a Bubbletea model ready to run.
 func NewModel(cfg Config) Model {
 	theme := styles.GetTheme(cfg.ThemeName)
 	vp := tuivp.New(80, 20)
@@ -346,9 +360,13 @@ func NewModel(cfg Config) Model {
 	}
 
 	ms := navigation.NewModeSwitcher()
-	if cfg.Mode != "" {
-		ms.SetCurrent(cfg.Mode)
+	mode := cfg.Mode
+
+	if mode == "" {
+		mode = "operate"
 	}
+
+	ms.SetCurrent(mode)
 
 	lk := keybinds.NewLeaderKey(cfg.LeaderKeyStr, leaderTimeout)
 	lk.RegisterBinding("c", keybinds.ActionCompact)
@@ -434,7 +452,7 @@ func NewModel(cfg Config) Model {
 		theme:           theme,
 		provider:        cfg.Provider,
 		session:         cfg.Session,
-		mode:            cfg.Mode,
+		mode:            mode,
 		scope:           cfg.Scope,
 		model:           cfg.Model,
 		override:        cfg.Override,
@@ -453,7 +471,7 @@ func NewModel(cfg Config) Model {
 		modeSwitcher:    ms,
 		referenceEngine: navigation.NewReferenceEngine(),
 		shellCmdHandler: navigation.NewShellCmdHandler(
-			navigation.OSExecutor{}, cfg.Shell, cfg.Mode, cfg.PermLevel,
+			exec.OSExecutor{}, cfg.Shell, mode, cfg.PermLevel,
 		),
 		scrollAccel:          navigation.NewScrollAcceleration(),
 		leaderKey:            lk,
@@ -479,10 +497,26 @@ func NewModel(cfg Config) Model {
 		configOverrider:      cfg.ConfigOverrider,
 		childSessions:        make(map[string]*session.Session),
 		statusGen:            cfg.StatusGen,
+		ledgerCtx:            cfg.LedgerCtx,
+		projectRoot:          cfg.ProjectRoot,
 	}
 }
 
-// Init returns the initial command (no-op) plus a log listener when
+// Keeps m.mode, modeSwitcher, and shell guard aligned as single
+// source of truth. Returns false if mode is unknown.
+func (m *Model) setMode(mode string) bool {
+	if !m.modeSwitcher.SetCurrent(mode) {
+		return false
+	}
+
+	m.mode = mode
+	m.shellCmdHandler.SetMode(mode)
+	m.syncViewport()
+
+	return true
+}
+
+// Returns the initial command (no-op) plus a log listener when
 // the log channel is configured.
 func (m Model) Init() tea.Cmd {
 	var cmds []tea.Cmd
@@ -498,7 +532,7 @@ func (m Model) Init() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-// listenLogChan reads from the log channel and returns entries as
+// Reads from the log channel and returns entries as
 // bubbletea messages. Returns a follow-up command to keep listening.
 func (m Model) listenLogChan() tea.Cmd {
 	return func() tea.Msg {
@@ -510,7 +544,7 @@ func (m Model) listenLogChan() tea.Cmd {
 	}
 }
 
-// listenAgentEvents reads from the agent event channel and returns
+// Reads from the agent event channel and returns
 // events as bubbletea messages. Returns a follow-up command.
 func (m Model) listenAgentEvents() tea.Cmd {
 	return func() tea.Msg {
@@ -522,7 +556,7 @@ func (m Model) listenAgentEvents() tea.Cmd {
 	}
 }
 
-// listenSubagentEvents reads from the subagent event channel and
+// Reads from the subagent event channel and
 // returns events as bubbletea messages. Returns a follow-up command.
 func (m Model) listenSubagentEvents() tea.Cmd {
 	return func() tea.Msg {
@@ -534,7 +568,7 @@ func (m Model) listenSubagentEvents() tea.Cmd {
 	}
 }
 
-// listenPermissionReqs reads from the permission request channel and
+// Reads from the permission request channel and
 // returns prompts as bubbletea messages. Returns a follow-up command.
 func (m Model) listenPermissionReqs() tea.Cmd {
 	return func() tea.Msg {
@@ -546,7 +580,7 @@ func (m Model) listenPermissionReqs() tea.Cmd {
 	}
 }
 
-// Update handles incoming messages and key events.
+// Handles incoming messages and key events.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -629,12 +663,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case agentModeChangedMsg:
-		m.mode = msg.mode
+		// Legacy async path retained for external senders;
+		// preferred path is synchronous via setMode with
+		// immediate feedback and viewport sync.
+		m.setMode(msg.mode)
 		m.output = append(m.output, outputEntry{
 			kind: "agent",
 			text: fmt.Sprintf("Switched to %s mode.", msg.mode),
 		})
 		m.syncViewport()
+
 		return m, nil
 
 	case leaderTimeoutMsg:
@@ -845,7 +883,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleKey processes keyboard input.
+// Processes keyboard input.
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// Halt-all prompt active: only y/n/esc.
 	if m.haltPrompt {
@@ -1109,14 +1147,21 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.complMatches = nil
 			return m, nil
 		}
-		// Empty input → cycle agent mode forward (Tab).
+		// Empty input → cycle agent mode forward.
 		if m.textarea.Value() == "" && !m.running {
 			m.modeSwitcher.CycleForward()
-			m.mode = m.modeSwitcher.Current()
-			m.shellCmdHandler.SetMode(m.mode)
-			return m, func() tea.Msg {
-				return agentModeChangedMsg{mode: m.mode}
-			}
+
+			m.setMode(m.modeSwitcher.Current())
+			m.output = append(m.output, outputEntry{
+				kind: "agent",
+				text: fmt.Sprintf(
+					"Switched to %s mode.",
+					m.modeSwitcher.Current(),
+				),
+			})
+			m.syncViewport()
+
+			return m, nil
 		}
 		var cmd tea.Cmd
 		m.textarea, cmd = m.textarea.Update(msg)
@@ -1126,11 +1171,18 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Shift+Tab → cycle agent mode reverse.
 		if m.textarea.Value() == "" && !m.running {
 			m.modeSwitcher.CycleReverse()
-			m.mode = m.modeSwitcher.Current()
-			m.shellCmdHandler.SetMode(m.mode)
-			return m, func() tea.Msg {
-				return agentModeChangedMsg{mode: m.mode}
-			}
+
+			m.setMode(m.modeSwitcher.Current())
+			m.output = append(m.output, outputEntry{
+				kind: "agent",
+				text: fmt.Sprintf(
+					"Switched to %s mode.",
+					m.modeSwitcher.Current(),
+				),
+			})
+			m.syncViewport()
+
+			return m, nil
 		}
 		var cmd tea.Cmd
 		m.textarea, cmd = m.textarea.Update(msg)
@@ -1265,7 +1317,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 }
 
-// dispatchLeaderAction executes the action mapped by a leader-key binding.
+// Executes the action mapped by a leader-key binding.
 func (m Model) dispatchLeaderAction(
 	action keybinds.Action,
 ) (tea.Model, tea.Cmd) {
@@ -1284,8 +1336,16 @@ func (m Model) dispatchLeaderAction(
 		}
 	case keybinds.ActionAgent:
 		m.modeSwitcher.CycleForward()
-		m.mode = m.modeSwitcher.Current()
-		m.shellCmdHandler.SetMode(m.mode)
+
+		m.setMode(m.modeSwitcher.Current())
+		m.output = append(m.output, outputEntry{
+			kind: "agent",
+			text: fmt.Sprintf(
+				"Switched to %s mode.", m.modeSwitcher.Current(),
+			),
+		})
+		m.syncViewport()
+
 		return m, nil
 	case keybinds.ActionQuit:
 		return m, tea.Quit
@@ -1307,7 +1367,7 @@ func (m Model) dispatchLeaderAction(
 	}
 }
 
-// updateCompletion checks the current input and updates completion state.
+// Checks the current input and updates completion state.
 func (m *Model) updateCompletion() {
 	val := m.textarea.Value()
 	if strings.HasPrefix(val, "/") {
@@ -1342,7 +1402,7 @@ func (m *Model) updateCompletion() {
 	m.complMatches = nil
 }
 
-// handleSubmit processes a user message by running the agent turn.
+// Processes a user message by running the agent turn.
 func (m Model) handleSubmit(text string) (tea.Model, tea.Cmd) {
 	// !-prefixed shell commands run outside the agent loop.
 	if handled, out, err := m.shellCmdHandler.Handle(text); handled {
@@ -1412,7 +1472,7 @@ func (m Model) handleSubmit(text string) (tea.Model, tea.Cmd) {
 	)
 }
 
-// handleCommand processes slash commands. Returns (handled, shouldQuit, error).
+// Processes slash commands. Returns (handled, shouldQuit, error).
 func (m *Model) handleCommand(line string) (bool, bool, error) {
 	if !strings.HasPrefix(line, "/") {
 		return false, false, nil
@@ -1580,16 +1640,16 @@ func (m *Model) handleCommand(line string) (bool, bool, error) {
 
 	case "/agent":
 		if len(parts) == 2 {
-			if m.modeSwitcher.SetCurrent(parts[1]) {
-				m.mode = parts[1]
-				m.shellCmdHandler.SetMode(m.mode)
+			if m.setMode(parts[1]) {
 				m.output = append(m.output, outputEntry{
 					kind: "agent",
 					text: fmt.Sprintf("Switched to %s mode.", m.mode),
 				})
 				m.syncViewport()
+
 				return true, false, nil
 			}
+
 			return true, false, fmt.Errorf("unknown agent mode: %s", parts[1])
 		}
 		m.output = append(m.output, outputEntry{
@@ -1720,7 +1780,7 @@ func (m *Model) handleCommand(line string) (bool, bool, error) {
 	}
 }
 
-// runAgentTurn executes the agent in a goroutine and sends the reply.
+// Executes the agent in a goroutine and sends the reply.
 // Uses streaming when the provider supports it and no tools are needed.
 func (m Model) runAgentTurn(
 	ctx context.Context, input string,
@@ -1774,6 +1834,8 @@ func (m Model) runAgentTurn(
 				permFunc,
 				m.toolRules,
 				m.statusGen,
+				m.ledgerCtx,
+				m.projectRoot,
 			)
 		} else {
 			reply, err = agent.RunTurn(
@@ -1781,6 +1843,8 @@ func (m Model) runAgentTurn(
 				m.mode, m.scope, m.override, m.model, input,
 				m.memoryStore, m.retriever,
 				m.compressor, m.modelInfo,
+				m.ledgerCtx,
+				m.projectRoot,
 			)
 		}
 		if err != nil {
@@ -1800,7 +1864,7 @@ func (m Model) runAgentTurn(
 	}
 }
 
-// consumeStream reads SSE events and converts them to tea.Msg values.
+// Reads SSE events and converts them to tea.Msg values.
 // It tracks whether reasoning deltas have been seen so that when a text
 // delta arrives, the thinking block is finalized first.
 func (m Model) consumeStream(
@@ -1839,7 +1903,7 @@ func (m Model) consumeStream(
 	}
 }
 
-// toolPermissionFunc implements agent.ToolPermissionFunc for the TUI.
+// Implements agent.ToolPermissionFunc for the TUI.
 // Sends a permission prompt to the TUI update loop and blocks until
 // the user responds.
 func (m *Model) toolPermissionFunc(
@@ -1860,7 +1924,7 @@ func (m *Model) toolPermissionFunc(
 	}
 }
 
-// buildSystemPrompt returns the system prompt for streaming requests.
+// Returns the system prompt for streaming requests.
 func (m Model) buildSystemPrompt() string {
 	if m.override != "" {
 		return m.override
@@ -1871,7 +1935,7 @@ func (m Model) buildSystemPrompt() string {
 	)
 }
 
-// finalizeStream renders the final accumulated content when streaming ends.
+// Renders the final accumulated content when streaming ends.
 func (m Model) finalizeStream() (tea.Model, tea.Cmd) {
 	// End any active thinking block.
 	if m.thinking.Active() {
@@ -1907,13 +1971,13 @@ func (m Model) finalizeStream() (tea.Model, tea.Cmd) {
 	)
 }
 
-// handleSettle processes the settle timer expiry and finalizes the stream.
+// Processes the settle timer expiry and finalizes the stream.
 func (m Model) handleSettle() (tea.Model, tea.Cmd) {
 	m.settleTimer = nil
 	return m.finalizeStream()
 }
 
-// syncViewport updates the viewport with current output.
+// Updates the viewport with current output.
 func (m *Model) syncViewport() {
 	m.ensureLayout()
 	vpWidth := m.viewport.Width()
@@ -1964,7 +2028,7 @@ func (m *Model) syncViewport() {
 	m.viewport.NotifyContentAdded()
 }
 
-// ensureLayout recalculates viewport height from cached dimensions.
+// Recalculates viewport height from cached dimensions.
 func (m *Model) ensureLayout() {
 	if m.height <= 0 {
 		return
@@ -1986,7 +2050,7 @@ func (m *Model) ensureLayout() {
 	m.viewport.SetHeight(vpHeight)
 }
 
-// inputLineHeight returns the number of visual lines the input prompt occupies.
+// Returns the number of visual lines the input prompt occupies.
 func (m Model) inputLineHeight() int {
 	inputText := StripPartialANSI(m.textarea.Value())
 	avail := m.width - 2
@@ -2001,7 +2065,7 @@ func (m Model) inputLineHeight() int {
 	return lines
 }
 
-// cursorVisualPos returns the visual line and column of the cursor
+// Returns the visual line and column of the cursor
 // in the word-wrapped output for the given wrapped lines and original text.
 func (m Model) cursorVisualPos(
 	lines []string, text string, width int,
@@ -2049,7 +2113,7 @@ func (m Model) cursorVisualPos(
 	return len(lines) - 1, len([]rune(lines[len(lines)-1]))
 }
 
-// helpContentHeight returns the number of body lines the help overlay
+// Returns the number of body lines the help overlay
 // currently renders (excluding the fixed title and footer rows), so the
 // scroll clamp can use the real content size.
 func (m Model) helpContentHeight() int {
@@ -2060,7 +2124,7 @@ func (m Model) helpContentHeight() int {
 	return helpLineCount(helpContent(m.mode, params))
 }
 
-// View renders the entire UI.
+// Renders the entire UI.
 func (m Model) View() string {
 	m.ensureLayout()
 
@@ -2189,7 +2253,7 @@ func (m Model) View() string {
 	return result
 }
 
-// renderCompletionPopup renders the slash-command completion list.
+// Renders the slash-command completion list.
 func (m Model) renderCompletionPopup() string {
 	var b strings.Builder
 	for i, cmd := range m.complMatches {
@@ -2206,7 +2270,7 @@ func (m Model) renderCompletionPopup() string {
 	return b.String()
 }
 
-// renderSeparator returns a horizontal rule, optionally with a label.
+// Returns a horizontal rule, optionally with a label.
 func (m Model) renderSeparator(label string) string {
 	width := m.width
 	if width <= 0 {
@@ -2228,7 +2292,7 @@ func (m Model) renderSeparator(label string) string {
 	)
 }
 
-// outputTexts extracts the text fields from output entries.
+// Extracts the text fields from output entries.
 func outputTexts(entries []outputEntry) []string {
 	texts := make([]string, len(entries))
 	for i, e := range entries {
@@ -2237,7 +2301,7 @@ func outputTexts(entries []outputEntry) []string {
 	return texts
 }
 
-// updateCtxStats refreshes ctxStats from the current session and compressor.
+// Refreshes ctxStats from the current session and compressor.
 func (m *Model) updateCtxStats() {
 	if m.session == nil || m.compressor == nil {
 		return
@@ -2251,13 +2315,13 @@ func (m *Model) updateCtxStats() {
 	estimated := m.compressor.EstimateMessages(messages)
 	fallback := m.modelInfo.ContextWindow == 0 && cw == mode.FallbackContextWindow
 
-	offloaded := m.compressor.OffloadCount
+	offloaded := int(m.compressor.OffloadCount.Load())
 	storageBytes := int64(offloaded * 512)
 
 	m.ctxStats = &CtxStats{
 		EstimatedTokens:   estimated,
 		ContextWindow:     cw,
-		Compressions:      m.compressor.CompressionCount,
+		Compressions:      int(m.compressor.CompressionCount.Load()),
 		Mode:              mode.Mode,
 		Fallback:          fallback,
 		OffloadedMessages: offloaded,
@@ -2265,7 +2329,7 @@ func (m *Model) updateCtxStats() {
 	}
 }
 
-// renderReverseSearch renders the ctrl+r reverse-i-search overlay.
+// Renders the ctrl+r reverse-i-search overlay.
 func (m Model) renderReverseSearch() string {
 	var b strings.Builder
 	b.WriteString(m.theme.PopupTitle.Render(" Ctrl-R Search"))
@@ -2296,7 +2360,7 @@ func (m Model) renderReverseSearch() string {
 	return b.String()
 }
 
-// renderTabBar renders the session tab bar with horizontal scrolling.
+// Renders the session tab bar with horizontal scrolling.
 func (m Model) renderTabBar() string {
 	tabs := m.tabBar.Tabs()
 	activeIdx := m.tabBar.ActiveIndex()
@@ -2390,7 +2454,7 @@ func (m Model) renderTabBar() string {
 	return result
 }
 
-// switchSessionTab switches to the tab with the given ID, swapping
+// Switches to the tab with the given ID, swapping
 // viewport content between parent and child sessions.
 func (m *Model) switchSessionTab(id string) {
 	activeID := m.tabBar.ActiveID()
@@ -2412,7 +2476,7 @@ func (m *Model) switchSessionTab(id string) {
 	m.loadTabOutput(id)
 }
 
-// loadTabOutput renders the active tab's session messages into m.output.
+// Renders the active tab's session messages into m.output.
 func (m *Model) loadTabOutput(id string) {
 	if id == m.session.ID() && m.parentOutput != nil {
 		m.output = m.parentOutput
@@ -2450,7 +2514,7 @@ func (m *Model) loadTabOutput(id string) {
 	m.syncViewport()
 }
 
-// nextChildTab activates the next tab to the right.
+// Activates the next tab to the right.
 func (m *Model) nextChildTab() {
 	tabs := m.tabBar.Tabs()
 	active := m.tabBar.ActiveIndex()
@@ -2459,7 +2523,7 @@ func (m *Model) nextChildTab() {
 	}
 }
 
-// prevChildTab activates the previous tab to the left.
+// Activates the previous tab to the left.
 func (m *Model) prevChildTab() {
 	tabs := m.tabBar.Tabs()
 	active := m.tabBar.ActiveIndex()
@@ -2468,7 +2532,7 @@ func (m *Model) prevChildTab() {
 	}
 }
 
-// parentTab activates the first non-subagent (parent) tab.
+// Activates the first non-subagent (parent) tab.
 func (m *Model) parentTab() {
 	for _, t := range m.tabBar.Tabs() {
 		if !t.IsSubagent {
@@ -2478,7 +2542,7 @@ func (m *Model) parentTab() {
 	}
 }
 
-// firstChildTab activates the first subagent (child) tab.
+// Activates the first subagent (child) tab.
 func (m *Model) firstChildTab() {
 	for _, t := range m.tabBar.Tabs() {
 		if t.IsSubagent {
@@ -2488,7 +2552,7 @@ func (m *Model) firstChildTab() {
 	}
 }
 
-// clearSubagentTabs removes all subagent tabs and resets to parent
+// Removes all subagent tabs and resets to parent
 // session output.
 func (m *Model) clearSubagentTabs() {
 	for _, t := range m.tabBar.Tabs() {
@@ -2505,7 +2569,7 @@ func (m *Model) clearSubagentTabs() {
 	}
 }
 
-// resolveReferences finds @-refs in text, resolves them, and returns the
+// Finds @-refs in text, resolves them, and returns the
 // cleaned text plus any resolved content to inject as context.
 func (m *Model) resolveReferences(text string) (string, string) {
 	var resolved []string
@@ -2547,7 +2611,7 @@ func (m *Model) resolveReferences(text string) (string, string) {
 	return cleaned, strings.Join(resolved, "\n\n")
 }
 
-// renderPaletteWithFilter renders the command palette with inline filter.
+// Renders the command palette with inline filter.
 func (m Model) renderPaletteWithFilter() string {
 	items := m.commandPalette.Filtered()
 	var b strings.Builder
@@ -2573,7 +2637,7 @@ func (m Model) renderPaletteWithFilter() string {
 	return b.String()
 }
 
-// handlePaletteKey routes key events when the command palette is visible.
+// Routes key events when the command palette is visible.
 func (m Model) handlePaletteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEsc:
@@ -2609,7 +2673,7 @@ func (m Model) handlePaletteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// handleReverseSearchKey routes key events when reverse-i-search is visible.
+// Routes key events when reverse-i-search is visible.
 func (m Model) handleReverseSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEsc:

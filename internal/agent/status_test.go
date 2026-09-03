@@ -15,7 +15,7 @@ func TestStatusGenerator_Nil_ReturnsEmpty(t *testing.T) {
 }
 
 func TestStatusGenerator_ShellCommand(t *testing.T) {
-	g := NewStatusGenerator(nil, "")
+	g := NewStatusGenerator()
 	got := g.Generate(context.Background(), "shell", "Run command", "df -h")
 	if got != "running df" {
 		t.Errorf("want 'running df', got %q", got)
@@ -23,7 +23,7 @@ func TestStatusGenerator_ShellCommand(t *testing.T) {
 }
 
 func TestStatusGenerator_SSHCommand(t *testing.T) {
-	g := NewStatusGenerator(nil, "")
+	g := NewStatusGenerator()
 	got := g.Generate(context.Background(), "ssh", "Run remote", "uptime")
 	if got != "ssh: uptime" {
 		t.Errorf("want 'ssh: uptime', got %q", got)
@@ -31,7 +31,7 @@ func TestStatusGenerator_SSHCommand(t *testing.T) {
 }
 
 func TestStatusGenerator_AWSCommand(t *testing.T) {
-	g := NewStatusGenerator(nil, "")
+	g := NewStatusGenerator()
 	got := g.Generate(context.Background(), "aws", "AWS CLI", "aws s3 ls")
 	if got != "aws s3 ls" {
 		t.Errorf("want 'aws s3 ls', got %q", got)
@@ -39,7 +39,7 @@ func TestStatusGenerator_AWSCommand(t *testing.T) {
 }
 
 func TestStatusGenerator_FindPattern(t *testing.T) {
-	g := NewStatusGenerator(nil, "")
+	g := NewStatusGenerator()
 	got := g.Generate(context.Background(), "find", "Find files",
 		`{"pattern":"*.go","path":"internal/"}`)
 	if got != "finding *.go in internal/" {
@@ -48,7 +48,7 @@ func TestStatusGenerator_FindPattern(t *testing.T) {
 }
 
 func TestStatusGenerator_WebSearch(t *testing.T) {
-	g := NewStatusGenerator(nil, "")
+	g := NewStatusGenerator()
 	got := g.Generate(context.Background(), "websearch", "Search web",
 		`{"query":"golang concurrency"}`)
 	if got != "searching: golang concurrency" {
@@ -57,7 +57,7 @@ func TestStatusGenerator_WebSearch(t *testing.T) {
 }
 
 func TestStatusGenerator_WebFetch(t *testing.T) {
-	g := NewStatusGenerator(nil, "")
+	g := NewStatusGenerator()
 	got := g.Generate(context.Background(), "webfetch", "Fetch URL",
 		`{"url":"https://example.com"}`)
 	if got != "fetching https://example.com" {
@@ -66,7 +66,7 @@ func TestStatusGenerator_WebFetch(t *testing.T) {
 }
 
 func TestStatusGenerator_EmptyCommand(t *testing.T) {
-	g := NewStatusGenerator(nil, "")
+	g := NewStatusGenerator()
 	got := g.Generate(context.Background(), "shell", "Run command", "")
 	if got != "running shell command" {
 		t.Errorf("want 'running shell command', got %q", got)
@@ -74,7 +74,7 @@ func TestStatusGenerator_EmptyCommand(t *testing.T) {
 }
 
 func TestStatusGenerator_TruncatesLong(t *testing.T) {
-	g := NewStatusGenerator(nil, "")
+	g := NewStatusGenerator()
 	longCmd := strings.Repeat("a", 100)
 	got := g.Generate(context.Background(), "shell", "Run", longCmd)
 	runes := []rune(got)

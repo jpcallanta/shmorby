@@ -1,10 +1,35 @@
 ## shell
 
-Executes a shell command on the local system.
+Executes a shell command via the configured OS
+shell (`agent.shell`).
+
+Shell dispatch is OS-aware:
+- `bash`/`sh` → `bash -c <cmd>`
+- `cmd` → `cmd.exe /d /c <cmd>`
+- `powershell`/`pwsh` → `powershell -NoProfile
+  -NonInteractive -Command <cmd>; exit $LASTEXITCODE`
+
+Flags are derived from the basename
+(case-insensitive, `.exe` stripped). Unknown
+shells default to `-c`; paths containing
+`powershell`/`pwsh` or `cmd.exe` use their
+respective flags.
+
+On Windows `agent.shell` may be `powershell`
+(WinPS 5.1), `pwsh` (PS 7+), `cmd`, or `bash`
+(Git for Windows). Empty shell resolves via
+`xdg.DefaultShell()` → `pwsh`/`powershell` or
+`%ComSpec%`. The prompt is injected with OS and
+shell hints so the LLM emits `Get-ChildItem`
+vs `ls` and `Invoke-WebRequest` vs `curl`.
 
 Parameters:
-- `command` (required, string): shell command to execute
-- `cwd` (optional, string): working directory (default: scope workdir or process cwd)
-- `timeout_seconds` (optional, integer): timeout in seconds (default: 120)
+- `command` (required, string): shell command
+- `cwd` (optional, string): working directory
+  (default: scope workdir or process cwd)
+- `timeout_seconds` (optional, integer): timeout
+  in seconds (default: 120)
 
 Output is truncated at 64 KiB.
+Timeout kills the process group (Windows uses
+`taskkill /T` fallback).

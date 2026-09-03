@@ -3,9 +3,15 @@
 package agent
 
 import (
-	"errors"
+	"golang.org/x/term"
 )
 
+// Returns terminal size on Windows via x/term.
 func getTermSize(fd uintptr) (rows, cols int, err error) {
-	return 0, 0, errors.New("not supported on windows")
+	w, h, err := term.GetSize(int(fd))
+	if err != nil {
+		return 0, 0, err
+	}
+
+	return h, w, nil
 }

@@ -12,13 +12,18 @@ import (
 	"time"
 )
 
-// mockHTTPClient wraps a handler function for HTTP testing.
-type mockHTTPClient struct {
+// mockTransport implements http.RoundTripper for testing.
+type mockTransport struct {
 	handler func(req *http.Request) (*http.Response, error)
 }
 
-func (m *mockHTTPClient) Do(req *http.Request) (*http.Response, error) {
+func (m *mockTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return m.handler(req)
+}
+
+// mockClient wraps a handler in an http.Client for tool constructors.
+func mockClient(handler func(req *http.Request) (*http.Response, error)) *http.Client {
+	return &http.Client{Transport: &mockTransport{handler: handler}}
 }
 
 // TestWebSearch_Name checks Name returns "websearch".
@@ -59,11 +64,10 @@ func TestWebSearch_SearXNG_Basic(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewWebSearchTool("allow", &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			return srv.Client().Do(req)
-		},
-	})
+	tool := NewWebSearchTool("allow", mockClient(func(req *http.Request) (*http.Response, error) {
+		return srv.Client().Do(req)
+	},
+	))
 	tool.SetBaseURL(srv.URL)
 
 	out, err := tool.Run(context.Background(), []byte(`{"query": "test"}`))
@@ -92,11 +96,10 @@ func TestWebSearch_SearXNG_Empty(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewWebSearchTool("allow", &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			return srv.Client().Do(req)
-		},
-	})
+	tool := NewWebSearchTool("allow", mockClient(func(req *http.Request) (*http.Response, error) {
+		return srv.Client().Do(req)
+	},
+	))
 	tool.SetBaseURL(srv.URL)
 
 	out, err := tool.Run(context.Background(), []byte(`{"query": "nothing"}`))
@@ -116,11 +119,10 @@ func TestWebSearch_SearXNG_Error(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewWebSearchTool("allow", &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			return srv.Client().Do(req)
-		},
-	})
+	tool := NewWebSearchTool("allow", mockClient(func(req *http.Request) (*http.Response, error) {
+		return srv.Client().Do(req)
+	},
+	))
 	tool.SetBaseURL(srv.URL)
 
 	_, err := tool.Run(context.Background(), []byte(`{"query": "test"}`))
@@ -144,11 +146,10 @@ func TestWebSearch_SearXNG_ReadError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewWebSearchTool("allow", &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			return srv.Client().Do(req)
-		},
-	})
+	tool := NewWebSearchTool("allow", mockClient(func(req *http.Request) (*http.Response, error) {
+		return srv.Client().Do(req)
+	},
+	))
 	tool.SetBaseURL(srv.URL)
 
 	_, err := tool.Run(context.Background(), []byte(`{"query": "test"}`))
@@ -165,11 +166,10 @@ func TestWebSearch_SearXNG_ParseError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewWebSearchTool("allow", &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			return srv.Client().Do(req)
-		},
-	})
+	tool := NewWebSearchTool("allow", mockClient(func(req *http.Request) (*http.Response, error) {
+		return srv.Client().Do(req)
+	},
+	))
 	tool.SetBaseURL(srv.URL)
 
 	_, err := tool.Run(context.Background(), []byte(`{"query": "test"}`))
@@ -195,11 +195,10 @@ func TestWebSearch_SearXNG_MaxResultsPostFilter(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewWebSearchTool("allow", &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			return srv.Client().Do(req)
-		},
-	})
+	tool := NewWebSearchTool("allow", mockClient(func(req *http.Request) (*http.Response, error) {
+		return srv.Client().Do(req)
+	},
+	))
 	tool.SetBaseURL(srv.URL)
 
 	out, err := tool.Run(context.Background(), []byte(`{"query": "test", "max_results": 2}`))
@@ -224,11 +223,10 @@ func TestWebSearch_SearXNG_DefaultMaxResults(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewWebSearchTool("allow", &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			return srv.Client().Do(req)
-		},
-	})
+	tool := NewWebSearchTool("allow", mockClient(func(req *http.Request) (*http.Response, error) {
+		return srv.Client().Do(req)
+	},
+	))
 	tool.SetBaseURL(srv.URL)
 
 	_, err := tool.Run(context.Background(), []byte(`{"query": "test"}`))
@@ -257,20 +255,18 @@ func TestWebSearch_Exa_Basic(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewWebSearchTool("allow", &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			return srv.Client().Do(req)
-		},
-	})
+	tool := NewWebSearchTool("allow", mockClient(func(req *http.Request) (*http.Response, error) {
+		return srv.Client().Do(req)
+	},
+	))
 	tool.SetEngine("exa")
 	tool.SetExaAPIKey("test-key")
-	tool.client = &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			req.URL.Scheme = "http"
-			req.URL.Host = srv.Listener.Addr().String()
-			return srv.Client().Do(req)
-		},
-	}
+	tool.client = mockClient(func(req *http.Request) (*http.Response, error) {
+		req.URL.Scheme = "http"
+		req.URL.Host = srv.Listener.Addr().String()
+		return srv.Client().Do(req)
+	},
+	)
 
 	out, err := tool.Run(context.Background(), []byte(`{"query": "exa test"}`))
 	if err != nil {
@@ -292,20 +288,18 @@ func TestWebSearch_Exa_Empty(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewWebSearchTool("allow", &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			return srv.Client().Do(req)
-		},
-	})
+	tool := NewWebSearchTool("allow", mockClient(func(req *http.Request) (*http.Response, error) {
+		return srv.Client().Do(req)
+	},
+	))
 	tool.SetEngine("exa")
 	tool.SetExaAPIKey("key")
-	tool.client = &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			req.URL.Scheme = "http"
-			req.URL.Host = srv.Listener.Addr().String()
-			return srv.Client().Do(req)
-		},
-	}
+	tool.client = mockClient(func(req *http.Request) (*http.Response, error) {
+		req.URL.Scheme = "http"
+		req.URL.Host = srv.Listener.Addr().String()
+		return srv.Client().Do(req)
+	},
+	)
 
 	out, err := tool.Run(context.Background(), []byte(`{"query": "nothing"}`))
 	if err != nil {
@@ -328,20 +322,18 @@ func TestWebSearch_Exa_ReadError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewWebSearchTool("allow", &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			return srv.Client().Do(req)
-		},
-	})
+	tool := NewWebSearchTool("allow", mockClient(func(req *http.Request) (*http.Response, error) {
+		return srv.Client().Do(req)
+	},
+	))
 	tool.SetEngine("exa")
 	tool.SetExaAPIKey("key")
-	tool.client = &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			req.URL.Scheme = "http"
-			req.URL.Host = srv.Listener.Addr().String()
-			return srv.Client().Do(req)
-		},
-	}
+	tool.client = mockClient(func(req *http.Request) (*http.Response, error) {
+		req.URL.Scheme = "http"
+		req.URL.Host = srv.Listener.Addr().String()
+		return srv.Client().Do(req)
+	},
+	)
 
 	_, err := tool.Run(context.Background(), []byte(`{"query": "test"}`))
 	if err == nil {
@@ -357,20 +349,18 @@ func TestWebSearch_Exa_ParseError(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewWebSearchTool("allow", &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			return srv.Client().Do(req)
-		},
-	})
+	tool := NewWebSearchTool("allow", mockClient(func(req *http.Request) (*http.Response, error) {
+		return srv.Client().Do(req)
+	},
+	))
 	tool.SetEngine("exa")
 	tool.SetExaAPIKey("key")
-	tool.client = &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			req.URL.Scheme = "http"
-			req.URL.Host = srv.Listener.Addr().String()
-			return srv.Client().Do(req)
-		},
-	}
+	tool.client = mockClient(func(req *http.Request) (*http.Response, error) {
+		req.URL.Scheme = "http"
+		req.URL.Host = srv.Listener.Addr().String()
+		return srv.Client().Do(req)
+	},
+	)
 
 	_, err := tool.Run(context.Background(), []byte(`{"query": "test"}`))
 	if err == nil {
@@ -403,20 +393,18 @@ func TestWebSearch_Exa_Error(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewWebSearchTool("allow", &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			return srv.Client().Do(req)
-		},
-	})
+	tool := NewWebSearchTool("allow", mockClient(func(req *http.Request) (*http.Response, error) {
+		return srv.Client().Do(req)
+	},
+	))
 	tool.SetEngine("exa")
 	tool.SetExaAPIKey("bad-key")
-	tool.client = &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			req.URL.Scheme = "http"
-			req.URL.Host = srv.Listener.Addr().String()
-			return srv.Client().Do(req)
-		},
-	}
+	tool.client = mockClient(func(req *http.Request) (*http.Response, error) {
+		req.URL.Scheme = "http"
+		req.URL.Host = srv.Listener.Addr().String()
+		return srv.Client().Do(req)
+	},
+	)
 
 	_, err := tool.Run(context.Background(), []byte(`{"query": "test"}`))
 	if err == nil {
@@ -426,11 +414,10 @@ func TestWebSearch_Exa_Error(t *testing.T) {
 
 // TestWebSearch_Exa_NetworkError checks Exa network error returns error.
 func TestWebSearch_Exa_NetworkError(t *testing.T) {
-	tool := NewWebSearchTool("allow", &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			return nil, fmt.Errorf("connection refused")
-		},
-	})
+	tool := NewWebSearchTool("allow", mockClient(func(req *http.Request) (*http.Response, error) {
+		return nil, fmt.Errorf("connection refused")
+	},
+	))
 	tool.SetEngine("exa")
 	tool.SetExaAPIKey("key")
 
@@ -487,11 +474,10 @@ func TestWebSearch_MaxResults_Cap(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewWebSearchTool("allow", &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			return srv.Client().Do(req)
-		},
-	})
+	tool := NewWebSearchTool("allow", mockClient(func(req *http.Request) (*http.Response, error) {
+		return srv.Client().Do(req)
+	},
+	))
 	tool.SetBaseURL(srv.URL)
 
 	_, err := tool.Run(context.Background(), []byte(`{"query": "test", "max_results": 100}`))
@@ -536,11 +522,10 @@ func TestWebSearch_Timeout(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewWebSearchTool("allow", &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			return srv.Client().Do(req)
-		},
-	})
+	tool := NewWebSearchTool("allow", mockClient(func(req *http.Request) (*http.Response, error) {
+		return srv.Client().Do(req)
+	},
+	))
 	tool.SetBaseURL(srv.URL)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
@@ -565,20 +550,18 @@ func TestWebSearch_Exa_MultiResult(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewWebSearchTool("allow", &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			return srv.Client().Do(req)
-		},
-	})
+	tool := NewWebSearchTool("allow", mockClient(func(req *http.Request) (*http.Response, error) {
+		return srv.Client().Do(req)
+	},
+	))
 	tool.SetEngine("exa")
 	tool.SetExaAPIKey("key")
-	tool.client = &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			req.URL.Scheme = "http"
-			req.URL.Host = srv.Listener.Addr().String()
-			return srv.Client().Do(req)
-		},
-	}
+	tool.client = mockClient(func(req *http.Request) (*http.Response, error) {
+		req.URL.Scheme = "http"
+		req.URL.Host = srv.Listener.Addr().String()
+		return srv.Client().Do(req)
+	},
+	)
 
 	out, err := tool.Run(context.Background(), []byte(`{"query": "test"}`))
 	if err != nil {
@@ -617,11 +600,10 @@ func TestWebSearch_SetDefaultTimeout(t *testing.T) {
 
 // TestWebSearch_SearXNG_NetworkError checks network error returns error.
 func TestWebSearch_SearXNG_NetworkError(t *testing.T) {
-	tool := NewWebSearchTool("allow", &mockHTTPClient{
-		handler: func(req *http.Request) (*http.Response, error) {
-			return nil, fmt.Errorf("connection refused")
-		},
-	})
+	tool := NewWebSearchTool("allow", mockClient(func(req *http.Request) (*http.Response, error) {
+		return nil, fmt.Errorf("connection refused")
+	},
+	))
 	tool.SetBaseURL("http://localhost:1")
 
 	_, err := tool.Run(context.Background(), []byte(`{"query": "test"}`))

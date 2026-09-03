@@ -211,7 +211,6 @@ func TestEvaluateToolPermission_NoRuleFallback(t *testing.T) {
 }
 
 // TestRules verifies the core permission rule system is functional.
-// Matches the "go test -run TestRules" pattern from the phase spec.
 func TestRules(t *testing.T) {
 	rs := RuleSet{Rules: []PermissionRule{
 		{Match: "rm -rf *", Action: "deny"},
@@ -235,5 +234,103 @@ func TestRules(t *testing.T) {
 	if merged.Rules[0].Match != "custom-rule" {
 		t.Errorf("MergeRules first rule: want 'custom-rule', got %q",
 			merged.Rules[0].Match)
+	}
+}
+
+// --- Normalization bypass tests ---
+
+// TestRuleSet_Evaluate_ExtraWhitespace_Blocked verifies that extra
+// whitespace in the command does not evade a deny rule.
+func TestRuleSet_Evaluate_ExtraWhitespace_Blocked(t *testing.T) {
+	rs := RuleSet{Rules: []PermissionRule{
+		{Match: "rm -rf *", Action: "deny", Reason: "destructive"},
+	}}
+
+	// Double space between rm and -rf should still match.
+	action, reason, _ := rs.Evaluate("rm  -rf /")
+	if action != "deny" {
+		t.Errorf("want deny for double-space command, got %q", action)
+	}
+	if reason != "destructive" {
+		t.Errorf("want 'destructive' reason, got %q", reason)
+	}
+}
+
+// TestRuleSet_Evaluate_AbsolutePath_Blocked verifies that an absolute
+// path prefix (/usr/bin/) does not evade a deny rule.
+func TestRuleSet_Evaluate_AbsolutePath_Blocked(t *testing.T) {
+	rs := RuleSet{Rules: []PermissionRule{
+		{Match: "rm -rf *", Action: "deny"},
+	}}
+
+	action, _, _ := rs.Evaluate("/usr/bin/rm -rf /")
+	if action != "deny" {
+		t.Errorf("want deny for /usr/bin/rm, got %q", action)
+	}
+}
+
+// TestRuleSet_Evaluate_BinPath_Blocked verifies /bin/ prefix is
+// stripped during normalization.
+func TestRuleSet_Evaluate_BinPath_Blocked(t *testing.T) {
+	rs := RuleSet{Rules: []PermissionRule{
+		{Match: "rm -rf *", Action: "deny"},
+	}}
+
+	action, _, _ := rs.Evaluate("/bin/rm -rf /")
+	if action != "deny" {
+		t.Errorf("want deny for /bin/rm, got %q", action)
+	}
+}
+
+// TestRuleSet_Evaluate_EnvPrefix_Blocked verifies that an "env " prefix
+// does not evade a deny rule.
+func TestRuleSet_Evaluate_EnvPrefix_Blocked(t *testing.T) {
+	rs := RuleSet{Rules: []PermissionRule{
+		{Match: "rm -rf *", Action: "deny"},
+	}}
+
+	action, _, _ := rs.Evaluate("env rm -rf /")
+	if action != "deny" {
+		t.Errorf("want deny for 'env rm -rf /', got %q", action)
+	}
+}
+
+// TestRuleSet_Evaluate_ArgumentSplit_Blocked verifies that split
+// arguments (-r -f instead of -rf) still match the wildcard pattern.
+func TestRuleSet_Evaluate_ArgumentSplit_Blocked(t *testing.T) {
+	rs := RuleSet{Rules: []PermissionRule{
+		{Match: "rm *", Action: "deny"},
+	}}
+
+	action, _, _ := rs.Evaluate("rm -r -f /")
+	if action != "deny" {
+		t.Errorf("want deny for 'rm -r -f /', got %q", action)
+	}
+}
+
+// TestNormalizeCommand_CollapseWhitespace verifies whitespace collapse.
+func TestNormalizeCommand_CollapseWhitespace(t *testing.T) {
+	got := normalizeCommand("  rm   -rf   /  ")
+	want := "rm -rf /"
+	if got != want {
+		t.Errorf("normalizeCommand: want %q, got %q", want, got)
+	}
+}
+
+// TestNormalizeCommand_StripEnv verifies env prefix removal.
+func TestNormalizeCommand_StripEnv(t *testing.T) {
+	got := normalizeCommand("env rm -rf /")
+	want := "rm -rf /"
+	if got != want {
+		t.Errorf("normalizeCommand: want %q, got %q", want, got)
+	}
+}
+
+// TestNormalizeCommand_StripAbsPath verifies absolute path prefix removal.
+func TestNormalizeCommand_StripAbsPath(t *testing.T) {
+	got := normalizeCommand("/usr/bin/rm -rf /")
+	want := "rm -rf /"
+	if got != want {
+		t.Errorf("normalizeCommand: want %q, got %q", want, got)
 	}
 }

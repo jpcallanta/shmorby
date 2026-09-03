@@ -779,3 +779,10 @@ func TestValidateAgent_Chat(t *testing.T) {
 		t.Fatalf("ValidateAgent(chat): %v", err)
 	}
 }
+
+// TestValidateAgent_Code checks code mode passes validation.
+func TestValidateAgent_Code(t *testing.T) {
+	if err := ValidateAgent("code"); err != nil {
+		t.Fatalf("ValidateAgent(code): %v", err)
+	}
+}

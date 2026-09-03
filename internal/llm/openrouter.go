@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"shmorby/internal/config"
+	"shmorby/internal/redact"
 )
 
 // openRouterProvider sends requests to the OpenRouter API.
@@ -54,10 +55,19 @@ func (o *openRouterProvider) Chat(
 	}
 
 	body := openaiRequest{
-		Model:     model,
-		Messages:  buildOpenAIMessages(req),
-		Tools:     buildOpenAITools(req.Tools),
-		MaxTokens: req.MaxTokens,
+		Model:    model,
+		Messages: buildOpenAIMessages(req),
+		Tools:    buildOpenAITools(req.Tools),
+	}
+
+	// Reasoning models (o-series, gpt-5.x) require
+	// max_completion_tokens; legacy models use max_tokens.
+	if req.MaxTokens > 0 {
+		if IsReasoningModel(model) {
+			body.MaxCompletionTokens = req.MaxTokens
+		} else {
+			body.MaxTokens = req.MaxTokens
+		}
 	}
 
 	resp, err := doOpenAIRequest(
@@ -94,10 +104,12 @@ func (o *openRouterProvider) fetchModelInfo(
 	defer func() { _ = httpResp.Body.Close() }()
 
 	if httpResp.StatusCode >= 400 {
-		bodyBytes, _ := io.ReadAll(httpResp.Body)
+		// Limit and redact error body to prevent API key
+		// echo-back from leaking into logs.
+		bodyBytes, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1024))
 		return ModelInfo{}, fmt.Errorf(
 			"openrouter returned status %d: %s",
-			httpResp.StatusCode, string(bodyBytes),
+			httpResp.StatusCode, redact.SecretString(string(bodyBytes)),
 		)
 	}
 

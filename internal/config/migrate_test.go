@@ -102,7 +102,7 @@ audit:
   retention_days: 365
 `
 
-func TestDryMigrateShowsMissingFields(t *testing.T) {
+func TestDryMigrate_ShowsMissingFields(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "old.yaml")
 	dst := filepath.Join(dir, "config.yaml")
@@ -128,7 +128,7 @@ func TestDryMigrateShowsMissingFields(t *testing.T) {
 	}
 }
 
-func TestDryMigrateUpToDate(t *testing.T) {
+func TestDryMigrate_UpToDate(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "config.yaml")
 	dst := filepath.Join(dir, "config.yaml")
@@ -143,7 +143,7 @@ func TestDryMigrateUpToDate(t *testing.T) {
 	}
 }
 
-func TestMigrateAddsMissingFields(t *testing.T) {
+func TestMigrate_AddsMissingFields(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "old.yaml")
 	dst := filepath.Join(dir, "config.yaml")
@@ -209,7 +209,7 @@ func TestMigrateAddsMissingFields(t *testing.T) {
 	}
 }
 
-func TestMigrateCreatesFile(t *testing.T) {
+func TestMigrate_CreatesFile(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "old.yaml")
 	dst := filepath.Join(dir, "config.yaml")
@@ -245,7 +245,7 @@ func TestMigrateCreatesFile(t *testing.T) {
 	}
 }
 
-func TestMigratePreservesComments(t *testing.T) {
+func TestMigrate_PreservesComments(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "old.yaml")
 	dst := filepath.Join(dir, "config.yaml")
@@ -269,7 +269,7 @@ agent:
 	}
 }
 
-func TestMigrateNoZeroValuesInjected(t *testing.T) {
+func TestMigrate_NoZeroValuesInjected(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "old.yaml")
 	dst := filepath.Join(dir, "config.yaml")
@@ -307,7 +307,7 @@ func TestMigrateNoZeroValuesInjected(t *testing.T) {
 	}
 }
 
-func TestMigratePreservesPermissions(t *testing.T) {
+func TestMigrate_PreservesPermissions(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "old.yaml")
 	dst := filepath.Join(dir, "config.yaml")
@@ -326,11 +326,11 @@ func TestMigratePreservesPermissions(t *testing.T) {
 	}
 
 	if info.Mode().Perm() != 0600 {
-		t.Errorf("expected perm 0600, got %o", info.Mode().Perm())
+		t.Errorf("perm: want %o, got %o", 0600, info.Mode().Perm())
 	}
 }
 
-func TestMigrateMissingSource(t *testing.T) {
+func TestMigrate_MissingSource(t *testing.T) {
 	dir := t.TempDir()
 	err := Migrate("/nonexistent.yaml", filepath.Join(dir, "config.yaml"))
 	if err == nil {
@@ -338,7 +338,7 @@ func TestMigrateMissingSource(t *testing.T) {
 	}
 }
 
-func TestMigrateInvalidYAML(t *testing.T) {
+func TestMigrate_InvalidYAML(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "bad.yaml")
 	dst := filepath.Join(dir, "config.yaml")
@@ -363,7 +363,7 @@ func TestShowDefaults(t *testing.T) {
 	}
 }
 
-func TestShowDefaultsOmitsZeroValues(t *testing.T) {
+func TestShowDefaults_OmitsZeroValues(t *testing.T) {
 	out := ShowDefaults()
 	if out == "" {
 		t.Fatal("ShowDefaults returned empty string")
@@ -383,7 +383,7 @@ func TestShowDefaultsOmitsZeroValues(t *testing.T) {
 	}
 }
 
-func TestValidateFileGood(t *testing.T) {
+func TestValidateFile_Good(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "config.yaml")
 
@@ -407,7 +407,7 @@ context:
 	}
 }
 
-func TestValidateFileBadProvider(t *testing.T) {
+func TestValidateFile_BadProvider(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "config.yaml")
 
@@ -423,7 +423,7 @@ func TestValidateFileBadProvider(t *testing.T) {
 	}
 }
 
-func TestValidateFileBadAgent(t *testing.T) {
+func TestValidateFile_BadAgent(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "config.yaml")
 
@@ -441,7 +441,7 @@ agent:
 	}
 }
 
-func TestValidateFileBadPermission(t *testing.T) {
+func TestValidateFile_BadPermission(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "config.yaml")
 
@@ -459,7 +459,7 @@ permission:
 	}
 }
 
-func TestValidateFileBadTimeout(t *testing.T) {
+func TestValidateFile_BadTimeout(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "config.yaml")
 
@@ -477,7 +477,7 @@ tools:
 	}
 }
 
-func TestValidateFileBadContextMode(t *testing.T) {
+func TestValidateFile_BadContextMode(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "config.yaml")
 
@@ -495,7 +495,7 @@ context:
 	}
 }
 
-func TestValidateFileMissingOpenRouterKey(t *testing.T) {
+func TestValidateFile_MissingOpenRouterKey(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "config.yaml")
 
@@ -513,7 +513,7 @@ openrouter:
 	}
 }
 
-func TestValidateFileMissingOpenAIKey(t *testing.T) {
+func TestValidateFile_MissingOpenAIKey(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "config.yaml")
 
@@ -532,7 +532,7 @@ openai:
 	}
 }
 
-func TestValidateFileMissingMemoryDBPath(t *testing.T) {
+func TestValidateFile_MissingMemoryDBPath(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "config.yaml")
 
@@ -551,14 +551,14 @@ memory:
 	}
 }
 
-func TestValidateFileMissingSource(t *testing.T) {
+func TestValidateFile_MissingSource(t *testing.T) {
 	err := ValidateFile("/nonexistent.yaml")
 	if err == nil {
 		t.Fatal("expected error for missing file")
 	}
 }
 
-func TestValidateFileUnknownKeys(t *testing.T) {
+func TestValidateFile_UnknownKeys(t *testing.T) {
 	dir := t.TempDir()
 	cfg := filepath.Join(dir, "config.yaml")
 
@@ -579,7 +579,7 @@ wrang_key: hello
 	}
 }
 
-func TestMigrateAtomicWrite(t *testing.T) {
+func TestMigrate_AtomicWrite(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "old.yaml")
 	dst := filepath.Join(dir, "config.yaml")
@@ -599,7 +599,7 @@ func TestMigrateAtomicWrite(t *testing.T) {
 	}
 }
 
-func TestMigrateCreatesDir(t *testing.T) {
+func TestMigrate_CreatesDir(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "old.yaml")
 	dst := filepath.Join(dir, "subdir", "config.yaml")
@@ -617,9 +617,9 @@ func TestMigrateCreatesDir(t *testing.T) {
 	}
 }
 
-// TestMigrateNestedMerge verifies that nested fields from defaults are
-// added when the parent key exists but the child is missing.
-func TestMigrateNestedMerge(t *testing.T) {
+// Verifies that nested fields from defaults are added when the parent
+// key exists but the child is missing.
+func TestMigrate_NestedMerge(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "old.yaml")
 	dst := filepath.Join(dir, "config.yaml")
@@ -648,8 +648,8 @@ agent:
 	}
 }
 
-// TestMigrateArbitraryPath verifies migrate works with arbitrary --file paths.
-func TestMigrateArbitraryPath(t *testing.T) {
+// Verifies migrate works with arbitrary --file paths.
+func TestMigrate_ArbitraryPath(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "my.yaml")
 	dst := filepath.Join(dir, "sub", "deep", "out.yaml")
@@ -675,9 +675,9 @@ func TestMigrateArbitraryPath(t *testing.T) {
 	}
 }
 
-// TestMigrateEmptyFile verifies an empty file gets filled with all defaults
-// rather than writing literal "null".
-func TestMigrateEmptyFile(t *testing.T) {
+// Verifies an empty file gets filled with all defaults rather than
+// writing literal "null".
+func TestMigrate_EmptyFile(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "empty.yaml")
 	dst := filepath.Join(dir, "config.yaml")
@@ -703,8 +703,8 @@ func TestMigrateEmptyFile(t *testing.T) {
 	}
 }
 
-// TestMigrateUnrelatedKeys verifies unknown user keys are preserved.
-func TestMigrateUnrelatedKeys(t *testing.T) {
+// Verifies unknown user keys are preserved.
+func TestMigrate_UnrelatedKeys(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "old.yaml")
 	dst := filepath.Join(dir, "config.yaml")
@@ -725,5 +725,171 @@ my_custom_key: keepme
 
 	if !strings.Contains(out, "my_custom_key: keepme") {
 		t.Error("migrate dropped unknown user key")
+	}
+}
+
+// Verifies exhaustive backfill: enabled=false booleans
+// are injected when absent, while empty api_key / models / presets
+// remain omitted. Starts from an empty file so every non-empty
+// default should appear.
+func TestMigrate_ExhaustiveDefaults(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "empty.yaml")
+	dst := filepath.Join(dir, "config.yaml")
+
+	if err := os.WriteFile(src, []byte(""), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Migrate(src, dst); err != nil {
+		t.Fatalf("Migrate failed: %v", err)
+	}
+
+	data, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatalf("read dest: %v", err)
+	}
+
+	out := string(data)
+
+	// Non-zero defaults must appear
+	for _, want := range []string{
+		"provider: ollama",
+		"base_url: http://127.0.0.1:11434",
+		"max_tool_iterations: 20",
+		"timeout: 120",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing expected default %q", want)
+		}
+	}
+
+	// Exhaustive: enabled=false must be injected
+	for _, want := range []string{
+		"sudo:",
+		"aws:",
+		"webfetch:",
+		"websearch:",
+		"enabled: false",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("exhaustive missing enabled false %q", want)
+		}
+	}
+
+	// Explicitly omitted zero-values must NOT appear
+	for _, bad := range []string{
+		`api_key: ""`,
+		`models: {}`,
+		`presets: []`,
+		`rules: []`,
+	} {
+		if strings.Contains(out, bad) {
+			t.Errorf("zero-value leaked %q", bad)
+		}
+	}
+}
+
+// Verifies that a scalar where a mapping is expected is preserved and
+// surfaced via DryMigrate.
+func TestMigrate_TypeMismatch(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "bad.yaml")
+	dst := filepath.Join(dir, "config.yaml")
+
+	content := `provider: ollama
+tools: "oops"
+`
+	if err := os.WriteFile(src, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := Migrate(src, dst); err != nil {
+		t.Fatalf("Migrate failed: %v", err)
+	}
+
+	data, _ := os.ReadFile(dst)
+	out := string(data)
+
+	// Original scalar must be preserved, not overwritten
+	if !strings.Contains(out, `tools: "oops"`) &&
+		!strings.Contains(out, "tools: oops") {
+		t.Error("migrate overwrote type-mismatched scalar")
+	}
+
+	// DryMigrate must surface the mismatch instead of silent no-op
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	if err := DryMigrate(src, dst); err != nil {
+		t.Fatalf("DryMigrate failed: %v", err)
+	}
+
+	w.Close()
+	os.Stdout = old
+
+	buf := make([]byte, 4096)
+	n, _ := r.Read(buf)
+	r.Close()
+
+	got := string(buf[:n])
+
+	if !strings.Contains(got, "type mismatch") {
+		t.Errorf("DryMigrate should report type mismatch, got %q", got)
+	}
+}
+
+// Ensures DryMigrate output is stable sorted.
+func TestFindMissingKeys_Sorted(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "partial.yaml")
+	dst := filepath.Join(dir, "config.yaml")
+
+	content := `provider: ollama
+tools:
+  timeout: 120
+`
+	if err := os.WriteFile(src, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	if err := DryMigrate(src, dst); err != nil {
+		t.Fatalf("DryMigrate failed: %v", err)
+	}
+
+	w.Close()
+	os.Stdout = old
+
+	buf := make([]byte, 8192)
+	n, _ := r.Read(buf)
+	r.Close()
+
+	got := string(buf[:n])
+
+	// Extract "+ <path>" lines and verify lexicographic order
+	var keys []string
+
+	for _, line := range strings.Split(got, "\n") {
+		line = strings.TrimSpace(line)
+
+		if strings.HasPrefix(line, "+ ") {
+			keys = append(keys, strings.TrimPrefix(line, "+ "))
+		}
+	}
+
+	if len(keys) < 2 {
+		t.Fatalf("expected multiple missing keys, got %v", keys)
+	}
+
+	for i := 1; i < len(keys); i++ {
+		if keys[i-1] > keys[i] {
+			t.Errorf("DryMigrate output not sorted: want %q <= %q in %v",
+				keys[i-1], keys[i], keys)
+		}
 	}
 }

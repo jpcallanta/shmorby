@@ -118,7 +118,7 @@ func mergeInstructions(primary string, paths []string) (string, []string, error)
 		if path == "" {
 			continue
 		}
-		// Use size-limited read to prevent OOM from oversized files (issue #46).
+		// Use size-limited read to prevent OOM from oversized files.
 		content, err := fileread.ReadFileLimited(path, 0)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -150,7 +150,7 @@ func findScopeFile() (string, bool, string) {
 	// Walk from cwd up to root.
 	for dir := wd; dir != root; dir = filepath.Dir(dir) {
 		path := filepath.Join(dir, "SCOPE.md")
-		// Use size-limited read to prevent OOM from oversized files (issue #46).
+		// Use size-limited read to prevent OOM from oversized files.
 		content, err := fileread.ReadFileLimited(path, 0)
 		if err == nil {
 			return string(content), true, path
@@ -185,7 +185,7 @@ func findScopeFile() (string, bool, string) {
 // Logs a warning if the file exceeds the size limit.
 func findUserScopeFile() (string, bool, string) {
 	path := filepath.Join(xdg.UserConfigDir(), "SCOPE.md")
-	// Use size-limited read to prevent OOM from oversized files (issue #46).
+	// Use size-limited read to prevent OOM from oversized files.
 	content, err := fileread.ReadFileLimited(path, 0)
 	if err == nil {
 		return string(content), true, path

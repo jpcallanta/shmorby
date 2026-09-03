@@ -1,12 +1,12 @@
 package agent
 
 import (
+	"strings"
 	"testing"
 
 	"shmorby/internal/config"
 	ctxcomp "shmorby/internal/context"
 	"shmorby/internal/llm"
-	"shmorby/internal/session"
 	"shmorby/internal/tools"
 )
 
@@ -40,10 +40,9 @@ func overriderForTest(t *testing.T) *ConfigOverrider {
 	var prov llm.Provider = &fakeProvider{name: "ollama"}
 	reg := tools.NewRegistry()
 	comp := ctxcomp.NewCompressor(ctxcomp.CompressorConfig{}, nil, nil, nil)
-	sess := session.New()
 
 	return NewConfigOverrider(
-		&cfg, &prov, reg, comp, sess,
+		&cfg, &prov, reg, comp,
 	)
 }
 
@@ -477,6 +476,7 @@ func TestSet_RequiresRestart_Nested(t *testing.T) {
 		{"memory.db_path", "/tmp/db"},
 		{"memory.max_entries", "500"},
 		{"memory.embedding.provider", "openai"},
+		{"memory.embedding.dimensions", "64"},
 		{"context.summary_model", "gpt-4"},
 		{"context.summary_provider", "openai"},
 		{"context.fallback_context_window", "16000"},
@@ -484,6 +484,7 @@ func TestSet_RequiresRestart_Nested(t *testing.T) {
 		{"context.max_tool_output_bytes", "10000"},
 		{"context.min_messages_to_compress", "10"},
 		{"context.max_tool_output_tokens", "2048"},
+		{"ledger.enabled", "false"},
 	}
 	co := overriderForTest(t)
 	for _, tc := range tests {
@@ -504,7 +505,9 @@ var changeableKeys = []string{
 	"tools.timeout", "tools.shell.enabled", "tools.sudo.enabled",
 	"tools.aws.enabled",
 	"permission.shell", "permission.ssh", "permission.sudo",
-	"permission.aws", "permission.interactive",
+	"permission.aws", "permission.find", "permission.file_read",
+	"permission.file_edit", "permission.file_write", "permission.grep",
+	"permission.interactive",
 	"tui.fullscreen", "tui.theme", "tui.glamour.enabled",
 	"tui.logging.default_level", "tui.logging.enabled",
 	"memory.auto_capture",
@@ -559,8 +562,8 @@ func TestOverrideableParams_ReturnsAll(t *testing.T) {
 	if len(params) == 0 {
 		t.Fatal("OverrideableParams returned empty slice")
 	}
-	if len(params) < 24 {
-		t.Errorf("expected at least 24 params, got %d", len(params))
+	if len(params) < 29 {
+		t.Errorf("expected at least 29 params, got %d", len(params))
 	}
 	// Verify each param has key, current, and options.
 	for _, p := range params {
@@ -598,6 +601,11 @@ func TestSet_Permission_AllLevels(t *testing.T) {
 		"permission.ssh",
 		"permission.sudo",
 		"permission.aws",
+		"permission.find",
+		"permission.file_read",
+		"permission.file_edit",
+		"permission.file_write",
+		"permission.grep",
 	}
 	for _, key := range keys {
 		t.Run(key, func(t *testing.T) {
@@ -717,7 +725,7 @@ func TestSet_APIKey_SetsCorrectField(t *testing.T) {
 			cfg.OpenRouter.APIKey = "sk-old"
 			cfg.OpencodeZen.APIKey = "sk-old"
 			var prov llm.Provider
-			co := NewConfigOverrider(&cfg, &prov, nil, nil, nil)
+			co := NewConfigOverrider(&cfg, &prov, nil, nil)
 			_, err := co.Set("apikey", "sk-test")
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
@@ -735,7 +743,7 @@ func TestSet_APIKey_OllamaError(t *testing.T) {
 		Provider: "ollama",
 		Model:    "llama3.2",
 	}
-	co := NewConfigOverrider(&cfg, nil, nil, nil, nil)
+	co := NewConfigOverrider(&cfg, nil, nil, nil)
 	_, err := co.Set("apikey", "sk-test")
 	if err == nil {
 		t.Fatal("expected error for ollama")
@@ -748,7 +756,7 @@ func TestSet_APIKey_UnknownProviderError(t *testing.T) {
 		Provider: "unknown",
 		Model:    "gpt-4o",
 	}
-	co := NewConfigOverrider(&cfg, nil, nil, nil, nil)
+	co := NewConfigOverrider(&cfg, nil, nil, nil)
 	_, err := co.Set("apikey", "sk-test")
 	if err == nil {
 		t.Fatal("expected error for unknown provider")
@@ -763,12 +771,73 @@ func TestSet_APIKey_RecreatesProvider(t *testing.T) {
 	}
 	cfg.OpenAI.APIKey = "sk-test-123"
 	var prov llm.Provider
-	co := NewConfigOverrider(&cfg, &prov, nil, nil, nil)
+	co := NewConfigOverrider(&cfg, &prov, nil, nil)
 	_, err := co.Set("apikey", "sk-test-456")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if prov == nil {
 		t.Error("provider should not be nil after apikey switch")
+	}
+}
+
+// TestSetPermission_DefaultCase verifies setPermission returns error
+// for unknown permission field names.
+func TestSetPermission_DefaultCase(t *testing.T) {
+	co := overriderForTest(t)
+	_, err := co.setPermission("permission.bogus", "allow")
+	if err == nil {
+		t.Fatal("expected error for unknown permission field")
+	}
+}
+
+// TestSetProvider_Message verifies setProvider returns expected message.
+func TestSetProvider_Message(t *testing.T) {
+	co := overriderForTest(t)
+	co.cfg.Provider = "openai"
+	co.cfg.OpenAI.APIKey = "sk-test"
+	var openAIProv llm.Provider = &fakeProvider{name: "openai"}
+	*co.provider = openAIProv
+
+	msg, err := co.Set("provider", "ollama")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(msg, "provider set to") {
+		t.Errorf("want confirmation in message, got %q", msg)
+	}
+}
+
+// TestSetModel_Message verifies setModel returns expected message.
+func TestSetModel_Message(t *testing.T) {
+	co := overriderForTest(t)
+	msg, err := co.Set("model", "gpt-4o")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(msg, "model set to") {
+		t.Errorf("want confirmation in message, got %q", msg)
+	}
+}
+
+// TestSetToolEnabled_Message verifies setToolEnabled returns expected message.
+func TestSetToolEnabled_Message(t *testing.T) {
+	co := overriderForTest(t)
+	msg, err := co.Set("tools.shell.enabled", "false")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(msg, "tools.shell.enabled set to") {
+		t.Errorf("want confirmation in message, got %q", msg)
+	}
+}
+
+// TestSetContext_UnknownParam verifies setContext returns error
+// for unknown params.
+func TestSetContext_UnknownParam(t *testing.T) {
+	co := overriderForTest(t)
+	_, err := co.setContext("context.bogus", "value")
+	if err == nil {
+		t.Fatal("expected error for unknown context param")
 	}
 }

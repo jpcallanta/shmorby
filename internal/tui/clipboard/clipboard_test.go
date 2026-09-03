@@ -62,7 +62,7 @@ func TestCopy_BeforeInit(t *testing.T) {
 	Copy("test")
 }
 
-func TestCopyPaste(t *testing.T) {
+func TestCopy_Paste(t *testing.T) {
 	once = sync.Once{}
 	initErr = nil
 
@@ -77,7 +77,7 @@ func TestCopyPaste(t *testing.T) {
 	}
 }
 
-func TestOsc52Copy(t *testing.T) {
+func TestOsc52_Copy(t *testing.T) {
 	// OSC-52 sequence format: ESC ] 52 ; c ; <base64> BEL
 	text := "test clipboard content"
 	encoded := base64.StdEncoding.EncodeToString([]byte(text))

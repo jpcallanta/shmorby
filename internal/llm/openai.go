@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"shmorby/internal/config"
+	"shmorby/internal/redact"
 )
 
 // openaiProvider sends requests to the OpenAI API.
@@ -64,10 +65,19 @@ func (p *openaiProvider) Chat(
 	}
 
 	body := openaiRequest{
-		Model:     model,
-		Messages:  buildOpenAIMessages(req),
-		Tools:     buildOpenAITools(req.Tools),
-		MaxTokens: req.MaxTokens,
+		Model:    model,
+		Messages: buildOpenAIMessages(req),
+		Tools:    buildOpenAITools(req.Tools),
+	}
+
+	// Reasoning models (o-series, gpt-5.x) require
+	// max_completion_tokens; legacy models use max_tokens.
+	if req.MaxTokens > 0 {
+		if IsReasoningModel(model) {
+			body.MaxCompletionTokens = req.MaxTokens
+		} else {
+			body.MaxTokens = req.MaxTokens
+		}
 	}
 
 	resp, err := p.doRequest(ctx, body)
@@ -92,11 +102,22 @@ func (p *openaiProvider) ChatStream(
 	}
 
 	body := openaiRequest{
-		Model:     model,
-		Messages:  buildOpenAIMessages(req),
-		Tools:     buildOpenAITools(req.Tools),
-		Stream:    true,
-		MaxTokens: req.MaxTokens,
+		Model:    model,
+		Messages: buildOpenAIMessages(req),
+		Tools:    buildOpenAITools(req.Tools),
+		Stream:   true,
+		// Request usage in the final streaming chunk for cost/audit.
+		StreamOptions: &streamOptions{IncludeUsage: true},
+	}
+
+	// Reasoning models (o-series, gpt-5.x) require
+	// max_completion_tokens; legacy models use max_tokens.
+	if req.MaxTokens > 0 {
+		if IsReasoningModel(model) {
+			body.MaxCompletionTokens = req.MaxTokens
+		} else {
+			body.MaxTokens = req.MaxTokens
+		}
 	}
 
 	var buf bytes.Buffer
@@ -119,26 +140,39 @@ func (p *openaiProvider) ChatStream(
 	}
 
 	if httpResp.StatusCode >= 400 {
-		bodyBytes, _ := io.ReadAll(httpResp.Body)
+		// Limit and redact error body to prevent API key
+		// echo-back from leaking into logs.
+		bodyBytes, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1024))
 		httpResp.Body.Close()
 		return nil, fmt.Errorf(
 			"openai returned status %d: %s",
-			httpResp.StatusCode, string(bodyBytes),
+			httpResp.StatusCode, redact.SecretString(string(bodyBytes)),
 		)
 	}
 
 	events := make(chan StreamEvent)
-	go p.readSSEStream(httpResp.Body, events)
+	go p.readSSEStream(ctx, httpResp.Body, events)
 	return events, nil
 }
 
 // Reads SSE lines and emits StreamEvents until done or error.
+// The ctx parameter allows the caller to cancel the stream; when
+// cancelled, the goroutine closes the body to unblock the scanner
+// and exits promptly to prevent goroutine leaks on cancel.
 func (p *openaiProvider) readSSEStream(
+	ctx context.Context,
 	body io.ReadCloser,
 	events chan<- StreamEvent,
 ) {
 	defer close(events)
 	defer func() { _ = body.Close() }()
+
+	// Close the body when context is cancelled to unblock
+	// scanner.Scan() which blocks on the HTTP response body.
+	go func() {
+		<-ctx.Done()
+		body.Close()
+	}()
 
 	scanner := bufio.NewScanner(body)
 	for scanner.Scan() {
@@ -160,7 +194,21 @@ func (p *openaiProvider) readSSEStream(
 			}
 			return
 		}
+		// Usage-only chunks (final streaming chunk with
+		// stream_options.include_usage) have empty choices — surface
+		// usage via a dedicated StreamEvent for audit/cost logging.
 		if len(chunk.Choices) == 0 {
+			if chunk.Usage != nil {
+				events <- StreamEvent{
+					Type: "usage",
+					Content: fmt.Sprintf(
+						`{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}`,
+						chunk.Usage.PromptTokens,
+						chunk.Usage.CompletionTokens,
+						chunk.Usage.TotalTokens,
+					),
+				}
+			}
 			continue
 		}
 		delta := chunk.Choices[0].Delta
@@ -170,6 +218,15 @@ func (p *openaiProvider) readSSEStream(
 			events <- StreamEvent{
 				Type:  "text",
 				Delta: *delta.Content,
+			}
+		}
+		// Reasoning deltas from o-series and gpt-5.x models.
+		// StreamEvent already has a "reasoning" type used by other
+		// providers, so this wires it up for OpenAI.
+		if delta.Reasoning != nil && *delta.Reasoning != "" {
+			events <- StreamEvent{
+				Type:  "reasoning",
+				Delta: *delta.Reasoning,
 			}
 		}
 		for _, tc := range delta.ToolCalls {
@@ -217,10 +274,12 @@ func (p *openaiProvider) fetchModelInfo(
 	defer func() { _ = httpResp.Body.Close() }()
 
 	if httpResp.StatusCode >= 400 {
-		bodyBytes, _ := io.ReadAll(httpResp.Body)
+		// Limit and redact error body to prevent API key
+		// echo-back from leaking into logs.
+		bodyBytes, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1024))
 		return ModelInfo{}, fmt.Errorf(
 			"openai returned status %d: %s",
-			httpResp.StatusCode, string(bodyBytes),
+			httpResp.StatusCode, redact.SecretString(string(bodyBytes)),
 		)
 	}
 
@@ -254,9 +313,14 @@ func (p *openaiProvider) fetchModelInfo(
 		)
 	}
 
+	// Populate MaxOutputTokens from the registry so the output cap
+	// is applied automatically without requiring a config override.
+	_mot, _ := matchOpenAIMaxOutputTokens(model)
+
 	return ModelInfo{
-		ContextWindow: cw,
-		SupportsTools: true,
+		ContextWindow:   cw,
+		MaxOutputTokens: _mot,
+		SupportsTools:   true,
 	}, nil
 }
 
@@ -277,26 +341,38 @@ func (p *openaiProvider) ModelInfo(
 // Snapshot/date-stamped model IDs (e.g. gpt-4o-mini-2024-07-18)
 // resolve via the longest registry key that is a prefix of the
 // requested name — see matchOpenAIContextWindow.
+//
+// Values verified against OpenAI platform docs (2026-08-07):
+// https://platform.openai.com/docs/models
 var openAIModelContextWindows = map[string]int{
-	// GPT-5 series — keep in sync with zenModelContextWindows
-	// (opencode_zen.go) to avoid drift.
-	"gpt-5.5":             272000,
-	"gpt-5.5-pro":         272000,
-	"gpt-5.4":             272000,
-	"gpt-5.4-pro":         272000,
-	"gpt-5.4-mini":        272000,
-	"gpt-5.4-nano":        272000,
-	"gpt-5.3-codex":       272000,
-	"gpt-5.3-codex-spark": 272000,
-	"gpt-5.2":             272000,
-	"gpt-5.2-codex":       272000,
-	"gpt-5.1":             272000,
-	"gpt-5.1-codex":       272000,
-	"gpt-5.1-codex-max":   272000,
-	"gpt-5.1-codex-mini":  272000,
-	"gpt-5":               272000,
-	"gpt-5-codex":         272000,
-	"gpt-5-nano":          272000,
+	// GPT-5.6 series — current flagship (Aug 2026)
+	"gpt-5.6-sol":   1050000,
+	"gpt-5.6-terra": 1050000,
+	"gpt-5.6-luna":  1050000,
+
+	// GPT-5.5 / 5.4 series — 1M context window
+	// (272K was the long-context pricing tier, NOT the window)
+	"gpt-5.5":     1050000,
+	"gpt-5.5-pro": 1050000,
+	"gpt-5.4":     1050000,
+	"gpt-5.4-pro": 1050000,
+
+	// GPT-5.4 mini/nano — 400K context (272K max input)
+	"gpt-5.4-mini": 400000,
+	"gpt-5.4-nano": 400000,
+
+	// GPT-5.3 codex — 400K context (estimated)
+	"gpt-5.3-codex":       400000,
+	"gpt-5.3-codex-spark": 400000,
+
+	// GPT-5.2 / 5.1 — 400K context
+	"gpt-5.2":      400000,
+	"gpt-5.1":      400000,
+	"gpt-5.1-mini": 400000,
+
+	// GPT-5 — 272K context (correct)
+	"gpt-5":      272000,
+	"gpt-5-nano": 272000,
 
 	// GPT-4.1 (1M context)
 	"gpt-4.1":      1048576,
@@ -304,18 +380,16 @@ var openAIModelContextWindows = map[string]int{
 	"gpt-4.1-nano": 1048576,
 
 	// GPT-4o / o-series
-	"o1":                200000,
-	"o1-mini":           128000,
-	"o1-preview":        128000,
-	"o3":                200000,
-	"o3-mini":           200000,
-	"o4-mini":           200000,
-	"o4-mini-high":      200000,
-	"gpt-4o":            128000,
-	"gpt-4o-mini":       128000,
-	"gpt-4o-audio":      128000,
-	"gpt-4o-search":     128000,
-	"chatgpt-4o-latest": 128000,
+	"o1":           200000,
+	"o1-mini":      128000,
+	"o1-preview":   128000,
+	"o3":           200000,
+	"o3-mini":      200000,
+	"o4-mini":      200000,
+	"o4-mini-high": 200000,
+	"gpt-4o":       128000,
+	"gpt-4o-mini":  128000,
+	"gpt-4o-audio": 128000,
 
 	// GPT-4 Turbo / Legacy
 	"gpt-4-turbo":         128000,
@@ -326,6 +400,79 @@ var openAIModelContextWindows = map[string]int{
 	// GPT-3.5 Turbo
 	"gpt-3.5-turbo":     16385,
 	"gpt-3.5-turbo-16k": 16385,
+}
+
+// Known max output tokens for OpenAI models.
+// Used to populate ModelInfo.MaxOutputTokens so the output cap
+// is applied automatically (previously only set via config override).
+var openAIModelMaxOutputTokens = map[string]int{
+	// GPT-5.6 / 5.5 / 5.4 — 128K max output
+	"gpt-5.6-sol":   128000,
+	"gpt-5.6-terra": 128000,
+	"gpt-5.6-luna":  128000,
+	"gpt-5.5":       128000,
+	"gpt-5.5-pro":   128000,
+	"gpt-5.4":       128000,
+	"gpt-5.4-pro":   128000,
+	"gpt-5.4-mini":  128000,
+	"gpt-5.4-nano":  128000,
+	"gpt-5.3-codex": 128000,
+	"gpt-5.2":       128000,
+	"gpt-5.1":       128000,
+	"gpt-5.1-mini":  128000,
+	"gpt-5":         128000,
+	"gpt-5-nano":    128000,
+
+	// GPT-4.1 — 32K max output
+	"gpt-4.1":      32768,
+	"gpt-4.1-mini": 32768,
+	"gpt-4.1-nano": 32768,
+
+	// o-series — 32K max output (o1/o3); 65K (o1-mini, o3-mini, o4-mini)
+	"o1":      32768,
+	"o1-mini": 65536,
+	"o3":      32768,
+	"o3-mini": 65536,
+	"o4-mini": 65536,
+
+	// GPT-4o — 16K max output
+	"gpt-4o":      16384,
+	"gpt-4o-mini": 16384,
+
+	// GPT-4 Turbo — 4K max output
+	"gpt-4-turbo": 4096,
+	"gpt-4":       4096,
+
+	// GPT-3.5 Turbo — 4K max output
+	"gpt-3.5-turbo": 4096,
+}
+
+// matchOpenAIMaxOutputTokens returns the known max output tokens
+// for a model using the same prefix-matching logic as
+// matchOpenAIContextWindow.
+func matchOpenAIMaxOutputTokens(model string) (int, bool) {
+	if mot, ok := openAIModelMaxOutputTokens[model]; ok {
+		return mot, true
+	}
+
+	best := 0
+	bestMOT := 0
+	found := false
+	for key, mot := range openAIModelMaxOutputTokens {
+		if len(key) <= best || len(key) >= len(model) {
+			continue
+		}
+		if !strings.HasPrefix(model, key) {
+			continue
+		}
+		if c := model[len(key)]; c != '-' && c != '.' && c != '_' {
+			continue
+		}
+		best = len(key)
+		bestMOT = mot
+		found = true
+	}
+	return bestMOT, found
 }
 
 // matchOpenAIContextWindow returns the known context window for a
@@ -410,11 +557,13 @@ func (p *openaiProvider) doRequest(
 			continue
 		}
 		if httpResp.StatusCode >= 400 {
-			bodyBytes, _ := io.ReadAll(httpResp.Body)
+			// Limit and redact error body to prevent API key
+			// echo-back from leaking into logs.
+			bodyBytes, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1024))
 			httpResp.Body.Close()
 			return openaiResponse{}, fmt.Errorf(
 				"openai returned status %d: %s",
-				httpResp.StatusCode, string(bodyBytes),
+				httpResp.StatusCode, redact.SecretString(string(bodyBytes)),
 			)
 		}
 
@@ -444,6 +593,7 @@ func (p *openaiProvider) setHeaders(req *http.Request) {
 // Streaming chunk from OpenAI SSE response.
 type openaiStreamChunk struct {
 	Choices []openaiStreamChoice `json:"choices"`
+	Usage   *openaiUsage         `json:"usage,omitempty"`
 }
 
 type openaiStreamChoice struct {
@@ -453,6 +603,7 @@ type openaiStreamChoice struct {
 
 type openaiStreamDelta struct {
 	Content   *string            `json:"content"`
+	Reasoning *string            `json:"reasoning"`
 	ToolCalls []openaiStreamTool `json:"tool_calls"`
 }
 

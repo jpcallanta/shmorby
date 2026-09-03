@@ -1,56 +1,17 @@
 package navigation
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"os/exec"
 	"strings"
 	"time"
+
+	cmdexec "shmorby/internal/exec"
 )
 
-// Executor runs shell commands (same interface as tools.Executor).
-type Executor interface {
-	Run(ctx context.Context, name string, args ...string) ([]byte, error)
-}
-
-// OSExecutor uses the real os/exec package.
-type OSExecutor struct{}
-
-// Run executes a command and returns combined output, with
-// process-group isolation so the entire process tree is killed
-// when the context is cancelled.
-func (OSExecutor) Run(
-	ctx context.Context, name string, args ...string,
-) ([]byte, error) {
-	cmd := exec.Command(name, args...)
-	setupProcessGroup(cmd)
-
-	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-
-	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("start: %w", err)
-	}
-
-	go func() {
-		<-ctx.Done()
-		if cmd.Process != nil {
-			killProcessGroup(cmd.Process.Pid)
-		}
-	}()
-
-	err := cmd.Wait()
-	if ctx.Err() != nil {
-		return buf.Bytes(), fmt.Errorf("exec: %w", ctx.Err())
-	}
-	if err != nil {
-		return buf.Bytes(), err
-	}
-
-	return buf.Bytes(), nil
-}
+// Executor runs external commands. Canonical definition is in
+// internal/exec; this alias preserves backward compatibility.
+type Executor = cmdexec.Executor
 
 // Output holds the result of a shell command execution.
 type Output struct {

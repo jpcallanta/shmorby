@@ -40,9 +40,18 @@ type ChatRequest struct {
 // Use Text() to access the assistant's text content; Message.Content
 // is the canonical field (no separate top-level Text).
 type ChatResponse struct {
+	ID           string     `json:"id,omitempty"`
 	Message      Message    `json:"message"`
 	ToolCalls    []ToolCall `json:"tool_calls"`
 	FinishReason string     `json:"finish_reason"`
+	Usage        Usage      `json:"usage,omitempty"`
+}
+
+// Usage holds token counts from a chat response.
+type Usage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
 }
 
 // Returns the assistant's text content (Message.Content).

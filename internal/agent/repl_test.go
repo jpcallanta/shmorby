@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/term"
 
 	"shmorby/internal/config"
 	ctxcomp "shmorby/internal/context"
@@ -117,7 +120,7 @@ func TestREPLHelp_KeyboardShortcuts(t *testing.T) {
 	output := out.String()
 	shortcuts := []string{
 		"ctrl+h", "ctrl+p", "ctrl+r", "ctrl+c",
-		"ctrl+v", "ctrl+l", "ctrl+t", "ctrl+x",
+		"ctrl+z", "ctrl+v", "ctrl+l", "ctrl+t", "ctrl+x",
 	}
 	for _, sc := range shortcuts {
 		if !strings.Contains(output, sc) {
@@ -360,7 +363,7 @@ func TestREPL_ToolStart_RendersHeader(t *testing.T) {
 	}
 	sess := session.New()
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{name: "shell", result: "ok"})
+	_ = reg.Register(&fakeTool{name: "shell", result: "ok"})
 
 	r := &REPL{
 		Provider:     p,
@@ -418,7 +421,7 @@ func TestREPL_ToolEnd_Success_RendersStatus(t *testing.T) {
 	}
 	sess := session.New()
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{name: "shell", result: "ok output"})
+	_ = reg.Register(&fakeTool{name: "shell", result: "ok output"})
 
 	r := &REPL{
 		Provider:     p,
@@ -490,7 +493,7 @@ func TestREPL_MultipleTools_EachRendered(t *testing.T) {
 	}
 	sess := session.New()
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{name: "shell", result: "output"})
+	_ = reg.Register(&fakeTool{name: "shell", result: "output"})
 
 	r := &REPL{
 		Provider:     p,
@@ -751,7 +754,7 @@ func TestREPL_ToolEnd_Error_RendersError(t *testing.T) {
 	}
 	sess := session.New()
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{
+	_ = reg.Register(&fakeTool{
 		name:   "shell",
 		result: "partial output",
 		err:    fmt.Errorf("exit code 1"),
@@ -817,7 +820,7 @@ func TestREPL_ToolSpinner_Shown(t *testing.T) {
 	sess := session.New()
 	reg := tools.NewRegistry()
 	// Use sleepy tool so spinner has time to tick.
-	reg.Register(&sleepyTool{
+	_ = reg.Register(&sleepyTool{
 		name: "shell", result: "ok", sleep: 200 * time.Millisecond,
 	})
 
@@ -877,7 +880,7 @@ func TestREPL_ToolSpinner_KilledOnEnd(t *testing.T) {
 	}
 	sess := session.New()
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{name: "shell", result: "output text"})
+	_ = reg.Register(&fakeTool{name: "shell", result: "output text"})
 
 	r := &REPL{
 		Provider:     p,
@@ -1094,7 +1097,7 @@ func TestREPL_PermissionPrompt_Streaming(t *testing.T) {
 	}
 	sess := session.New()
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{
+	_ = reg.Register(&fakeTool{
 		name: "shell", result: "Uptime: 10 days", perm: "ask",
 	})
 
@@ -1136,7 +1139,7 @@ func TestREPL_SetCommand_Valid(t *testing.T) {
 	reg := tools.NewRegistry()
 	comp := ctxcomp.NewCompressor(ctxcomp.CompressorConfig{}, nil, nil, nil)
 	sess := session.New()
-	co := NewConfigOverrider(&cfg, &prov, reg, comp, sess)
+	co := NewConfigOverrider(&cfg, &prov, reg, comp)
 
 	r := &REPL{
 		Provider:        prov,
@@ -1168,7 +1171,7 @@ func TestREPL_SetCommand_Invalid(t *testing.T) {
 	reg := tools.NewRegistry()
 	comp := ctxcomp.NewCompressor(ctxcomp.CompressorConfig{}, nil, nil, nil)
 	sess := session.New()
-	co := NewConfigOverrider(&cfg, &prov, reg, comp, sess)
+	co := NewConfigOverrider(&cfg, &prov, reg, comp)
 
 	r := &REPL{
 		Provider:        prov,
@@ -1200,7 +1203,7 @@ func TestREPL_SetCommand_NoValue(t *testing.T) {
 	reg := tools.NewRegistry()
 	comp := ctxcomp.NewCompressor(ctxcomp.CompressorConfig{}, nil, nil, nil)
 	sess := session.New()
-	co := NewConfigOverrider(&cfg, &prov, reg, comp, sess)
+	co := NewConfigOverrider(&cfg, &prov, reg, comp)
 
 	r := &REPL{
 		Provider:        prov,
@@ -1232,7 +1235,7 @@ func TestREPL_Help_ShowsParams(t *testing.T) {
 	reg := tools.NewRegistry()
 	comp := ctxcomp.NewCompressor(ctxcomp.CompressorConfig{}, nil, nil, nil)
 	sess := session.New()
-	co := NewConfigOverrider(&cfg, &prov, reg, comp, sess)
+	co := NewConfigOverrider(&cfg, &prov, reg, comp)
 
 	r := &REPL{
 		Provider:        prov,
@@ -1269,7 +1272,7 @@ func TestREPL_SetCommand_QuotedValue(t *testing.T) {
 		ctxcomp.CompressorConfig{}, nil, nil, nil,
 	)
 	sess := session.New()
-	co := NewConfigOverrider(&cfg, &prov, reg, comp, sess)
+	co := NewConfigOverrider(&cfg, &prov, reg, comp)
 
 	r := &REPL{
 		Provider: prov,
@@ -1291,5 +1294,89 @@ func TestREPL_SetCommand_QuotedValue(t *testing.T) {
 	output := out.String()
 	if !strings.Contains(output, "agent.shell") {
 		t.Errorf("want confirmation with agent.shell, got:\n%s", output)
+	}
+}
+
+// TestREPL_SetupJobControl_InitializesHandlers checks that setupJobControl
+// installs signal handlers for SIGTSTP and SIGCONT without panic, and
+// that teardown via jobControlDone stops the goroutine cleanly.
+func TestREPL_SetupJobControl_InitializesHandlers(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("job control not supported on Windows")
+	}
+
+	defer SetTerminalForTest(true)()
+
+	r := &REPL{
+		Provider: &fakeProvider{name: "test"},
+		Session:  session.New(),
+		Mode:     "operate",
+		Model:    "test-model",
+		In:       strings.NewReader(""),
+		Out:      &bytes.Buffer{},
+		inRaw:    true,
+		oldState: &term.State{}, // non-nil to satisfy the guard
+	}
+
+	// Should not panic.
+	r.setupJobControl()
+
+	// savedOld should be set (stores the oldState pointer).
+	saved, ok := r.savedOld.Load().(*term.State)
+	if !ok || saved == nil {
+		t.Error("setupJobControl should store non-nil savedOld when oldState is non-nil")
+	}
+
+	// jobControlDone should be set for teardown.
+	if r.jobControlDone == nil {
+		t.Error("setupJobControl should set jobControlDone for teardown")
+	}
+
+	// Teardown: close done channel to stop the goroutine.
+	close(r.jobControlDone)
+	// Give the goroutine a moment to exit.
+	time.Sleep(10 * time.Millisecond)
+}
+
+// TestREPL_SetupJobControl_NilOldState checks that setupJobControl
+// does not store a typed-nil when oldState is nil.
+func TestREPL_SetupJobControl_NilOldState(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("job control not supported on Windows")
+	}
+
+	defer SetTerminalForTest(true)()
+
+	r := &REPL{
+		Provider: &fakeProvider{name: "test"},
+		Session:  session.New(),
+		Mode:     "operate",
+		Model:    "test-model",
+		In:       strings.NewReader(""),
+		Out:      &bytes.Buffer{},
+		inRaw:    true,
+		oldState: nil, // nil oldState
+	}
+
+	r.setupJobControl()
+
+	// savedOld should NOT be set when oldState is nil (guard works).
+	saved, ok := r.savedOld.Load().(*term.State)
+	if ok && saved != nil {
+		t.Error("setupJobControl should not store savedOld when oldState is nil")
+	}
+
+	// Teardown.
+	if r.jobControlDone != nil {
+		close(r.jobControlDone)
+	}
+}
+
+// TestREPL_SuspendedFlag_InitialState checks that the suspended flag
+// starts as false.
+func TestREPL_SuspendedFlag_InitialState(t *testing.T) {
+	r := &REPL{}
+	if r.suspended.Load() {
+		t.Error("suspended should be false initially")
 	}
 }

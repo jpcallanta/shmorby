@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"shmorby/internal/audit"
+	"shmorby/internal/health"
 )
 
 //go:embed webfetch.txt
@@ -47,18 +48,27 @@ const (
 // WebFetchTool implements Tool for fetching web page content.
 type WebFetchTool struct {
 	perm           string
-	client         HTTPClient
+	client         *http.Client
 	defaultTimeout int
 	auditLogger    *audit.Logger
 }
 
-// NewWebFetchTool creates a WebFetchTool with the given permission
+// Creates a WebFetchTool with the given permission
 // level and HTTP client. Pass nil client to use a default http.Client
 // with SSRF-safe redirect validation (no timeout — the context
 // deadline in Run controls the timeout).
-func NewWebFetchTool(permLevel string, client HTTPClient) *WebFetchTool {
+func NewWebFetchTool(permLevel string, client *http.Client) *WebFetchTool {
 	if client == nil {
+		// Use a custom DialContext that resolves DNS and validates
+		// IPs at connection time, closing the TOCTOU gap between
+		// DNS resolution (before request) and TCP connect (during
+		// request). Without this, an attacker with TTL=0 DNS can
+		// rebind to a private IP between validation and connection.
+		transport := &http.Transport{
+			DialContext: safeDialContext,
+		}
 		client = &http.Client{
+			Transport: transport,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				return validateURLNotPrivate(req.URL)
 			},
@@ -71,7 +81,7 @@ func NewWebFetchTool(permLevel string, client HTTPClient) *WebFetchTool {
 	}
 }
 
-// SetDefaultTimeout sets the default timeout in seconds for this tool.
+// Sets the default timeout in seconds for this tool.
 func (w *WebFetchTool) SetDefaultTimeout(t int) {
 	if t > 0 {
 		w.defaultTimeout = t
@@ -87,13 +97,13 @@ func (w *WebFetchTool) Description() string { return webfetchDescription }
 // Parameters returns the JSON schema for webfetch parameters.
 func (w *WebFetchTool) Parameters() json.RawMessage { return webfetchParams }
 
-// PermLevel returns the configured permission level.
+// Returns the configured permission level.
 func (w *WebFetchTool) PermLevel() string { return w.perm }
 
-// SetPerm updates the permission level at runtime.
+// Updates the permission level at runtime.
 func (w *WebFetchTool) SetPerm(level string) { w.perm = level }
 
-// SetAuditLogger sets the audit logger for this tool.
+// Sets the audit logger for this tool.
 func (w *WebFetchTool) SetAuditLogger(l *audit.Logger) {
 	w.auditLogger = l
 }
@@ -120,7 +130,72 @@ var isPrivateIP = func(ip net.IP) bool {
 // can override to avoid real DNS lookups.
 var resolveHost = net.LookupIP
 
-// validateURLNotPrivate checks that a URL does not target a private,
+// safeDialContext resolves DNS and validates IPs at connection time,
+// closing the TOCTOU gap between DNS resolution and TCP connect.
+// Without this, an attacker controlling a DNS name can respond with
+// a public IP during validation, then rebind to 127.0.0.1,
+// 169.254.169.254, or 10.x.x.x before the connection is established.
+//
+// NOTE: This deliberately performs a second DNS resolution at connect
+// time (the first is in validateURLNotPrivate before the request).
+// The redundant lookup is intentional — it closes the TOCTOU gap by
+// ensuring the IP we connect to is the same one that was validated.
+var safeDialContext = func(
+	ctx context.Context, network, addr string,
+) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("webfetch: split addr: %w", err)
+	}
+
+	// Resolve DNS at connection time, not before the request.
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, fmt.Errorf("webfetch: resolve %s: %w", host, err)
+	}
+	for _, ip := range ips {
+		if isPrivateIP(ip.IP) {
+			return nil, fmt.Errorf(
+				"webfetch: resolved %s to private IP %s, blocked",
+				host, ip.IP,
+			)
+		}
+	}
+
+	// Connect to a non-private IP. Iterate all resolved IPs so that
+	// a transient connection failure on one address falls back to the
+	// next, matching the standard resolver's multi-address behavior.
+	var d net.Dialer
+	var firstErr error
+	for _, ip := range ips {
+		if isPrivateIP(ip.IP) {
+			continue
+		}
+		// Rebuild addr with the resolved IP to avoid a second
+		// DNS lookup by the default dialer. net.JoinHostPort
+		// handles IPv6 bracket wrapping automatically.
+		resolved := net.JoinHostPort(ip.IP.String(), port)
+		conn, dialErr := d.DialContext(ctx, network, resolved)
+		if dialErr == nil {
+			return conn, nil
+		}
+		if firstErr == nil {
+			firstErr = dialErr
+		}
+	}
+
+	// All IPs failed or were private — return the first error.
+	if firstErr != nil {
+		return nil, fmt.Errorf(
+			"webfetch: dial %s: %w", host, firstErr,
+		)
+	}
+	return nil, fmt.Errorf(
+		"webfetch: no public IPs for %s", host,
+	)
+}
+
+// Checks that a URL does not target a private,
 // loopback, or link-local address. Called for the initial URL and by
 // CheckRedirect on every redirect hop.
 func validateURLNotPrivate(u *url.URL) error {
@@ -151,7 +226,7 @@ func validateURLNotPrivate(u *url.URL) error {
 	return nil
 }
 
-// Run fetches a URL and returns the response body as plain text.
+// Fetches a URL and returns the response body as plain text.
 func (w *WebFetchTool) Run(
 	ctx context.Context, args json.RawMessage,
 ) (string, error) {
@@ -215,9 +290,16 @@ func (w *WebFetchTool) Run(
 		}
 		w.logAudit(a.URL, string(args), elapsed, 0, errMsg)
 		if cmdCtx.Err() != nil {
-			return "", fmt.Errorf("webfetch: request cancelled or timed out")
+			return "", health.Wrap("webfetch", elapsed,
+				fmt.Errorf(
+					"webfetch: request cancelled or timed out: %w",
+					cmdCtx.Err(),
+				),
+			)
 		}
-		return "", fmt.Errorf("webfetch: request failed: %w", err)
+		return "", health.Wrap("webfetch", elapsed,
+			fmt.Errorf("webfetch: request failed: %w", err),
+		)
 	}
 	defer resp.Body.Close()
 
@@ -225,7 +307,9 @@ func (w *WebFetchTool) Run(
 		elapsed := time.Since(start)
 		errMsg := fmt.Sprintf("GET %s returned %d", a.URL, resp.StatusCode)
 		w.logAudit(a.URL, string(args), elapsed, resp.StatusCode, errMsg)
-		return "", fmt.Errorf("webfetch: %s", errMsg)
+		return "", health.Wrap("webfetch", elapsed,
+			fmt.Errorf("webfetch: %s", errMsg),
+		)
 	}
 
 	// Read maxBytes+1 so we can detect truncation accurately.
@@ -233,7 +317,9 @@ func (w *WebFetchTool) Run(
 	if err != nil {
 		elapsed := time.Since(start)
 		w.logAudit(a.URL, string(args), elapsed, resp.StatusCode, err.Error())
-		return "", fmt.Errorf("webfetch: read body: %w", err)
+		return "", health.Wrap("webfetch", elapsed,
+			fmt.Errorf("webfetch: read body: %w", err),
+		)
 	}
 
 	elapsed := time.Since(start)
@@ -260,7 +346,7 @@ func (w *WebFetchTool) Run(
 	return string(TruncateOutput([]byte(result))), nil
 }
 
-// logAudit sends a tool-run entry to the audit logger if configured.
+// Sends a tool-run entry to the audit logger if configured.
 func (w *WebFetchTool) logAudit(
 	url, args string, duration time.Duration,
 	statusCode int, errMsg string,
@@ -269,10 +355,13 @@ func (w *WebFetchTool) logAudit(
 		return
 	}
 	code := statusCode
+	// Redact args before audit logging to prevent secrets embedded
+	// in URLs (API keys, tokens) from persisting in plaintext in
+	// the SQLite audit database.
 	w.auditLogger.LogToolRun(
 		audit.AuditEntry{
 			Tool:       "webfetch",
-			Args:       args,
+			Args:       string(RedactArgs([]byte(args))),
 			DurationMs: duration.Milliseconds(),
 			ExitCode:   &code,
 			Error:      errMsg,

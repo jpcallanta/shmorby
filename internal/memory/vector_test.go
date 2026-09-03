@@ -1,8 +1,11 @@
 package memory
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	chromem "github.com/philippgille/chromem-go"
@@ -316,6 +319,59 @@ func TestMigrateToVectors_SkipsWhenNilVector(t *testing.T) {
 	err := s.migrateToVectors(context.Background(), nil, emb)
 	if err != nil {
 		t.Fatalf("migrateToVectors: %v", err)
+	}
+}
+
+// TestMigrateToVectors_WarnsOnDimensionMismatch verifies a warning is
+// logged when the persisted collection holds vectors of a different
+// dimension than the configured embedder produces.
+func TestMigrateToVectors_WarnsOnDimensionMismatch(t *testing.T) {
+	s := newTestSQLiteStore(t)
+	ctx := context.Background()
+
+	entry := MemoryEntry{
+		ID:        "dim-entry",
+		SessionID: "s1",
+		Command:   "echo hi",
+	}
+	if err := s.Insert(entry); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	db := chromem.NewDB()
+	vs, err := NewVectorStore(db, "test-dim", testEmbed)
+	if err != nil {
+		t.Fatalf("NewVectorStore: %v", err)
+	}
+
+	// Persisted collection holds 8-dim vectors (model default).
+	_ = vs.Upsert(ctx, "dim-entry", make([]float32, 8), nil)
+
+	// Configured embedder now produces 4-dim vectors.
+	emb := &fixedEmbedder{dim: 4}
+
+	var out bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&out, nil)))
+	defer slog.SetDefault(prev)
+
+	err = s.migrateToVectors(ctx, vs, emb)
+	if err != nil {
+		t.Fatalf("migrateToVectors: %v", err)
+	}
+
+	if !strings.Contains(out.String(), "dimension differs") {
+		t.Errorf("expected dimension-mismatch warning, got:\n%s", out.String())
+	}
+
+	// Matching dimension should not warn.
+	out.Reset()
+	err = s.migrateToVectors(ctx, vs, &fixedEmbedder{dim: 8})
+	if err != nil {
+		t.Fatalf("migrateToVectors (match): %v", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("unexpected warning for matching dimension:\n%s", out.String())
 	}
 }
 

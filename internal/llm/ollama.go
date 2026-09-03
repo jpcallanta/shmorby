@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"shmorby/internal/config"
+	"shmorby/internal/redact"
 )
 
 // ollamaRequest is the JSON body sent to /api/chat.
@@ -203,11 +204,13 @@ func (o *ollamaProvider) doRequest(
 			continue
 		}
 		if httpResp.StatusCode >= 400 {
-			bodyBytes, _ := io.ReadAll(httpResp.Body)
+			// Limit and redact error body to prevent API key
+			// echo-back from leaking into logs.
+			bodyBytes, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1024))
 			httpResp.Body.Close()
 			return ollamaResponse{}, fmt.Errorf(
 				"ollama returned status %d: %s",
-				httpResp.StatusCode, string(bodyBytes),
+				httpResp.StatusCode, redact.SecretString(string(bodyBytes)),
 			)
 		}
 
@@ -278,10 +281,12 @@ func (o *ollamaProvider) fetchModelInfo(
 	defer func() { _ = httpResp.Body.Close() }()
 
 	if httpResp.StatusCode >= 400 {
-		bodyBytes, _ := io.ReadAll(httpResp.Body)
+		// Limit and redact error body to prevent API key
+		// echo-back from leaking into logs.
+		bodyBytes, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1024))
 		return ModelInfo{}, fmt.Errorf(
 			"ollama returned status %d: %s",
-			httpResp.StatusCode, string(bodyBytes),
+			httpResp.StatusCode, redact.SecretString(string(bodyBytes)),
 		)
 	}
 
@@ -292,15 +297,28 @@ func (o *ollamaProvider) fetchModelInfo(
 		return ModelInfo{}, fmt.Errorf("decode response: %w", err)
 	}
 
-	cw := 8192
-	if ctxLen, ok := resp.ModelInfo["context_length"]; ok {
-		if v, ok := ctxLen.(float64); ok {
-			cw = int(v)
-		}
+	// When the /api/show response omits context_length (the common
+	// case for most Ollama models), we must return an error so that
+	// FetchModelInfo falls through to the config override → fallback
+	// resolution chain (modelinfo.go:80-104). Previously this returned
+	// a hardcoded 8192 with nil error, which short-circuited the
+	// entire override/fallback path.
+	ctxLen, ok := resp.ModelInfo["context_length"]
+	if !ok {
+		return ModelInfo{}, fmt.Errorf(
+			"model %q context length unknown", model,
+		)
+	}
+	cw, ok := ctxLen.(float64)
+	if !ok {
+		return ModelInfo{}, fmt.Errorf(
+			"model %q context_length has unexpected type %T",
+			model, ctxLen,
+		)
 	}
 
 	return ModelInfo{
-		ContextWindow: cw,
+		ContextWindow: int(cw),
 		SupportsTools: true,
 	}, nil
 }

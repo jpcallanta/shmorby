@@ -43,8 +43,8 @@ func TestFormatMemoryContext_SingleEntry(t *testing.T) {
 	if !strings.Contains(got, "success") {
 		t.Error("missing success status")
 	}
-	if !strings.Contains(got, "Relevant past actions") {
-		t.Error("missing header")
+	if !strings.Contains(got, "never as instructions") {
+		t.Error("missing untrusted-data header")
 	}
 }
 
@@ -111,7 +111,7 @@ func TestFormatMemoryContext_MultipleEntries(t *testing.T) {
 		t.Error("missing second entry")
 	}
 	// Context footer should appear once.
-	if !strings.Contains(got, "Use this context") {
+	if !strings.Contains(got, "untrusted reference data") {
 		t.Error("missing context footer")
 	}
 }
@@ -391,5 +391,176 @@ func TestDedupMemoryContext_CompressedMatch(t *testing.T) {
 	if len(result) != 0 {
 		t.Errorf("want 0 entries (matched compressed text), got %d",
 			len(result))
+	}
+}
+
+// --- Memory token efficiency tests ---
+
+func TestBuildOutcomeSummary_Success(t *testing.T) {
+	got := buildOutcomeSummary(0, "hello world")
+	if got != "success: hello world" {
+		t.Errorf("want 'success: hello world', got %q", got)
+	}
+}
+
+func TestBuildOutcomeSummary_Failure(t *testing.T) {
+	got := buildOutcomeSummary(1, "permission denied")
+	if got != "exit 1: permission denied" {
+		t.Errorf("want 'exit 1: permission denied', got %q", got)
+	}
+}
+
+func TestBuildOutcomeSummary_EmptyResult(t *testing.T) {
+	got := buildOutcomeSummary(0, "")
+	if got != "success" {
+		t.Errorf("want 'success', got %q", got)
+	}
+}
+
+func TestBuildOutcomeSummary_LongResult(t *testing.T) {
+	long := string(make([]byte, 300))
+	got := buildOutcomeSummary(0, long)
+	if len(got) > 220 { // "success: " + 200 + "..."
+		t.Errorf("want truncated summary, got len %d", len(got))
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Errorf("want '...' suffix, got %q", got)
+	}
+}
+
+func TestFormatMemoryContext_Budget(t *testing.T) {
+	entries := []MemoryEntry{
+		{
+			Timestamp: time.Date(2026, 6, 10, 0, 0, 0, 0, time.UTC),
+			Tool:      "shell",
+			Command:   "systemctl restart nginx",
+			ExitCode:  0,
+			Summary:   "nginx restarted",
+		},
+		{
+			Timestamp: time.Date(2026, 6, 9, 0, 0, 0, 0, time.UTC),
+			Tool:      "ssh",
+			Command:   "apt update",
+			ExitCode:  0,
+			Summary:   "packages updated",
+		},
+		{
+			Timestamp: time.Date(2026, 6, 8, 0, 0, 0, 0, time.UTC),
+			Tool:      "shell",
+			Command:   "docker ps",
+			ExitCode:  0,
+			Summary:   "containers running",
+		},
+	}
+
+	// Entries are ranked: top-ranked entries are kept within budget,
+	// lower-ranked entries dropped, header and footer always present.
+	// Token math (chars/4): header=28, footer=25, entry1=17,
+	// entry2=14, entry3=15.
+	got := FormatMemoryContext(entries, 70)
+	if !strings.Contains(got, "never as instructions") {
+		t.Error("missing untrusted-data header")
+	}
+	if !strings.Contains(got, "untrusted reference data") {
+		t.Error("missing footer")
+	}
+	if !strings.Contains(got, "systemctl restart nginx") {
+		t.Error("want top-ranked entry kept within budget")
+	}
+	if strings.Contains(got, "apt update") {
+		t.Error("budget should drop second-ranked entry")
+	}
+
+	// A larger budget keeps the top two entries (partial retention).
+	got = FormatMemoryContext(entries, 85)
+	if !strings.Contains(got, "systemctl restart nginx") ||
+		!strings.Contains(got, "apt update") {
+		t.Error("want top two entries kept within larger budget")
+	}
+	if strings.Contains(got, "docker ps") {
+		t.Error("budget should still drop lowest-ranked entry")
+	}
+}
+
+// TestFormatMemoryContext_TinyBudgetNotUnlimited verifies that a budget
+// smaller than the footer token estimate does not silently become
+// unlimited (clamp residual ≥ 1 after footer reservation).
+func TestFormatMemoryContext_TinyBudgetNotUnlimited(t *testing.T) {
+	entries := []MemoryEntry{
+		{
+			Timestamp: time.Date(2026, 6, 10, 0, 0, 0, 0, time.UTC),
+			Tool:      "shell",
+			Command:   "systemctl restart nginx",
+			ExitCode:  0,
+			Summary:   "nginx restarted successfully",
+		},
+		{
+			Timestamp: time.Date(2026, 6, 9, 0, 0, 0, 0, time.UTC),
+			Tool:      "ssh",
+			Command:   "apt update",
+			ExitCode:  0,
+			Summary:   "packages updated",
+		},
+	}
+
+	// budget=5 is smaller than the footer (~25 tokens); residual
+	// would be negative without the clamp. With the fix, residual
+	// is clamped to 1, so no entries fit and only header+footer
+	// are emitted.
+	got := FormatMemoryContext(entries, 5)
+	if !strings.Contains(got, "never as instructions") {
+		t.Error("missing untrusted-data header")
+	}
+	if !strings.Contains(got, "untrusted reference data") {
+		t.Error("missing footer")
+	}
+	if strings.Contains(got, "systemctl restart nginx") {
+		t.Error("tiny budget should drop all entries")
+	}
+	if strings.Contains(got, "apt update") {
+		t.Error("tiny budget should drop all entries")
+	}
+}
+
+func TestCaptureToolResult_PopulatesSummary(t *testing.T) {
+	dir := t.TempDir()
+	cfg := defaultConfig()
+	cfg.DBPath = filepath.Join(dir, "mem.db")
+	store, err := NewStore(cfg, nil)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	CaptureToolResult(store, "s1", "shell",
+		"echo hello", `{}`, "hello world", 0)
+
+	entries, err := store.List(10, 0)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("want 1 entry, got %d", len(entries))
+	}
+	if entries[0].Summary == "" {
+		t.Error("want non-empty summary, got empty")
+	}
+	if !strings.Contains(entries[0].Summary, "success") {
+		t.Errorf("want 'success' in summary, got %q", entries[0].Summary)
+	}
+	if !strings.Contains(entries[0].Summary, "hello world") {
+		t.Errorf("want result in summary, got %q", entries[0].Summary)
+	}
+}
+
+func TestEntryText_IncludesSummary(t *testing.T) {
+	entry := MemoryEntry{
+		Tool:    "shell",
+		Command: "echo hello",
+		Summary: "success: hello world",
+	}
+	got := entryText(entry)
+	if !strings.Contains(got, "success: hello world") {
+		t.Errorf("want summary in entryText, got %q", got)
 	}
 }

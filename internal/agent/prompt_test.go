@@ -10,7 +10,7 @@ import (
 // TestSystemPrompt_Operate_ContainsEmbed checks operate mode contains embedded
 // prompt.
 func TestSystemPrompt_Operate_ContainsEmbed(t *testing.T) {
-	prompt, err := SystemPrompt("operate", "", "")
+	prompt, err := SystemPrompt("operate", "", "", "")
 	if err != nil {
 		t.Fatalf("SystemPrompt: %v", err)
 	}
@@ -26,10 +26,9 @@ func TestSystemPrompt_Operate_ContainsEmbed(t *testing.T) {
 	}
 }
 
-// TestSystemPrompt_Diagnose_ContainsEmbed checks diagnose mode contains embedded
-// prompt.
+// Checks diagnose mode contains embedded prompt.
 func TestSystemPrompt_Diagnose_ContainsEmbed(t *testing.T) {
-	prompt, err := SystemPrompt("diagnose", "", "")
+	prompt, err := SystemPrompt("diagnose", "", "", "")
 	if err != nil {
 		t.Fatalf("SystemPrompt: %v", err)
 	}
@@ -45,7 +44,7 @@ func TestSystemPrompt_Diagnose_ContainsEmbed(t *testing.T) {
 // TestSystemPrompt_Chat_ContainsEmbed checks chat mode contains embedded
 // prompt.
 func TestSystemPrompt_Chat_ContainsEmbed(t *testing.T) {
-	prompt, err := SystemPrompt("chat", "", "")
+	prompt, err := SystemPrompt("chat", "", "", "")
 	if err != nil {
 		t.Fatalf("SystemPrompt(chat): %v", err)
 	}
@@ -60,9 +59,30 @@ func TestSystemPrompt_Chat_ContainsEmbed(t *testing.T) {
 	}
 }
 
+// TestSystemPrompt_Code_ContainsEmbed checks code mode contains embedded
+// prompt.
+func TestSystemPrompt_Code_ContainsEmbed(t *testing.T) {
+	prompt, err := SystemPrompt("code", "", "", "")
+	if err != nil {
+		t.Fatalf("SystemPrompt(code): %v", err)
+	}
+	if prompt == "" {
+		t.Fatal("code prompt should not be empty")
+	}
+	if !strings.Contains(prompt, "senior software engineer") {
+		t.Fatalf("want prompt to contain 'senior software engineer'")
+	}
+	if !strings.Contains(prompt, "file_read") {
+		t.Fatalf("want prompt to contain 'file_read'")
+	}
+	if !strings.Contains(prompt, "file_edit") {
+		t.Fatalf("want prompt to contain 'file_edit'")
+	}
+}
+
 // TestSystemPrompt_WithScope_AppendsScope checks scope content is appended.
 func TestSystemPrompt_WithScope_AppendsScope(t *testing.T) {
-	prompt, err := SystemPrompt("operate", "SCOPE CONTENT HERE", "")
+	prompt, err := SystemPrompt("operate", "SCOPE CONTENT HERE", "", "")
 	if err != nil {
 		t.Fatalf("SystemPrompt: %v", err)
 	}
@@ -75,21 +95,30 @@ func TestSystemPrompt_WithScope_AppendsScope(t *testing.T) {
 	}
 }
 
-// TestSystemPrompt_Override_ReplacesEmbed checks override replaces embed body.
+// Checks override replaces embed body.
 func TestSystemPrompt_Override_ReplacesEmbed(t *testing.T) {
 	tmpDir := t.TempDir()
 	customFile := filepath.Join(tmpDir, "custom.txt")
-	if err := os.WriteFile(customFile, []byte("CUSTOM PROMPT BODY"), 0o600); err != nil {
+	data := []byte("CUSTOM PROMPT BODY")
+	if err := os.WriteFile(customFile, data, 0o600); err != nil {
 		t.Fatalf("write custom file: %v", err)
 	}
 
-	prompt, err := SystemPrompt("operate", "", customFile)
+	prompt, err := SystemPrompt("operate", "", customFile, "")
 	if err != nil {
 		t.Fatalf("SystemPrompt: %v", err)
 	}
 
-	if prompt != "CUSTOM PROMPT BODY" {
-		t.Fatalf("want prompt to be exactly override content, got:\n%s", prompt)
+	if !strings.Contains(prompt, "CUSTOM PROMPT BODY") {
+		t.Fatalf("want prompt to contain override content, got:\n%s", prompt)
+	}
+
+	if !strings.Contains(prompt, "## Environment") {
+		t.Fatalf("want prompt to contain Environment hint, got:\n%s", prompt)
+	}
+
+	if strings.Contains(prompt, "senior systems engineer") {
+		t.Fatalf("want prompt to not contain original embed when overridden")
 	}
 }
 
@@ -102,7 +131,7 @@ func TestSystemPrompt_OverrideKeepsScope(t *testing.T) {
 	}
 
 	scope := "MY SCOPE"
-	prompt, err := SystemPrompt("operate", scope, customFile)
+	prompt, err := SystemPrompt("operate", scope, customFile, "")
 	if err != nil {
 		t.Fatalf("SystemPrompt: %v", err)
 	}
@@ -121,7 +150,7 @@ func TestSystemPrompt_OverrideKeepsScope(t *testing.T) {
 // TestSystemPrompt_OperateWithScope_EmbedAndScope checks operate + scope.
 func TestSystemPrompt_OperateWithScope_EmbedAndScope(t *testing.T) {
 	scope := "production environment"
-	prompt, err := SystemPrompt("operate", scope, "")
+	prompt, err := SystemPrompt("operate", scope, "", "")
 	if err != nil {
 		t.Fatalf("SystemPrompt: %v", err)
 	}
@@ -142,7 +171,7 @@ func TestSystemPrompt_OperateWithScope_EmbedAndScope(t *testing.T) {
 
 // TestSystemPrompt_UnknownMode_ReturnsError checks unknown mode returns error.
 func TestSystemPrompt_UnknownMode_ReturnsError(t *testing.T) {
-	_, err := SystemPrompt("unknown", "", "")
+	_, err := SystemPrompt("unknown", "", "", "")
 	if err == nil {
 		t.Fatal("expected error for unknown mode, got nil")
 	}
@@ -154,7 +183,7 @@ func TestSystemPrompt_UnknownMode_ReturnsError(t *testing.T) {
 // TestSystemPrompt_DiagnoseWithScope_ContainsBoth checks diagnose + scope.
 func TestSystemPrompt_DiagnoseWithScope_ContainsBoth(t *testing.T) {
 	scope := "test environment"
-	prompt, err := SystemPrompt("diagnose", scope, "")
+	prompt, err := SystemPrompt("diagnose", scope, "", "")
 	if err != nil {
 		t.Fatalf("SystemPrompt: %v", err)
 	}
@@ -171,7 +200,7 @@ func TestSystemPrompt_DiagnoseWithScope_ContainsBoth(t *testing.T) {
 
 // TestSystemPrompt_EmptyScope_NoScopeSection checks empty scope omits section.
 func TestSystemPrompt_EmptyScope_NoScopeSection(t *testing.T) {
-	prompt, err := SystemPrompt("operate", "", "")
+	prompt, err := SystemPrompt("operate", "", "", "")
 	if err != nil {
 		t.Fatalf("SystemPrompt: %v", err)
 	}
@@ -182,9 +211,9 @@ func TestSystemPrompt_EmptyScope_NoScopeSection(t *testing.T) {
 	}
 }
 
-// TestSystemPrompt_OverrideFileMissingError checks error when override file missing.
+// Checks error when override file missing.
 func TestSystemPrompt_OverrideFileMissingError(t *testing.T) {
-	_, err := SystemPrompt("operate", "", "/nonexistent/prompt.txt")
+	_, err := SystemPrompt("operate", "", "/nonexistent/prompt.txt", "")
 	if err == nil {
 		t.Fatal("expected error for missing override file, got nil")
 	}

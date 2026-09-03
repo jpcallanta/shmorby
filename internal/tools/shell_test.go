@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	cmdexec "shmorby/internal/exec"
 	"shmorby/internal/xdg"
 )
 
@@ -46,9 +47,7 @@ func TestShellTool_Deny_NowExecutes(t *testing.T) {
 
 // TestTruncateOutput_UnderLimit_Unchanged checks small output passes.
 func TestTruncateOutput_UnderLimit_Unchanged(t *testing.T) {
-	old := MaxOutput
-	MaxOutput = 65536
-	defer func() { MaxOutput = old }()
+	setMaxOutput(t, 65536)
 
 	in := []byte("hello")
 	out := TruncateOutput(in)
@@ -60,17 +59,16 @@ func TestTruncateOutput_UnderLimit_Unchanged(t *testing.T) {
 // TestTruncateOutput_OverLimit_Truncated checks output > 64 KiB
 // truncated with notice.
 func TestTruncateOutput_OverLimit_Truncated(t *testing.T) {
-	old := MaxOutput
-	MaxOutput = 65536
-	defer func() { MaxOutput = old }()
+	const limit int64 = 65536
+	setMaxOutput(t, limit)
 
-	big := make([]byte, MaxOutput+1)
+	big := make([]byte, limit+1)
 	for i := range big {
 		big[i] = 'x'
 	}
 	out := TruncateOutput(big)
-	if len(out) > MaxOutput {
-		t.Errorf("want len <= %d, got %d", MaxOutput, len(out))
+	if int64(len(out)) > limit {
+		t.Errorf("want len <= %d, got %d", limit, len(out))
 	}
 	if !strings.Contains(string(out), "truncated at 64 KiB") {
 		t.Errorf("want truncation notice in output")
@@ -79,9 +77,7 @@ func TestTruncateOutput_OverLimit_Truncated(t *testing.T) {
 
 // TestTruncateOutput_Unlimited_Default checks MaxOutput=0 passes through.
 func TestTruncateOutput_Unlimited_Default(t *testing.T) {
-	old := MaxOutput
-	MaxOutput = 0
-	defer func() { MaxOutput = old }()
+	setMaxOutput(t, 0)
 
 	big := make([]byte, 100000)
 	for i := range big {
@@ -199,7 +195,7 @@ func TestRedactArgs_NoMatch_Unchanged(t *testing.T) {
 func TestRegistry_Schemas_NonEmpty(t *testing.T) {
 	r := NewRegistry()
 	tool := NewShellTool("bash", "", "allow")
-	r.Register(tool)
+	_ = r.Register(tool)
 
 	schemas := r.Schemas()
 	if len(schemas) != 1 {
@@ -224,7 +220,7 @@ func TestRegistry_Run_UnknownTool_Error(t *testing.T) {
 func TestRegistry_Run_EchoHello(t *testing.T) {
 	r := NewRegistry()
 	tool := NewShellTool("bash", "", "allow")
-	r.Register(tool)
+	_ = r.Register(tool)
 
 	out, err := r.Run(
 		context.Background(),
@@ -244,7 +240,7 @@ func TestRegistry_Run_EchoHello(t *testing.T) {
 func TestRegistry_Run_Deny_NowExecutes(t *testing.T) {
 	r := NewRegistry()
 	tool := NewShellTool("bash", "", "deny")
-	r.Register(tool)
+	_ = r.Register(tool)
 
 	result, err := r.Run(
 		context.Background(),
@@ -400,17 +396,31 @@ func TestShellTool_NonZeroExit_Exit2(t *testing.T) {
 	}
 }
 
-// TestRegistry_RegisterDuplicate_Panics checks duplicate registration.
-func TestRegistry_RegisterDuplicate_Panics(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("want panic on duplicate register, got nil")
-		}
-	}()
+// TestRegistry_RegisterDuplicate_ReturnsError checks that registering
+// a duplicate tool returns an error instead of panicking.
+func TestRegistry_RegisterDuplicate_ReturnsError(t *testing.T) {
 	r := NewRegistry()
 	tool := NewShellTool("bash", "", "allow")
-	r.Register(tool)
-	r.Register(tool)
+	if err := r.Register(tool); err != nil {
+		t.Fatalf("first Register: %v", err)
+	}
+
+	err := r.Register(tool)
+	if err == nil {
+		t.Fatal("want error on duplicate register, got nil")
+	}
+	if !strings.Contains(err.Error(), "already registered") {
+		t.Errorf(
+			"want error containing 'already registered', got %q",
+			err.Error(),
+		)
+	}
+
+	// Original tool must remain registered.
+	schemas := r.Schemas()
+	if len(schemas) != 1 {
+		t.Fatalf("want 1 tool after duplicate, got %d", len(schemas))
+	}
 }
 
 // TestRegistry_Schemas_StableOrder checks schemas order matches
@@ -419,8 +429,8 @@ func TestRegistry_Schemas_StableOrder(t *testing.T) {
 	r := NewRegistry()
 	t1 := &namedTool{name: "z_last"}
 	t2 := &namedTool{name: "a_first"}
-	r.Register(t1)
-	r.Register(t2)
+	_ = r.Register(t1)
+	_ = r.Register(t2)
 
 	schemas := r.Schemas()
 	if len(schemas) != 2 {
@@ -438,9 +448,9 @@ func TestRegistry_Schemas_StableOrder(t *testing.T) {
 // FilterByPerm removes tools with PermLevel "deny".
 func TestRegistry_FilterByPerm_ExcludesDeniedTools(t *testing.T) {
 	r := NewRegistry()
-	r.Register(&namedTool{name: "shell"})
-	r.Register(&permTool{name: "sudo", perm: "deny"})
-	r.Register(&permTool{name: "ssh", perm: "ask"})
+	_ = r.Register(&namedTool{name: "shell"})
+	_ = r.Register(&permTool{name: "sudo", perm: "deny"})
+	_ = r.Register(&permTool{name: "ssh", perm: "ask"})
 
 	filtered := r.FilterByPerm()
 	schemas := filtered.Schemas()
@@ -466,9 +476,9 @@ func TestRegistry_FilterByPerm_ExcludesDeniedTools(t *testing.T) {
 // preserves registration order.
 func TestRegistry_FilterByPerm_PreservesOrder(t *testing.T) {
 	r := NewRegistry()
-	r.Register(&permTool{name: "a", perm: "allow"})
-	r.Register(&permTool{name: "b", perm: "deny"})
-	r.Register(&permTool{name: "c", perm: "ask"})
+	_ = r.Register(&permTool{name: "a", perm: "allow"})
+	_ = r.Register(&permTool{name: "b", perm: "deny"})
+	_ = r.Register(&permTool{name: "c", perm: "ask"})
 
 	filtered := r.FilterByPerm()
 	schemas := filtered.Schemas()
@@ -603,7 +613,7 @@ func TestShellTool_Run_NoOrphansAfterTimeout(t *testing.T) {
 // TestOSExecutor_Run_ProcessGroupIsolation verifies the OSExecutor
 // uses process-group isolation.
 func TestOSExecutor_Run_ProcessGroupIsolation(t *testing.T) {
-	executor := OSExecutor{}
+	executor := cmdexec.OSExecutor{}
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
@@ -622,7 +632,7 @@ func TestOSExecutor_Run_ProcessGroupIsolation(t *testing.T) {
 
 // TestOSExecutor_Run_Grandchild verifies forked grandchild is killed.
 func TestOSExecutor_Run_Grandchild(t *testing.T) {
-	executor := OSExecutor{}
+	executor := cmdexec.OSExecutor{}
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 	defer cancel()
 
@@ -713,4 +723,139 @@ func (n *namedTool) Parameters() json.RawMessage {
 func (n *namedTool) PermLevel() string { return "allow" }
 func (n *namedTool) Run(ctx context.Context, args json.RawMessage) (string, error) {
 	return "", nil
+}
+
+// --- Timeout ceiling tests ---
+
+// TestShellTool_TimeoutCeiling_Clamped checks that timeout_seconds
+// exceeding maxTimeoutSeconds is clamped to the ceiling.
+func TestShellTool_TimeoutCeiling_Clamped(t *testing.T) {
+	tool := NewShellTool("bash", "", "allow")
+	// Command that sleeps for 10 seconds, with a 86400s timeout
+	// that should be clamped to 3600s.
+	args := []byte(`{"command":"sleep 10","timeout_seconds":86400}`)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	_, err := tool.Run(ctx, args)
+	elapsed := time.Since(start)
+
+	// The error message should mention the clamped value (3600s),
+	// not the original 86400s — proving the ceiling was applied.
+	if err != nil {
+		if !strings.Contains(err.Error(), "timed out") {
+			t.Fatalf("want timeout error, got %v", err)
+		}
+		// Confirm the ceiling was applied: error should say 3600s.
+		if !strings.Contains(err.Error(), "3600s") {
+			t.Errorf("want ceiling 3600s in error, got: %v", err)
+		}
+	}
+	// The command should have been killed by context timeout (~3s),
+	// not by the 86400s user timeout — confirming the ceiling was
+	// accepted and the context deadline took effect.
+	if elapsed > 5*time.Second {
+		t.Errorf("command took too long (%v), ceiling may not be enforced", elapsed)
+	}
+}
+
+// TestShellTool_TimeoutCeiling_ExactBoundary checks that a timeout
+// exactly at the ceiling is accepted.
+func TestShellTool_TimeoutCeiling_ExactBoundary(t *testing.T) {
+	tool := NewShellTool("bash", "", "allow")
+	args := []byte(`{"command":"echo ok","timeout_seconds":3600}`)
+
+	out, err := tool.Run(context.Background(), args)
+	if err != nil {
+		t.Fatalf("want no error for exact-boundary timeout, got %v", err)
+	}
+	if !strings.Contains(out, "ok") {
+		t.Errorf("want 'ok' output, got %q", out)
+	}
+}
+
+// TestShellTool_TimeoutCeiling_BelowCeiling checks that a timeout
+// below the ceiling is used as-is.
+func TestShellTool_TimeoutCeiling_BelowCeiling(t *testing.T) {
+	tool := NewShellTool("bash", "", "allow")
+	args := []byte(`{"command":"sleep 5","timeout_seconds":2}`)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	_, err := tool.Run(ctx, args)
+	elapsed := time.Since(start)
+
+	// With timeout_seconds=2 (below ceiling), the command should
+	// complete in ~2s, not 5s.
+	if err == nil {
+		t.Fatal("want timeout error, got nil")
+	}
+	if elapsed > 4*time.Second {
+		t.Errorf("command took %v, expected ~2s timeout", elapsed)
+	}
+}
+
+// TestShellTool_Run_BufferCap_Notice verifies a command whose output
+// exceeds the buffer cap is truncated with a notice instead of
+// exhausting memory.
+func TestShellTool_Run_BufferCap_Notice(t *testing.T) {
+	old := cmdexec.MaxOutputBufferBytes
+	cmdexec.MaxOutputBufferBytes = 1024
+	defer func() { cmdexec.MaxOutputBufferBytes = old }()
+
+	tool := NewShellTool("bash", "", "allow")
+	args := []byte(`{"command":"dd if=/dev/zero bs=1024 count=8` +
+		` 2>/dev/null | tr '\\0' 'x'"}`)
+
+	out, err := tool.Run(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(out, "stream capped") {
+		t.Errorf("want capped notice in output, got %q",
+			out[max(0, len(out)-60):])
+	}
+}
+
+// TestShellTool_Run_InvalidCwd_Rejected checks a nonexistent cwd or
+// a cwd pointing at a file is rejected before the command spawns.
+func TestShellTool_Run_InvalidCwd_Rejected(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "f")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	tool := NewShellTool("bash", "", "allow")
+	for _, cwd := range []string{"/nonexistent/dir/xyz", file} {
+		args, _ := json.Marshal(map[string]string{
+			"command": "pwd", "cwd": cwd,
+		})
+		if _, err := tool.Run(context.Background(), args); err == nil {
+			t.Errorf("want error for cwd %q, got nil", cwd)
+		}
+	}
+}
+
+// TestShellTool_Run_ValidCwd_Executes checks a real directory cwd
+// still runs.
+func TestShellTool_Run_ValidCwd_Executes(t *testing.T) {
+	dir := t.TempDir()
+	tool := NewShellTool("bash", "", "allow")
+	args, _ := json.Marshal(map[string]string{
+		"command": "pwd", "cwd": dir,
+	})
+
+	out, err := tool.Run(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	// macOS resolves /var -> /private/var for t.TempDir paths.
+	if !strings.Contains(out, filepath.Base(dir)) {
+		t.Errorf("want cwd %q in output, got %q", dir, out)
+	}
 }

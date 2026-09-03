@@ -13,7 +13,7 @@ type MCPConfig struct {
 	Servers map[string]tools.MCPServerConfig `yaml:"servers"`
 }
 
-// Config is Phase 1 configuration.
+// Config holds application configuration.
 //
 // Merge behavior: later sources override earlier keys.
 // Secrets are set in YAML api_key fields.
@@ -55,7 +55,11 @@ type Config struct {
 
 	Tools struct {
 		Timeout int `yaml:"timeout"`
-		Shell   struct {
+		// SubtaskTimeout is the maximum seconds a single subtask
+		// can run before being cancelled (0 = derived from timeout
+		// × max_tool_iterations × 2). Prevents subagent hangs.
+		SubtaskTimeout int `yaml:"subtask_timeout"`
+		Shell          struct {
 			Enabled bool `yaml:"enabled"`
 		} `yaml:"shell"`
 		Sudo struct {
@@ -82,6 +86,11 @@ type Config struct {
 		AWS         string                 `yaml:"aws"`
 		MCP         string                 `yaml:"mcp"`
 		Task        string                 `yaml:"task"`
+		Find        string                 `yaml:"find"`
+		FileRead    string                 `yaml:"file_read"`
+		FileEdit    string                 `yaml:"file_edit"`
+		FileWrite   string                 `yaml:"file_write"`
+		Grep        string                 `yaml:"grep"`
 		Interactive bool                   `yaml:"interactive"`
 		Presets     []string               `yaml:"presets"`
 		Rules       []tools.PermissionRule `yaml:"rules"`
@@ -109,18 +118,35 @@ type Config struct {
 		DBPath      string `yaml:"db_path"`
 		MaxEntries  int    `yaml:"max_entries"`
 		AutoCapture bool   `yaml:"auto_capture"`
-		Embedding   struct {
-			Provider string `yaml:"provider"`
-			Model    string `yaml:"model"`
-			BaseURL  string `yaml:"base_url"`
+		// ContextBudget caps tokens for injected memory context
+		// (0 = unlimited).
+		ContextBudget int `yaml:"context_budget"`
+		Embedding     struct {
+			Provider   string `yaml:"provider"`
+			Model      string `yaml:"model"`
+			BaseURL    string `yaml:"base_url"`
+			Dimensions int    `yaml:"dimensions"`
 		} `yaml:"embedding"`
 	} `yaml:"memory"`
 
 	Context ContextConfig `yaml:"context"`
 
+	// Session holds conversation persistence settings.
+	Session SessionConfig `yaml:"session"`
+
 	MCP MCPConfig `yaml:"mcp"`
 
 	Audit AuditConfig `yaml:"audit"`
+
+	// Ledger holds encrypted environment ledger settings.
+	// When enabled, the agent exposes ledger_get/ledger_set tools
+	// and injects ledger context into the system prompt.
+	Ledger LedgerConfig `yaml:"ledger"`
+
+	// Code holds settings for the code agent mode. The project root
+	// is anchored to the launch CWD (or code.workdir when set) and
+	// all file-oriented tools resolve paths relative to it.
+	Code CodeConfig `yaml:"code"`
 }
 
 // ModelOverride holds user-specified model metadata.
@@ -145,6 +171,18 @@ type ContextConfig struct {
 	FallbackContextWindow int     `yaml:"fallback_context_window"`
 }
 
+// SessionConfig holds conversation persistence settings.
+// Enabled=false disables all session disk writes; resume flags then
+// fail cleanly. Retention controls the `session prune` sweep:
+// archived or inactive sessions older than RetentionDays are
+// deleted, and the store is capped to MaxSessions newest-first.
+type SessionConfig struct {
+	Enabled       bool   `yaml:"enabled"`
+	DBPath        string `yaml:"db_path"`
+	RetentionDays int    `yaml:"retention_days"`
+	MaxSessions   int    `yaml:"max_sessions"`
+}
+
 // AuditConfig holds audit subsystem settings.
 type AuditConfig struct {
 	Enabled               bool   `yaml:"enabled"`
@@ -152,6 +190,33 @@ type AuditConfig struct {
 	OutputCaptureMaxBytes int    `yaml:"output_capture_max_bytes"`
 	RetentionDays         int    `yaml:"retention_days"`
 	AsyncBufferSize       int    `yaml:"async_buffer_size"`
+}
+
+// LedgerConfig holds encrypted environment ledger settings.
+// Enabled controls whether the agent exposes ledger tools and
+// injects ledger context. ContextBudget caps the total bytes of
+// ledger data injected into the system prompt (0 = unlimited).
+type LedgerConfig struct {
+	Enabled       bool `yaml:"enabled"`
+	ContextBudget int  `yaml:"context_budget"`
+}
+
+// CodeConfig holds settings for the code agent mode. The project root
+// anchors all file-oriented tools (file_read, file_edit, file_write,
+// find, grep) so they cannot access paths outside the project.
+type CodeConfig struct {
+	// Workdir is the project root for file tools. "." (default)
+	// resolves to the process CWD at startup.
+	Workdir string `yaml:"workdir"`
+
+	// AllowedPatterns are extra glob patterns permitted even when
+	// they fall outside the project root.
+	AllowedPatterns []string `yaml:"allowed_patterns"`
+
+	// BlockedPatterns are extra glob patterns always rejected.
+	// Built-in blocked directory names (.git/, vendor/, etc.) are
+	// always enforced regardless of this list.
+	BlockedPatterns []string `yaml:"blocked_patterns"`
 }
 
 // DefaultConfig returns a Config populated with standard defaults
@@ -191,6 +256,11 @@ func defaultConfig() Config {
 	cfg.Permission.AWS = "ask"
 	cfg.Permission.MCP = "ask"
 	cfg.Permission.Task = "ask"
+	cfg.Permission.Find = "allow"
+	cfg.Permission.FileRead = "allow"
+	cfg.Permission.FileEdit = "ask"
+	cfg.Permission.FileWrite = "ask"
+	cfg.Permission.Grep = "allow"
 	cfg.Permission.Interactive = true
 
 	cfg.TUI.Fullscreen = true
@@ -249,6 +319,23 @@ func defaultConfig() Config {
 	cfg.Audit.RetentionDays = 365
 	cfg.Audit.AsyncBufferSize = 100
 
+	cfg.Session.Enabled = true
+	cfg.Session.DBPath = filepath.Join(xdg.UserDataDir(), "sessions.db")
+	cfg.Session.RetentionDays = 90
+	cfg.Session.MaxSessions = 200
+
+	cfg.Ledger.Enabled = true
+	cfg.Ledger.ContextBudget = 2048
+
+	cfg.Code.Workdir = "."
+	cfg.Code.BlockedPatterns = []string{
+		"**/.git/**",
+		"**/node_modules/**",
+		"**/vendor/**",
+		"**/.idea/**",
+		"**/.vscode/**",
+	}
+
 	return cfg
 }
 
@@ -265,13 +352,13 @@ func ValidateProvider(provider string) error {
 	}
 }
 
-// ValidateAgent returns an error if agent is not operate, diagnose, or chat.
+// ValidateAgent returns an error if agent is not a known mode.
 func ValidateAgent(agent string) error {
 	switch agent {
-	case "operate", "diagnose", "chat":
+	case "operate", "diagnose", "chat", "code":
 		return nil
 	default:
-		return fmt.Errorf("invalid agent %q (want operate|diagnose|chat)", agent)
+		return fmt.Errorf("invalid agent %q (want operate|diagnose|chat|code)", agent)
 	}
 }
 

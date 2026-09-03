@@ -79,7 +79,9 @@ func (v *VectorStore) Count() int {
 	return v.Collection.Count()
 }
 
-// entryText builds the text to embed from a memory entry.
+// entryText builds the text to embed from a memory entry. Includes the
+// outcome summary (F2) so vector search can match on results, not just
+// commands.
 func entryText(e MemoryEntry) string {
 	text := e.Tool + ": " + e.Command
 	if e.Summary != "" {

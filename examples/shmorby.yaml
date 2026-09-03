@@ -8,7 +8,7 @@ model: llama3.2
 
 # ── Agent ───────────────────────
 agent:
-  default: operate          # operate | diagnose
+  default: operate          # operate | diagnose | chat | code
   max_tool_iterations: 25
   shell: bash
 
@@ -39,32 +39,33 @@ scope:
     - ./runbooks/*.md
 
 # ── Tools ──────────────────────
+# Exhaustive migrate backfill (issue #126) injects every
+# `enabled=false` when absent, so the file stays explicit and
+# `migrate --dry-run` is exhaustive. Empty api_key/models/presets
+# stay omitted intentionally.
 tools:
   timeout: 1800
+  subtask_timeout: 0           # max seconds per subtask (0 = derived from timeout × max_tool_iterations × 2)
   shell:
     enabled: true
   sudo:
     enabled: false
   aws:
     enabled: false
-
-# ── Websearch ──────────────────
-# Both tools disabled by default. Available in all agent modes when enabled.
-# websearch:
-#   enabled: false                    # Enable web search
-#   engine: searxng                   # "searxng" (local, no CAPTCHAs) or "exa" (cloud)
-#   base_url: http://localhost:8888   # SearXNG instance URL (required for searxng)
-#                                     # SearXNG must have JSON format enabled in settings.yml:
-#                                     #   search:
-#                                     #     formats:
-#                                     #       - html
-#                                     #       - json
-#   # exa_api_key: "sk-exa-..."      # Required for exa engine (get from exa.ai)
-#
-# webfetch:
-#   enabled: false                    # Enable URL fetching
-#                                     # SSRF protection: blocks private/loopback IPs
-#                                     # Max 64 KiB default, 1 MiB absolute max
+  websearch:
+    enabled: false                    # Enable web search
+    engine: searxng                   # "searxng" (local, no CAPTCHAs) or "exa" (cloud)
+    base_url: http://localhost:8888   # SearXNG instance URL (required for searxng)
+                                      # SearXNG must have JSON format enabled in settings.yml:
+                                      #   search:
+                                      #     formats:
+                                      #       - html
+                                      #       - json
+    # exa_api_key: "sk-exa-..."      # Required for exa engine (get from exa.ai)
+  webfetch:
+    enabled: false                    # Enable URL fetching
+                                      # SSRF protection: blocks private/loopback IPs
+                                      # Max 64 KiB default, 1 MiB absolute max
 
 # ── Permission ─────────────────
 permission:
@@ -73,12 +74,32 @@ permission:
   sudo: ask
   aws: ask
   mcp: ask
+  find: allow                # code mode: search for files
+  file_read: allow           # code mode: read file contents
+  file_edit: ask             # code mode: edit file contents
+  file_write: ask            # code mode: create/overwrite files
+  grep: allow                # code mode: search file contents
   interactive: true
   presets: []
   rules: []
 
 # ── Model overrides ────────────
 models: {}
+
+# ── Code mode ─────────────────
+# Project root anchoring for file tools (file_read, file_edit,
+# file_write, find, grep). Defaults to the launch CWD.
+# File tools are confined to the root: paths outside it are rejected
+# unless matched by allowed_patterns.
+code:
+  workdir: "."                   # project root; "." = launch CWD
+  allowed_patterns: []           # globs permitted outside the root
+  blocked_patterns:              # always rejected (override defaults):
+    - "**/.git/**"
+    - "**/node_modules/**"
+    - "**/vendor/**"
+    - "**/.idea/**"
+    - "**/.vscode/**"
 
 # ── TUI ────────────────────────
 tui:
@@ -139,10 +160,17 @@ memory:
   db_path: ~/.local/share/shmorby/memory.db 
   max_entries: 10000
   auto_capture: true
+  context_budget: 300      # cap injected memory tokens (0 = unlimited)
   embedding:
     provider: ollama
     model: nomic-embed-text
     base_url: ""
+    dimensions: 0            # 0 = model default (768 for nomic-embed-text)
+                              # Set to 64-256 for cheaper Matryoshka vectors.
+                              # Changing dimensions on an existing store
+                              # requires clearing the vector index
+                              # (vectors/ dir), otherwise retrieval
+                              # silently degrades.
 
 # ── MCP servers ────────────────
 # mcp:
@@ -155,6 +183,14 @@ memory:
 #       args: ["run", "-i", "--rm", "mcp/k8s"]
 #       env:
 #         - "KUBECONFIG=/home/user/.kube/config"
+#     rovo:
+#       # Remote streamable HTTP endpoint. Set exactly one of
+#       # command or url per server.
+#       url: https://mcp.atlassian.com/v1/mcp
+#       headers:
+#         # Header values support ${VAR} env substitution so secrets
+#         # can stay out of the config file. Headers are never logged.
+#         Authorization: "Basic ${ROVO_EMAIL_TOKEN}"
 
 # ── Context compression ────────
 # Message ordering is optimized for OpenAI automatic prefix
@@ -166,8 +202,8 @@ context:
   max_tool_output_tokens: 4096
   max_tool_output_lines: 0     # 0 = unlimited
   max_tool_output_bytes: 0     # 0 = unlimited
-  summary_model: ""
-  summary_provider: ""
+  summary_model: ""        # LLM model for summarization (empty = extractive)
+  summary_provider: ""     # LLM provider for summarization (empty = use main)
   offload_to_memory: true
   min_messages_to_compress: 6
   fallback_context_window: 128000
@@ -179,3 +215,31 @@ audit:
   output_capture_max_bytes: 65536
   retention_days: 365
   async_buffer_size: 100
+
+# ── Session persistence ────────
+# Conversations are saved continuously (write-through) to a SQLite
+# DB so they survive restarts and can be resumed with
+# `shmorby -c` (most recent for the launch directory) or
+# `shmorby -s <id>`. Sessions are scoped to their stored working
+# directory; resuming from another directory chdirs back to it.
+# All persisted content (message text, tool-call args, tool
+# output) is run through secret redaction first, same policy as
+# audit/memory — but sessions still contain redacted-but-otherwise
+# raw operational history (hostnames, paths, command output).
+# enabled is read at startup: changing it via /set requires restart.
+session:
+  enabled: true
+  db_path: ~/.local/share/shmorby/sessions.db
+  retention_days: 90      # prune age for archived+inactive sessions
+  max_sessions: 200       # hard cap; oldest pruned first
+
+# ── Ledger ─────────────────────
+# Encrypted environment ledger for cross-session memory.
+# When enabled, the agent exposes ledger_get/ledger_set tools and
+# injects ledger context into the system prompt at session start.
+# Secrets are redacted before storage (defense in depth).
+# enabled is read at startup: changing it via /set requires restart.
+ledger:
+  enabled: true
+  context_budget: 2048    # max bytes of ledger data injected into
+                          # the system prompt (0 = unlimited)

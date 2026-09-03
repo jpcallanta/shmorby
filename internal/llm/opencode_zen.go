@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"shmorby/internal/config"
+	"shmorby/internal/redact"
 )
 
 const (
@@ -19,11 +20,12 @@ const (
 
 // opencodeZenProvider sends requests to the OpencodeZen API.
 type opencodeZenProvider struct {
-	baseURL string
-	apiKey  string
-	model   string
-	client  *http.Client
-	cfg     config.Config
+	baseURL   string
+	apiKey    string
+	model     string
+	client    *http.Client
+	cfg       config.Config
+	sessionID string // stable per-conversation ID for X-Opencode-Session header
 }
 
 // Returns a new OpencodeZen provider with a 120s HTTP client timeout.
@@ -48,6 +50,22 @@ func newOpencodeZenProvider(
 // Returns the provider name "opencode_zen".
 func (o *opencodeZenProvider) Name() string {
 	return "opencode_zen"
+}
+
+// SetSessionID stores the conversation session ID for the
+// X-Opencode-Session header. Must be called before Chat or ModelInfo
+// requests. The empty string disables the header.
+func (o *opencodeZenProvider) SetSessionID(id string) {
+	o.sessionID = id
+}
+
+// zenSessionHeader returns an http.Header containing the
+// X-Opencode-Session value when set, or nil otherwise.
+func (o *opencodeZenProvider) zenSessionHeader() http.Header {
+	if o.sessionID == "" {
+		return nil
+	}
+	return http.Header{"X-Opencode-Session": {o.sessionID}}
 }
 
 // resolveModel returns the effective base URL and stripped model name
@@ -78,14 +96,24 @@ func (o *opencodeZenProvider) Chat(
 	baseURL, effectiveModel := o.resolveModel(model)
 
 	body := openaiRequest{
-		Model:     effectiveModel,
-		Messages:  buildOpenAIMessages(req),
-		Tools:     buildOpenAITools(req.Tools),
-		MaxTokens: req.MaxTokens,
+		Model:    effectiveModel,
+		Messages: buildOpenAIMessages(req),
+		Tools:    buildOpenAITools(req.Tools),
+	}
+
+	// Reasoning models (o-series, gpt-5.x) require
+	// max_completion_tokens; legacy models use max_tokens.
+	if req.MaxTokens > 0 {
+		if IsReasoningModel(effectiveModel) {
+			body.MaxCompletionTokens = req.MaxTokens
+		} else {
+			body.MaxTokens = req.MaxTokens
+		}
 	}
 
 	resp, err := doOpenAIRequest(
 		ctx, o.client, baseURL, o.apiKey, "opencode_zen", body,
+		o.zenSessionHeader(),
 	)
 	if err != nil {
 		return ChatResponse{}, fmt.Errorf("opencode_zen chat: %w", err)
@@ -124,24 +152,37 @@ var zenModelContextWindows = map[string]int{
 	"gemini-3.1-pro":   2097152,
 	"gemini-3-flash":   1048576,
 
-	// OpenAI GPT-5 series
-	"gpt-5.5":             272000,
-	"gpt-5.5-pro":         272000,
-	"gpt-5.4":             272000,
-	"gpt-5.4-pro":         272000,
-	"gpt-5.4-mini":        272000,
-	"gpt-5.4-nano":        272000,
-	"gpt-5.3-codex":       272000,
-	"gpt-5.3-codex-spark": 272000,
-	"gpt-5.2":             272000,
-	"gpt-5.2-codex":       272000,
-	"gpt-5.1":             272000,
-	"gpt-5.1-codex":       272000,
-	"gpt-5.1-codex-max":   272000,
-	"gpt-5.1-codex-mini":  272000,
-	"gpt-5":               272000,
-	"gpt-5-codex":         272000,
-	"gpt-5-nano":          272000,
+	// OpenAI GPT-5 series — keep in sync with
+	// openAIModelContextWindows (openai.go) to avoid drift.
+	// Values verified against OpenAI platform docs (2026-08-07).
+
+	// GPT-5.6 — current flagship (1M context, 128K output)
+	"gpt-5.6-sol":   1050000,
+	"gpt-5.6-terra": 1050000,
+	"gpt-5.6-luna":  1050000,
+
+	// GPT-5.5 / 5.4 — 1M context (272K was pricing tier, not window)
+	"gpt-5.5":     1050000,
+	"gpt-5.5-pro": 1050000,
+	"gpt-5.4":     1050000,
+	"gpt-5.4-pro": 1050000,
+
+	// GPT-5.4 mini/nano — 400K context
+	"gpt-5.4-mini": 400000,
+	"gpt-5.4-nano": 400000,
+
+	// GPT-5.3 codex — 400K context (estimated)
+	"gpt-5.3-codex":       400000,
+	"gpt-5.3-codex-spark": 400000,
+
+	// GPT-5.2 / 5.1 — 400K context
+	"gpt-5.2":      400000,
+	"gpt-5.1":      400000,
+	"gpt-5.1-mini": 400000,
+
+	// GPT-5 — 272K context
+	"gpt-5":      272000,
+	"gpt-5-nano": 272000,
 
 	// Qwen
 	"qwen3.7-max":  1000000,
@@ -193,6 +234,14 @@ func (o *opencodeZenProvider) fetchModelInfo(
 		return ModelInfo{}, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+o.apiKey)
+	// Include session header for Zen API compliance.
+	if h := o.zenSessionHeader(); h != nil {
+		for k, v := range h {
+			for _, val := range v {
+				req.Header.Set(k, val)
+			}
+		}
+	}
 
 	httpResp, err := o.client.Do(req)
 	if err != nil {
@@ -201,10 +250,12 @@ func (o *opencodeZenProvider) fetchModelInfo(
 	defer func() { _ = httpResp.Body.Close() }()
 
 	if httpResp.StatusCode >= 400 {
-		bodyBytes, _ := io.ReadAll(httpResp.Body)
+		// Limit and redact error body to prevent API key
+		// echo-back from leaking into logs.
+		bodyBytes, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1024))
 		return ModelInfo{}, fmt.Errorf(
 			"opencode_zen returned status %d: %s",
-			httpResp.StatusCode, string(bodyBytes),
+			httpResp.StatusCode, redact.SecretString(string(bodyBytes)),
 		)
 	}
 

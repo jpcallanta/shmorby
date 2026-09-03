@@ -13,6 +13,10 @@ type Retriever struct {
 	vector   *VectorStore
 	embedder Embedder
 
+	// contextBudget limits the injected memory context to this many
+	// tokens (0 = unlimited). Set via SetContextBudget.
+	contextBudget int
+
 	// Stats tracks retrieval statistics.
 	hits   int
 	misses int
@@ -53,6 +57,17 @@ func (r *Retriever) SetVectorSearch(
 ) {
 	r.vector = vs
 	r.embedder = emb
+}
+
+// SetContextBudget limits the injected memory context to the given
+// number of tokens. Zero means unlimited.
+func (r *Retriever) SetContextBudget(tokens int) {
+	r.contextBudget = tokens
+}
+
+// ContextBudget returns the configured token budget for memory context.
+func (r *Retriever) ContextBudget() int {
+	return r.contextBudget
 }
 
 // Retrieve runs a similarity search and returns ranked results.

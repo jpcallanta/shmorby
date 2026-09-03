@@ -43,11 +43,14 @@ type findArgs struct {
 	MaxDepth int    `json:"max_depth,omitempty"`
 }
 
-// Implements Tool for filesystem search using filepath.WalkDir.
+// FindTool implements Tool for filesystem search using filepath.WalkDir.
 // Avoids shell find hangs on stuck filesystems.
+// When a ProjectRoot is configured, the default search root is the
+// project directory and results are confined to it.
 type FindTool struct {
 	perm            string
 	defaultMaxDepth int
+	root            *ProjectRoot
 }
 
 // Creates a FindTool with the given permission level.
@@ -57,6 +60,9 @@ func NewFindTool(permLevel string) *FindTool {
 		defaultMaxDepth: 100,
 	}
 }
+
+// SetProjectRoot anchors find searches to the given project root.
+func (f *FindTool) SetProjectRoot(r *ProjectRoot) { f.root = r }
 
 // Returns the tool name.
 func (f *FindTool) Name() string { return "find" }
@@ -75,6 +81,7 @@ func (f *FindTool) SetPerm(level string) { f.perm = level }
 
 // Walk the filesystem with context cancellation support. Matches
 // against glob pattern and filters by type/depth.
+// The search root defaults to the project root when configured.
 func (f *FindTool) Run(
 	ctx context.Context, args json.RawMessage,
 ) (string, error) {
@@ -88,9 +95,19 @@ func (f *FindTool) Run(
 		)
 	}
 
+	// Resolve search root: explicit path > project root > ".".
 	root := a.Path
-	if root == "" {
+	if root == "" && f.root != nil {
+		root = f.root.Root
+	} else if root == "" {
 		root = "."
+	} else if f.root != nil {
+		// Confining an explicit path to the project root.
+		var confErr error
+		root, confErr = f.root.CheckPathConfinement(root)
+		if confErr != nil {
+			return "", fmt.Errorf("find: %w", confErr)
+		}
 	}
 	maxDepth := a.MaxDepth
 	if maxDepth <= 0 {
@@ -108,6 +125,11 @@ func (f *FindTool) Run(
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
+		}
+
+		// Skip blocked directories to match grep behavior.
+		if d.IsDir() && blockedDirNames[d.Name()] {
+			return filepath.SkipDir
 		}
 
 		rel, err := filepath.Rel(root, path)

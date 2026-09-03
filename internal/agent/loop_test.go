@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"shmorby/internal/config"
+	ctxcomp "shmorby/internal/context"
 	"shmorby/internal/llm"
 	"shmorby/internal/session"
 	"shmorby/internal/tools"
@@ -62,7 +63,8 @@ func TestRunTurn_TwoTurns_RetainsContext(t *testing.T) {
 	_, err := RunTurn(
 		context.Background(), p, s,
 		"operate", "", "", "", "hello",
-		nil, nil, nil, llm.ModelInfo{},
+		nil, nil, nil, llm.ModelInfo{}, "",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("turn 1: %v", err)
@@ -71,7 +73,8 @@ func TestRunTurn_TwoTurns_RetainsContext(t *testing.T) {
 	_, err = RunTurn(
 		context.Background(), p, s,
 		"operate", "", "", "", "world",
-		nil, nil, nil, llm.ModelInfo{},
+		nil, nil, nil, llm.ModelInfo{}, "",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("turn 2: %v", err)
@@ -117,7 +120,8 @@ func TestRunTurn_ReturnsReply(t *testing.T) {
 	reply, err := RunTurn(
 		context.Background(), p, s,
 		"operate", "", "", "", "test",
-		nil, nil, nil, llm.ModelInfo{},
+		nil, nil, nil, llm.ModelInfo{}, "",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("RunTurn: %v", err)
@@ -135,7 +139,8 @@ func TestRunTurn_SystemPromptInRequest(t *testing.T) {
 	_, err := RunTurn(
 		context.Background(), p, s,
 		"operate", "", "", "", "hi",
-		nil, nil, nil, llm.ModelInfo{},
+		nil, nil, nil, llm.ModelInfo{}, "",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("RunTurn: %v", err)
@@ -158,7 +163,8 @@ func TestRunTurn_ScopeAppended(t *testing.T) {
 	_, err := RunTurn(
 		context.Background(), p, s,
 		"operate", "MY SCOPE", "", "", "hi",
-		nil, nil, nil, llm.ModelInfo{},
+		nil, nil, nil, llm.ModelInfo{}, "",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("RunTurn: %v", err)
@@ -255,7 +261,7 @@ func TestREPL_ModelCommand(t *testing.T) {
 			Provider: "ollama",
 			Model:    "llama3.2",
 		}
-		co := NewConfigOverrider(&cfg, nil, nil, nil, nil)
+		co := NewConfigOverrider(&cfg, nil, nil, nil)
 		in := strings.NewReader("/model gpt-4o\n/quit\n")
 		var out strings.Builder
 		p := &fakeProvider{name: "openai"}
@@ -343,7 +349,7 @@ func TestREPL_PlatformCommand(t *testing.T) {
 		cfg.OpenAI.APIKey = "sk-test"
 		var prov llm.Provider = &fakeProvider{name: "openai"}
 		co := NewConfigOverrider(
-			&cfg, &prov, nil, nil, nil,
+			&cfg, &prov, nil, nil,
 		)
 		in := strings.NewReader("/platform openai\n/quit\n")
 		var out strings.Builder
@@ -376,7 +382,7 @@ func TestREPL_PlatformCommand(t *testing.T) {
 			Provider: "ollama",
 			Model:    "llama3.2",
 		}
-		co := NewConfigOverrider(&cfg, nil, nil, nil, nil)
+		co := NewConfigOverrider(&cfg, nil, nil, nil)
 		in := strings.NewReader("/platform bogus\n/quit\n")
 		var out strings.Builder
 		p := &fakeProvider{name: "ollama"}
@@ -412,9 +418,9 @@ func TestREPL_ApikeyCommand(t *testing.T) {
 		cfg.OpenAI.APIKey = "sk-old"
 		var prov llm.Provider = &fakeProvider{name: "openai"}
 		co := NewConfigOverrider(
-			&cfg, &prov, nil, nil, nil,
+			&cfg, &prov, nil, nil,
 		)
-		in := strings.NewReader("/apikey sk-new\n/quit\n")
+		in := strings.NewReader("/apikey\nsk-new\n/quit\n")
 		var out strings.Builder
 		p := &fakeProvider{name: "openai"}
 		r := &REPL{
@@ -439,7 +445,7 @@ func TestREPL_ApikeyCommand(t *testing.T) {
 	})
 
 	t.Run("nil overrider", func(t *testing.T) {
-		in := strings.NewReader("/apikey sk-new\n/quit\n")
+		in := strings.NewReader("/apikey\nsk-new\n/quit\n")
 		var out strings.Builder
 		p := &fakeProvider{name: "openai"}
 		r := &REPL{
@@ -825,7 +831,7 @@ func TestRunTurnWithTools_ToolCallThenResult(t *testing.T) {
 	s := session.New()
 
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{name: "shell", result: "hi"})
+	_ = reg.Register(&fakeTool{name: "shell", result: "hi"})
 
 	reply, err := RunTurnWithTools(
 		context.Background(), p, s,
@@ -836,6 +842,8 @@ func TestRunTurnWithTools_ToolCallThenResult(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -894,7 +902,7 @@ func TestRunTurnWithTools_MaxIterations(t *testing.T) {
 	s := session.New()
 
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{name: "shell", result: "ok"})
+	_ = reg.Register(&fakeTool{name: "shell", result: "ok"})
 
 	reply, err := RunTurnWithTools(
 		context.Background(), p, s,
@@ -905,6 +913,8 @@ func TestRunTurnWithTools_MaxIterations(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -998,6 +1008,8 @@ func TestRunTurnWithTools_UnknownToolError(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -1043,7 +1055,7 @@ func TestRunTurnWithTools_SecondChat_IncludesAssistantToolCalls(t *testing.T) {
 	s := session.New()
 
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{name: "shell", result: "ok"})
+	_ = reg.Register(&fakeTool{name: "shell", result: "ok"})
 
 	_, err := RunTurnWithTools(
 		context.Background(), p, s,
@@ -1054,6 +1066,8 @@ func TestRunTurnWithTools_SecondChat_IncludesAssistantToolCalls(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -1107,7 +1121,7 @@ func TestRunTurnWithTools_PartialOutputOnError(t *testing.T) {
 	s := session.New()
 
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{
+	_ = reg.Register(&fakeTool{
 		name:   "partial_tool",
 		result: "partial output",
 		err:    fmt.Errorf("timeout"),
@@ -1122,6 +1136,8 @@ func TestRunTurnWithTools_PartialOutputOnError(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -1158,7 +1174,7 @@ func TestRunTurnWithTools_ShellDisabled(t *testing.T) {
 	s := session.New()
 
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{name: "shell", result: "ok"})
+	_ = reg.Register(&fakeTool{name: "shell", result: "ok"})
 
 	_, err := RunTurnWithTools(
 		context.Background(), p, s,
@@ -1169,6 +1185,8 @@ func TestRunTurnWithTools_ShellDisabled(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -1203,7 +1221,7 @@ func TestREPL_ChatTurn_WithToolsPath(t *testing.T) {
 	s := session.New()
 
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{name: "shell", result: "ok"})
+	_ = reg.Register(&fakeTool{name: "shell", result: "ok"})
 
 	in := strings.NewReader("run command\n/quit\n")
 	var out strings.Builder
@@ -1300,7 +1318,7 @@ func TestRunTurnWithTools_DiagnoseBlocksMutatingShell(t *testing.T) {
 	s := session.New()
 
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{name: "shell", result: "would-run"})
+	_ = reg.Register(&fakeTool{name: "shell", result: "would-run"})
 
 	reply, err := RunTurnWithTools(
 		context.Background(), p, s,
@@ -1311,6 +1329,8 @@ func TestRunTurnWithTools_DiagnoseBlocksMutatingShell(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -1354,7 +1374,7 @@ func TestRunTurnWithTools_OperateAllowsMutatingShell(t *testing.T) {
 	s := session.New()
 
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{name: "shell", result: "removed"})
+	_ = reg.Register(&fakeTool{name: "shell", result: "removed"})
 
 	reply, err := RunTurnWithTools(
 		context.Background(), p, s,
@@ -1365,6 +1385,8 @@ func TestRunTurnWithTools_OperateAllowsMutatingShell(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -1397,8 +1419,8 @@ func TestRunTurnWithTools_ShellDisabledStillAdvertisesNonShell(t *testing.T) {
 	s := session.New()
 
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{name: "shell", result: "ok"})
-	reg.Register(&fakeTool{name: "ssh", result: "ok"})
+	_ = reg.Register(&fakeTool{name: "shell", result: "ok"})
+	_ = reg.Register(&fakeTool{name: "ssh", result: "ok"})
 
 	_, err := RunTurnWithTools(
 		context.Background(), p, s,
@@ -1409,6 +1431,8 @@ func TestRunTurnWithTools_ShellDisabledStillAdvertisesNonShell(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -1457,7 +1481,7 @@ func TestRunTurnWithTools_DiagnoseBadArgs_Blocked(t *testing.T) {
 	s := session.New()
 
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{name: "shell", result: "would-run"})
+	_ = reg.Register(&fakeTool{name: "shell", result: "would-run"})
 
 	reply, err := RunTurnWithTools(
 		context.Background(), p, s,
@@ -1468,6 +1492,231 @@ func TestRunTurnWithTools_DiagnoseBadArgs_Blocked(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		"",
+		"",
+	)
+	if err != nil {
+		t.Fatalf("RunTurnWithTools: %v", err)
+	}
+	if reply != "Blocked" {
+		t.Errorf("want reply %q, got %q", "Blocked", reply)
+	}
+
+	msgs := s.Messages()
+	if len(msgs) != 4 {
+		t.Fatalf("want 4 messages, got %d", len(msgs))
+	}
+	toolMsg := msgs[2]
+	if !strings.Contains(toolMsg.Content,
+		"invalid or empty command") {
+		t.Errorf("want rejection in tool result, got %q",
+			toolMsg.Content)
+	}
+	if toolMsg.Content == "would-run" {
+		t.Errorf("guard bypassed: tool executed with bad args")
+	}
+}
+
+// TestRunTurnWithTools_DiagnoseBlocksMutatingSudo checks that
+// diagnose mode blocks a mutating sudo command.
+func TestRunTurnWithTools_DiagnoseBlocksMutatingSudo(t *testing.T) {
+	toolResp := llm.ChatResponse{
+		Message: llm.Message{Role: "assistant", Content: "Running..."},
+		ToolCalls: []llm.ToolCall{
+			{ID: "call_1", Name: "sudo",
+				Args: `{"command":"rm -rf /tmp/x"}`},
+		},
+	}
+	textResp := llm.ChatResponse{
+		Message: llm.Message{Role: "assistant", Content: "Blocked"},
+	}
+	p := &fakeStepProvider{
+		name:  "fake",
+		steps: []llm.ChatResponse{toolResp, textResp},
+	}
+	s := session.New()
+
+	reg := tools.NewRegistry()
+	_ = reg.Register(&fakeTool{name: "sudo", result: "would-run"})
+
+	reply, err := RunTurnWithTools(
+		context.Background(), p, s,
+		"diagnose", "", "", "m", "delete files",
+		reg, 5, true,
+		nil, nil, nil, llm.ModelInfo{},
+		nil,
+		nil,
+		nil,
+		nil,
+		"",
+		"",
+	)
+	if err != nil {
+		t.Fatalf("RunTurnWithTools: %v", err)
+	}
+	if reply != "Blocked" {
+		t.Errorf("want reply %q, got %q", "Blocked", reply)
+	}
+
+	msgs := s.Messages()
+	if len(msgs) != 4 {
+		t.Fatalf("want 4 messages, got %d", len(msgs))
+	}
+	// Tool result message should contain the diagnose error.
+	toolMsg := msgs[2]
+	if !strings.Contains(toolMsg.Content, "diagnose:") {
+		t.Errorf("want 'diagnose:' in tool result, got %q",
+			toolMsg.Content)
+	}
+	if toolMsg.Content == "would-run" {
+		t.Errorf("guard bypassed: tool executed unguarded")
+	}
+}
+
+// TestRunTurnWithTools_DiagnoseBadSudoArgs_Blocked checks that invalid
+// or empty sudo args in diagnose mode are rejected.
+func TestRunTurnWithTools_DiagnoseBadSudoArgs_Blocked(t *testing.T) {
+	toolResp := llm.ChatResponse{
+		Message: llm.Message{Role: "assistant", Content: "Running..."},
+		ToolCalls: []llm.ToolCall{
+			{ID: "call_1", Name: "sudo",
+				Args: `{"bad": "json"}`},
+		},
+	}
+	textResp := llm.ChatResponse{
+		Message: llm.Message{Role: "assistant", Content: "Blocked"},
+	}
+	p := &fakeStepProvider{
+		name:  "fake",
+		steps: []llm.ChatResponse{toolResp, textResp},
+	}
+	s := session.New()
+
+	reg := tools.NewRegistry()
+	_ = reg.Register(&fakeTool{name: "sudo", result: "would-run"})
+
+	reply, err := RunTurnWithTools(
+		context.Background(), p, s,
+		"diagnose", "", "", "m", "bad args",
+		reg, 5, true,
+		nil, nil, nil, llm.ModelInfo{},
+		nil,
+		nil,
+		nil,
+		nil,
+		"",
+		"",
+	)
+	if err != nil {
+		t.Fatalf("RunTurnWithTools: %v", err)
+	}
+	if reply != "Blocked" {
+		t.Errorf("want reply %q, got %q", "Blocked", reply)
+	}
+
+	msgs := s.Messages()
+	if len(msgs) != 4 {
+		t.Fatalf("want 4 messages, got %d", len(msgs))
+	}
+	toolMsg := msgs[2]
+	if !strings.Contains(toolMsg.Content,
+		"invalid or empty command") {
+		t.Errorf("want rejection in tool result, got %q",
+			toolMsg.Content)
+	}
+	if toolMsg.Content == "would-run" {
+		t.Errorf("guard bypassed: tool executed with bad args")
+	}
+}
+
+// TestRunTurnWithTools_DiagnoseBlocksMutatingSsh checks that
+// diagnose mode blocks a mutating ssh command.
+func TestRunTurnWithTools_DiagnoseBlocksMutatingSsh(t *testing.T) {
+	toolResp := llm.ChatResponse{
+		Message: llm.Message{Role: "assistant", Content: "Running..."},
+		ToolCalls: []llm.ToolCall{
+			{ID: "call_1", Name: "ssh",
+				Args: `{"host":"h","command":"rm -rf /tmp/x"}`},
+		},
+	}
+	textResp := llm.ChatResponse{
+		Message: llm.Message{Role: "assistant", Content: "Blocked"},
+	}
+	p := &fakeStepProvider{
+		name:  "fake",
+		steps: []llm.ChatResponse{toolResp, textResp},
+	}
+	s := session.New()
+
+	reg := tools.NewRegistry()
+	_ = reg.Register(&fakeTool{name: "ssh", result: "would-run"})
+
+	reply, err := RunTurnWithTools(
+		context.Background(), p, s,
+		"diagnose", "", "", "m", "delete files",
+		reg, 5, true,
+		nil, nil, nil, llm.ModelInfo{},
+		nil,
+		nil,
+		nil,
+		nil,
+		"",
+		"",
+	)
+	if err != nil {
+		t.Fatalf("RunTurnWithTools: %v", err)
+	}
+	if reply != "Blocked" {
+		t.Errorf("want reply %q, got %q", "Blocked", reply)
+	}
+
+	msgs := s.Messages()
+	if len(msgs) != 4 {
+		t.Fatalf("want 4 messages, got %d", len(msgs))
+	}
+	toolMsg := msgs[2]
+	if !strings.Contains(toolMsg.Content, "diagnose:") {
+		t.Errorf("want 'diagnose:' in tool result, got %q",
+			toolMsg.Content)
+	}
+	if toolMsg.Content == "would-run" {
+		t.Errorf("guard bypassed: tool executed unguarded")
+	}
+}
+
+// TestRunTurnWithTools_DiagnoseBadSshArgs_Blocked checks that
+// invalid or empty ssh args in diagnose mode are rejected.
+func TestRunTurnWithTools_DiagnoseBadSshArgs_Blocked(t *testing.T) {
+	toolResp := llm.ChatResponse{
+		Message: llm.Message{Role: "assistant", Content: "Running..."},
+		ToolCalls: []llm.ToolCall{
+			{ID: "call_1", Name: "ssh",
+				Args: `{"bad": "json"}`},
+		},
+	}
+	textResp := llm.ChatResponse{
+		Message: llm.Message{Role: "assistant", Content: "Blocked"},
+	}
+	p := &fakeStepProvider{
+		name:  "fake",
+		steps: []llm.ChatResponse{toolResp, textResp},
+	}
+	s := session.New()
+
+	reg := tools.NewRegistry()
+	_ = reg.Register(&fakeTool{name: "ssh", result: "would-run"})
+
+	reply, err := RunTurnWithTools(
+		context.Background(), p, s,
+		"diagnose", "", "", "m", "bad args",
+		reg, 5, true,
+		nil, nil, nil, llm.ModelInfo{},
+		nil,
+		nil,
+		nil,
+		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -1529,6 +1778,46 @@ func TestFilterDiagnoseSchemas_UnknownBlocked(t *testing.T) {
 	}
 }
 
+// TestFilterCodeSchemas_AllAllowed checks that code mode
+// allows file_read, file_edit, file_write, find, grep, shell, task.
+func TestFilterCodeSchemas_AllAllowed(t *testing.T) {
+	schemas := []tools.ToolSchema{
+		{Name: "file_read"},
+		{Name: "file_edit"},
+		{Name: "file_write"},
+		{Name: "find"},
+		{Name: "grep"},
+		{Name: "shell"},
+		{Name: "task"},
+	}
+	filtered := filterCodeSchemas(schemas)
+	if len(filtered) != 7 {
+		t.Fatalf("want 7 schemas, got %d", len(filtered))
+	}
+}
+
+// TestFilterCodeSchemas_UnknownBlocked checks that unknown tools
+// are filtered out in code mode.
+func TestFilterCodeSchemas_UnknownBlocked(t *testing.T) {
+	schemas := []tools.ToolSchema{
+		{Name: "file_read"},
+		{Name: "shell"},
+		{Name: "ssh"},
+		{Name: "sudo"},
+		{Name: "unknown_tool"},
+	}
+	filtered := filterCodeSchemas(schemas)
+	if len(filtered) != 2 {
+		t.Fatalf("want 2 schemas (file_read, shell), got %d", len(filtered))
+	}
+	if filtered[0].Name != "file_read" {
+		t.Errorf("want 'file_read', got %q", filtered[0].Name)
+	}
+	if filtered[1].Name != "shell" {
+		t.Errorf("want 'shell', got %q", filtered[1].Name)
+	}
+}
+
 // TestRunTurnWithTools_ClampMaxIterations checks maxIterations <= 0 is
 // clamped to 1, still making at least one LLM call.
 func TestRunTurnWithTools_ClampMaxIterations(t *testing.T) {
@@ -1542,7 +1831,7 @@ func TestRunTurnWithTools_ClampMaxIterations(t *testing.T) {
 	s := session.New()
 
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{name: "shell", result: "ok"})
+	_ = reg.Register(&fakeTool{name: "shell", result: "ok"})
 
 	reply, err := RunTurnWithTools(
 		context.Background(), p, s,
@@ -1553,6 +1842,8 @@ func TestRunTurnWithTools_ClampMaxIterations(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -1690,6 +1981,54 @@ func TestCheckContextWindow_ZeroContextWindow_SkipsCheck(t *testing.T) {
 	}
 }
 
+// TestCheckContextWindow_ForcedCompression_KeepsModeUnchanged verifies
+// the emergency path compresses (even with mode "off") without
+// mutating the shared compressor mode — the old SetMode/restore
+// dance raced with concurrent subagents.
+func TestCheckContextWindow_ForcedCompression_KeepsModeUnchanged(t *testing.T) {
+	compressor := ctxcomp.NewCompressor(
+		ctxcomp.CompressorConfig{
+			Enabled:               true,
+			Mode:                  "off",
+			Threshold:             0.2,
+			MinMessagesToCompress: 2,
+			FallbackContextWindow: 100,
+		},
+		nil, ctxcomp.NewEstimator("gpt-4"), nil,
+	)
+
+	sess := session.New()
+	sess.AppendMessages([]session.Message{
+		{Role: "user", Content: strings.Repeat("long message ", 20)},
+		{Role: "assistant", Content: strings.Repeat("long answer ", 20)},
+		{Role: "user", Content: strings.Repeat("long message ", 20)},
+		{Role: "assistant", Content: strings.Repeat("long answer ", 20)},
+	})
+
+	modelInfo := llm.ModelInfo{ContextWindow: 100}
+	// Request estimated far above 90% of the window.
+	req := &llm.ChatRequest{System: "x", Messages: []llm.Message{
+		{Role: "user", Content: string(make([]byte, 100000))},
+	}}
+
+	// The request still exceeds the window after compression, so an
+	// error is expected; the assertion here is the side effect.
+	_ = checkContextWindow(
+		modelInfo, compressor, req, context.Background(), sess,
+	)
+
+	if got := compressor.CompressionCount.Load(); got < 1 {
+		t.Errorf("want forced compression despite mode off, got count %d", got)
+	}
+	if len(sess.Messages()) >= 4 {
+		t.Errorf("want session compressed, got %d messages",
+			len(sess.Messages()))
+	}
+	if mode := compressor.Config().Mode; mode != "off" {
+		t.Errorf("want shared mode unchanged \"off\", got %q", mode)
+	}
+}
+
 // TestEstimateRequestTokens_ToolMarshalError_ConservativeFallback checks
 // that when json.Marshal fails on tools, a conservative fallback is used
 // instead of silently underestimating.
@@ -1721,7 +2060,7 @@ func TestRunTurnWithTools_MaxIterationsSummaryFailure(t *testing.T) {
 	s := session.New()
 
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{name: "shell", result: "ok"})
+	_ = reg.Register(&fakeTool{name: "shell", result: "ok"})
 
 	reply, err := RunTurnWithTools(
 		context.Background(), p, s,
@@ -1732,6 +2071,8 @@ func TestRunTurnWithTools_MaxIterationsSummaryFailure(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -1774,7 +2115,7 @@ func TestRunTurnWithTools_PermissionDenyBlocks(t *testing.T) {
 	s := session.New()
 
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{
+	_ = reg.Register(&fakeTool{
 		name: "shell", result: "should-not-run", perm: "deny",
 	})
 
@@ -1787,6 +2128,8 @@ func TestRunTurnWithTools_PermissionDenyBlocks(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -1828,7 +2171,7 @@ func TestRunTurnWithTools_PermissionAsk_DefaultAllow(t *testing.T) {
 	s := session.New()
 
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{
+	_ = reg.Register(&fakeTool{
 		name: "shell", result: "echo hi", perm: "ask",
 	})
 
@@ -1841,6 +2184,8 @@ func TestRunTurnWithTools_PermissionAsk_DefaultAllow(t *testing.T) {
 		nil,
 		nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -1877,7 +2222,7 @@ func TestRunTurnWithTools_PermissionAsk_DeniedByPermFunc(t *testing.T) {
 	s := session.New()
 
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{
+	_ = reg.Register(&fakeTool{
 		name: "shell", result: "should-not-run", perm: "ask",
 	})
 
@@ -1894,6 +2239,8 @@ func TestRunTurnWithTools_PermissionAsk_DeniedByPermFunc(t *testing.T) {
 		permFunc,
 		nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -2026,6 +2373,8 @@ func TestRunTurnWithToolsStream_TextDeltas(t *testing.T) {
 		func(delta string) { gotDeltas = append(gotDeltas, delta) },
 		nil, nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2065,6 +2414,8 @@ func TestRunTurnWithToolsStream_AccumulatesText(t *testing.T) {
 		nil, 5, true, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil, nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2074,7 +2425,9 @@ func TestRunTurnWithToolsStream_AccumulatesText(t *testing.T) {
 	}
 }
 
-// TestRunTurnWithToolsStream_ReasoningDeltas checks reasoning forwarded.
+// TestRunTurnWithToolsStream_ReasoningDeltas checks reasoning is
+// forwarded to onDelta but NOT concatenated into the persisted
+// assistant reply (CoT must not leak into session content).
 func TestRunTurnWithToolsStream_ReasoningDeltas(t *testing.T) {
 	var gotDeltas []string
 	p := &fakeStreamProvider{
@@ -2100,13 +2453,17 @@ func TestRunTurnWithToolsStream_ReasoningDeltas(t *testing.T) {
 		func(delta string) { gotDeltas = append(gotDeltas, delta) },
 		nil, nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reply != "thinking step 1answer" {
-		t.Errorf("reply = %q, want combined text", reply)
+	// Reply should contain only the text content, not reasoning.
+	if reply != "answer" {
+		t.Errorf("reply = %q, want text-only content", reply)
 	}
+	// Both reasoning and text deltas should be forwarded to onDelta.
 	if len(gotDeltas) != 2 {
 		t.Errorf("want 2 deltas, got %d", len(gotDeltas))
 	}
@@ -2140,7 +2497,7 @@ func TestRunTurnWithToolsStream_ToolCall_Executes(t *testing.T) {
 	}
 	sess := session.New()
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{name: "shell", result: "hi"})
+	_ = reg.Register(&fakeTool{name: "shell", result: "hi"})
 
 	reply, err := RunTurnWithToolsStream(
 		context.Background(), p, sess,
@@ -2148,6 +2505,8 @@ func TestRunTurnWithToolsStream_ToolCall_Executes(t *testing.T) {
 		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil, nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2193,7 +2552,7 @@ func TestRunTurnWithToolsStream_ToolCall_NoDelta(t *testing.T) {
 	}
 	sess := session.New()
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{name: "shell", result: "ok"})
+	_ = reg.Register(&fakeTool{name: "shell", result: "ok"})
 
 	var gotDeltas []string
 	reply, err := RunTurnWithToolsStream(
@@ -2204,6 +2563,8 @@ func TestRunTurnWithToolsStream_ToolCall_NoDelta(t *testing.T) {
 		func(delta string) { gotDeltas = append(gotDeltas, delta) },
 		nil, nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2232,6 +2593,8 @@ func TestRunTurnWithToolsStream_NoTools_ReturnsText(t *testing.T) {
 		nil, 5, true, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil, nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2278,7 +2641,7 @@ func TestRunTurnWithToolsStream_MultipleToolRounds(t *testing.T) {
 	}
 	sess := session.New()
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{name: "shell", result: "ok"})
+	_ = reg.Register(&fakeTool{name: "shell", result: "ok"})
 
 	reply, err := RunTurnWithToolsStream(
 		context.Background(), p, sess,
@@ -2286,6 +2649,8 @@ func TestRunTurnWithToolsStream_MultipleToolRounds(t *testing.T) {
 		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil, nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2325,6 +2690,8 @@ func TestRunTurnWithToolsStream_Error_ReturnsError(t *testing.T) {
 		nil, 5, true, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil, nil,
 		nil,
+		"",
+		"",
 	)
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -2348,6 +2715,8 @@ func TestRunTurnWithToolsStream_NilDelta_NoPanic(t *testing.T) {
 		nil, 5, true, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil, nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2385,7 +2754,7 @@ func TestRunTurnWithToolsStream_OutputParity(t *testing.T) {
 	}
 	sess := session.New()
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{name: "shell", result: "hi"})
+	_ = reg.Register(&fakeTool{name: "shell", result: "hi"})
 
 	streamReply, err := RunTurnWithToolsStream(
 		context.Background(), pStream, sess,
@@ -2393,6 +2762,8 @@ func TestRunTurnWithToolsStream_OutputParity(t *testing.T) {
 		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil, nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2421,13 +2792,15 @@ func TestRunTurnWithToolsStream_OutputParity(t *testing.T) {
 		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	if streamReply != normalReply {
-		t.Errorf("parity: stream = %q, normal = %q", streamReply, normalReply)
+		t.Errorf("parity: want %q, got %q", normalReply, streamReply)
 	}
 }
 
@@ -2459,7 +2832,7 @@ func TestRunTurnWithToolsStream_PermissionDeny(t *testing.T) {
 	}
 	sess := session.New()
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{
+	_ = reg.Register(&fakeTool{
 		name: "shell", result: "should-not-run", perm: "deny",
 	})
 
@@ -2469,6 +2842,8 @@ func TestRunTurnWithToolsStream_PermissionDeny(t *testing.T) {
 		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil, nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2514,7 +2889,7 @@ func TestRunTurnWithToolsStream_PermissionAsk_DefaultAllow(t *testing.T) {
 	}
 	sess := session.New()
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{
+	_ = reg.Register(&fakeTool{
 		name: "shell", result: "echo hi", perm: "ask",
 	})
 
@@ -2524,6 +2899,8 @@ func TestRunTurnWithToolsStream_PermissionAsk_DefaultAllow(t *testing.T) {
 		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil, nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2575,7 +2952,7 @@ func TestRunTurnWithToolsStream_MaxIterations(t *testing.T) {
 	}
 	sess := session.New()
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{name: "shell", result: "ok"})
+	_ = reg.Register(&fakeTool{name: "shell", result: "ok"})
 
 	reply, err := RunTurnWithToolsStream(
 		context.Background(), p, sess,
@@ -2583,6 +2960,8 @@ func TestRunTurnWithToolsStream_MaxIterations(t *testing.T) {
 		reg, 2, true, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil, nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2605,7 +2984,7 @@ func TestRunTurnWithToolsStream_DiagnoseBlocksMutating(t *testing.T) {
 	}
 	sess := session.New()
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{name: "shell", result: "would-run"})
+	_ = reg.Register(&fakeTool{name: "shell", result: "would-run"})
 
 	reply, err := RunTurnWithToolsStream(
 		context.Background(), p, sess,
@@ -2613,6 +2992,87 @@ func TestRunTurnWithToolsStream_DiagnoseBlocksMutating(t *testing.T) {
 		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil, nil,
 		nil,
+		"",
+		"",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply != "Blocked" {
+		t.Errorf("reply = %q, want %q", reply, "Blocked")
+	}
+	msgs := sess.Messages()
+	toolMsg := msgs[2]
+	if !strings.Contains(toolMsg.Content, "diagnose:") {
+		t.Errorf("want 'diagnose:' in tool result, got %q", toolMsg.Content)
+	}
+}
+
+// TestRunTurnWithToolsStream_DiagnoseBlocksMutatingSudo checks
+// diagnose mode blocks a mutating sudo command via streaming
+// path.
+func TestRunTurnWithToolsStream_DiagnoseBlocksMutatingSudo(t *testing.T) {
+	p := &fakeStreamProvider{
+		name:     "fake",
+		streamFn: streamToolCallHelper("sudo", "call_1", `{"command":"rm -rf /tmp/x"}`),
+		chatFn: func(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
+			return llm.ChatResponse{
+				Message: llm.Message{Role: "assistant", Content: "Blocked"},
+			}, nil
+		},
+	}
+	sess := session.New()
+	reg := tools.NewRegistry()
+	_ = reg.Register(&fakeTool{name: "sudo", result: "would-run"})
+
+	reply, err := RunTurnWithToolsStream(
+		context.Background(), p, sess,
+		"diagnose", "", "", "test-model", "delete files",
+		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
+		nil, nil, nil, nil,
+		nil,
+		"",
+		"",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply != "Blocked" {
+		t.Errorf("reply = %q, want %q", reply, "Blocked")
+	}
+	msgs := sess.Messages()
+	toolMsg := msgs[2]
+	if !strings.Contains(toolMsg.Content, "diagnose:") {
+		t.Errorf("want 'diagnose:' in tool result, got %q", toolMsg.Content)
+	}
+}
+
+// TestRunTurnWithToolsStream_DiagnoseBlocksMutatingSsh checks
+// diagnose mode blocks a mutating ssh command via streaming
+// path.
+func TestRunTurnWithToolsStream_DiagnoseBlocksMutatingSsh(t *testing.T) {
+	p := &fakeStreamProvider{
+		name: "fake",
+		streamFn: streamToolCallHelper("ssh", "call_1",
+			`{"host":"h","command":"rm -rf /tmp/x"}`),
+		chatFn: func(ctx context.Context, req llm.ChatRequest) (llm.ChatResponse, error) {
+			return llm.ChatResponse{
+				Message: llm.Message{Role: "assistant", Content: "Blocked"},
+			}, nil
+		},
+	}
+	sess := session.New()
+	reg := tools.NewRegistry()
+	_ = reg.Register(&fakeTool{name: "ssh", result: "would-run"})
+
+	reply, err := RunTurnWithToolsStream(
+		context.Background(), p, sess,
+		"diagnose", "", "", "test-model", "delete files",
+		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
+		nil, nil, nil, nil,
+		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2647,6 +3107,8 @@ func TestRunTurnWithToolsStream_UnknownTool(t *testing.T) {
 		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil, nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2690,7 +3152,7 @@ func TestRunTurnWithToolsStream_OnEvent_Called(t *testing.T) {
 	}
 	sess := session.New()
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{name: "shell", result: "hi"})
+	_ = reg.Register(&fakeTool{name: "shell", result: "hi"})
 
 	_, err := RunTurnWithToolsStream(
 		context.Background(), p, sess,
@@ -2699,6 +3161,8 @@ func TestRunTurnWithToolsStream_OnEvent_Called(t *testing.T) {
 		func(ev AgentEvent) { events = append(events, ev) },
 		nil, nil, nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2722,7 +3186,7 @@ func TestRunTurnWithToolsStream_ShellDisabled(t *testing.T) {
 	}
 	sess := session.New()
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{name: "shell", result: "ok"})
+	_ = reg.Register(&fakeTool{name: "shell", result: "ok"})
 
 	_, err := RunTurnWithToolsStream(
 		context.Background(), p, sess,
@@ -2730,6 +3194,8 @@ func TestRunTurnWithToolsStream_ShellDisabled(t *testing.T) {
 		reg, 5, false, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil, nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2776,7 +3242,7 @@ func TestRunTurnWithToolsStream_PermissionAllowAll_SkipsSubsequent(t *testing.T)
 	}
 	sess := session.New()
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{
+	_ = reg.Register(&fakeTool{
 		name: "shell", result: "executed", perm: "ask",
 	})
 
@@ -2791,6 +3257,8 @@ func TestRunTurnWithToolsStream_PermissionAllowAll_SkipsSubsequent(t *testing.T)
 		reg, 5, true, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, permFunc, nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2822,6 +3290,8 @@ func TestRunTurnWithToolsStream_EmptyStream(t *testing.T) {
 		nil, 5, true, nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil, nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2854,7 +3324,7 @@ func TestRunTurnWithTools_PermissionAllowAll_SkipsSubsequent(t *testing.T) {
 	s := session.New()
 
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{
+	_ = reg.Register(&fakeTool{
 		name: "shell", result: "executed", perm: "ask",
 	})
 
@@ -2873,6 +3343,8 @@ func TestRunTurnWithTools_PermissionAllowAll_SkipsSubsequent(t *testing.T) {
 		permFunc,
 		nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -2958,7 +3430,7 @@ func TestREPL_NoTUI_ToolOutput(t *testing.T) {
 	s := session.New()
 
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{name: "shell", result: "ok"})
+	_ = reg.Register(&fakeTool{name: "shell", result: "ok"})
 
 	in := strings.NewReader("run\n/quit\n")
 	var out strings.Builder
@@ -3012,7 +3484,7 @@ func TestBuildPrompt_CacheablePrefix(t *testing.T) {
 	s := session.New()
 
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{name: "shell", result: "ok"})
+	_ = reg.Register(&fakeTool{name: "shell", result: "ok"})
 
 	_, err := RunTurnWithTools(
 		context.Background(), p, s,
@@ -3021,6 +3493,8 @@ func TestBuildPrompt_CacheablePrefix(t *testing.T) {
 		nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -3074,7 +3548,7 @@ func TestBuildPrompt_PrefixOrdering(t *testing.T) {
 	s := session.New()
 
 	reg := tools.NewRegistry()
-	reg.Register(&fakeTool{name: "shell", result: "ok"})
+	_ = reg.Register(&fakeTool{name: "shell", result: "ok"})
 
 	_, err := RunTurnWithTools(
 		context.Background(), p, s,
@@ -3083,6 +3557,8 @@ func TestBuildPrompt_PrefixOrdering(t *testing.T) {
 		nil, nil, nil, llm.ModelInfo{},
 		nil, nil, nil,
 		nil,
+		"",
+		"",
 	)
 	if err != nil {
 		t.Fatalf("RunTurnWithTools: %v", err)
@@ -3110,5 +3586,232 @@ func TestBuildPrompt_PrefixOrdering(t *testing.T) {
 		if !foundUser {
 			t.Errorf("call %d: no user message found in request", i)
 		}
+	}
+}
+
+// TestProcessToolCall_SecretsRedactedBeforeLLM checks that tool output
+// containing secrets (AWS keys, API keys, passwords) is redacted before
+// being returned to the LLM context. The raw output should still be
+// emitted via the UI event.
+func TestProcessToolCall_SecretsRedactedBeforeLLM(t *testing.T) {
+	// Tool output contains various secret patterns.
+	secretOutput := "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n" +
+		"api_key=sk-proj1234567890abcdef1234567890ab\n" +
+		"Bearer eyJhbGciOiJIUzI1NiJ9\n" +
+		"normal output line"
+
+	toolResp := llm.ChatResponse{
+		Message: llm.Message{Role: "assistant", Content: "Running..."},
+		ToolCalls: []llm.ToolCall{
+			{ID: "call_1", Name: "shell",
+				Args: `{"command":"env"}`},
+		},
+	}
+	textResp := llm.ChatResponse{
+		Message: llm.Message{Role: "assistant", Content: "Done"},
+	}
+	p := &fakeStepProvider{
+		name:  "fake",
+		steps: []llm.ChatResponse{toolResp, textResp},
+	}
+	sess := session.New()
+
+	reg := tools.NewRegistry()
+	_ = reg.Register(&fakeTool{name: "shell", result: secretOutput})
+
+	reply, err := RunTurnWithTools(
+		context.Background(), p, sess,
+		"operate", "", "", "m", "check env",
+		reg, 5, true,
+		nil, nil, nil, llm.ModelInfo{},
+		nil, nil, nil, nil, "",
+		"",
+	)
+	if err != nil {
+		t.Fatalf("RunTurnWithTools: %v", err)
+	}
+	if reply != "Done" {
+		t.Errorf("want reply 'Done', got %q", reply)
+	}
+
+	// The LLM should receive redacted tool output in the second call.
+	if len(p.calls) < 2 {
+		t.Fatalf("want 2+ provider calls, got %d", len(p.calls))
+	}
+
+	// Find the tool-role message in the second request's messages.
+	var toolContent string
+	for _, m := range p.calls[1].Messages {
+		if m.Role == "tool" {
+			toolContent = m.Content
+			break
+		}
+	}
+
+	if toolContent == "" {
+		t.Fatal("want tool message in second request, not found")
+	}
+
+	// Secrets must NOT appear in the LLM-bound tool output.
+	if strings.Contains(toolContent, "wJalrXUtnFEMI") {
+		t.Error("AWS secret key leaked to LLM in tool output")
+	}
+	if strings.Contains(toolContent, "sk-proj1234567890") {
+		t.Error("OpenAI key leaked to LLM in tool output")
+	}
+	if strings.Contains(toolContent, "eyJhbGciOiJIUzI1NiJ9") {
+		t.Error("Bearer token leaked to LLM in tool output")
+	}
+
+	// Redacted markers should be present.
+	if !strings.Contains(toolContent, "[REDACTED]") {
+		t.Errorf("want [REDACTED] markers in tool output, got: %q",
+			toolContent)
+	}
+	// Normal output should be preserved.
+	if !strings.Contains(toolContent, "normal output line") {
+		t.Errorf("want non-secret output preserved, got: %q",
+			toolContent)
+	}
+}
+
+// TestProcessToolCall_UIEventReceivesRawOutput checks that the UI event
+// callback receives the raw (unredacted) tool output, while the LLM
+// receives redacted output.
+func TestProcessToolCall_UIEventReceivesRawOutput(t *testing.T) {
+	secretOutput := "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n"
+
+	toolResp := llm.ChatResponse{
+		Message: llm.Message{Role: "assistant", Content: "Running..."},
+		ToolCalls: []llm.ToolCall{
+			{ID: "call_1", Name: "shell",
+				Args: `{"command":"env"}`},
+		},
+	}
+	textResp := llm.ChatResponse{
+		Message: llm.Message{Role: "assistant", Content: "Done"},
+	}
+
+	var uiEventOutput string
+	p := &fakeStepProvider{
+		name:  "fake",
+		steps: []llm.ChatResponse{toolResp, textResp},
+	}
+	sess := session.New()
+
+	reg := tools.NewRegistry()
+	_ = reg.Register(&fakeTool{name: "shell", result: secretOutput})
+
+	_, err := RunTurnWithTools(
+		context.Background(), p, sess,
+		"operate", "", "", "m", "check env",
+		reg, 5, true,
+		nil, nil, nil, llm.ModelInfo{},
+		func(ev AgentEvent) {
+			if ev.Type == "tool-end" {
+				uiEventOutput = ev.Output
+			}
+		},
+		nil, nil, nil, "",
+		"",
+	)
+	if err != nil {
+		t.Fatalf("RunTurnWithTools: %v", err)
+	}
+
+	// UI event must show the raw secret so the user sees the full output.
+	if !strings.Contains(uiEventOutput, "wJalrXUtnFEMI") {
+		t.Errorf("UI event should contain raw secret for user visibility, "+
+			"got: %q", uiEventOutput)
+	}
+}
+
+// TestRunTurnWithTools_SecretOutput_RedactedInSession checks that secrets
+// in tool output are redacted in the session messages persisted to storage.
+func TestRunTurnWithTools_SecretOutput_RedactedInSession(t *testing.T) {
+	secretOutput := "OPENAI_API_KEY=sk-proj1234567890abcdef1234567890ab\n"
+
+	toolResp := llm.ChatResponse{
+		Message: llm.Message{Role: "assistant", Content: "Running..."},
+		ToolCalls: []llm.ToolCall{
+			{ID: "call_1", Name: "shell",
+				Args: `{"command":"env"}`},
+		},
+	}
+	textResp := llm.ChatResponse{
+		Message: llm.Message{Role: "assistant", Content: "Done"},
+	}
+	p := &fakeStepProvider{
+		name:  "fake",
+		steps: []llm.ChatResponse{toolResp, textResp},
+	}
+	sess := session.New()
+
+	reg := tools.NewRegistry()
+	_ = reg.Register(&fakeTool{name: "shell", result: secretOutput})
+
+	_, err := RunTurnWithTools(
+		context.Background(), p, sess,
+		"operate", "", "", "m", "check env",
+		reg, 5, true,
+		nil, nil, nil, llm.ModelInfo{},
+		nil, nil, nil, nil, "",
+		"",
+	)
+	if err != nil {
+		t.Fatalf("RunTurnWithTools: %v", err)
+	}
+
+	// The session (which persists to storage) should contain redacted output.
+	msgs := sess.Messages()
+	for _, m := range msgs {
+		if m.Role == "tool" {
+			if strings.Contains(m.Content, "sk-proj1234567890") {
+				t.Errorf("secret leaked in session tool message: %q",
+					m.Content)
+			}
+		}
+	}
+}
+
+// TestREPL_ApikeyCommand_InlineArg checks an inline key is ignored
+// with a scrollback-visibility warning and the prompt path is used
+// instead.
+func TestREPL_ApikeyCommand_InlineArg(t *testing.T) {
+	cfg := config.Config{
+		Provider: "openai",
+		Model:    "gpt-4o",
+	}
+	cfg.OpenAI.APIKey = "sk-old"
+	var prov llm.Provider = &fakeProvider{name: "openai"}
+	co := NewConfigOverrider(&cfg, &prov, nil, nil)
+
+	in := strings.NewReader(
+		"/apikey sk-inline\nsk-prompted\n/quit\n",
+	)
+	var out strings.Builder
+	p := &fakeProvider{name: "openai"}
+	r := &REPL{
+		Provider:        p,
+		Session:         session.New(),
+		Mode:            "operate",
+		Model:           "gpt-4o",
+		In:              in,
+		Out:             &out,
+		ConfigOverrider: co,
+	}
+	if err := r.Run(context.Background()); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.Contains(out.String(), "inline keys are visible") {
+		t.Errorf("want inline-deprecation note, got:\n%s",
+			out.String())
+	}
+	if !strings.Contains(out.String(), "apikey set") {
+		t.Errorf("want confirmation from prompt path, got:\n%s",
+			out.String())
+	}
+	if cfg.OpenAI.APIKey == "sk-inline" {
+		t.Error("inline key must not be used")
 	}
 }

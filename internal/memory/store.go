@@ -2,7 +2,6 @@ package memory
 
 import (
 	"context"
-	"crypto/rand"
 	"database/sql"
 	"fmt"
 	"log/slog"
@@ -14,6 +13,9 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 	chromem "github.com/philippgille/chromem-go"
+
+	"shmorby/internal/util"
+	"shmorby/internal/xuuid"
 )
 
 // Store defines the memory storage interface.
@@ -67,7 +69,7 @@ const migrationAddAccessed = `
 
 // Creates or opens the store at the configured path.
 func NewStore(cfg Config, embedder Embedder) (Store, error) {
-	dbPath := expandPath(cfg.DBPath)
+	dbPath := util.ExpandPath(cfg.DBPath)
 
 	dir := filepath.Dir(dbPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
@@ -144,29 +146,6 @@ func newVectorStoreForMemory(
 	return vs, nil
 }
 
-// Expands a leading ~/ to the user's home directory.
-func expandPath(path string) string {
-	if strings.HasPrefix(path, "~/") {
-		home, err := os.UserHomeDir()
-		if err == nil {
-			return filepath.Join(home, path[2:])
-		}
-	}
-
-	return path
-}
-
-// Generates a UUID v4 string using crypto/rand.
-func newUUID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-
-	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
-		b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
-}
-
 func (s *sqliteStore) Insert(entry MemoryEntry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -178,7 +157,12 @@ func (s *sqliteStore) Insert(entry MemoryEntry) error {
 	}
 
 	if entry.ID == "" {
-		entry.ID = newUUID()
+		id, err := xuuid.New()
+		if err != nil {
+			return fmt.Errorf("generate id: %w", err)
+		}
+
+		entry.ID = id
 	}
 	if entry.Timestamp.IsZero() {
 		entry.Timestamp = time.Now()
@@ -399,6 +383,7 @@ func (s *sqliteStore) migrateToVectors(
 
 	count := vs.Count()
 	if count > 0 {
+		s.warnDimensionMismatch(ctx, vs, emb)
 		return nil
 	}
 
@@ -437,6 +422,39 @@ func (s *sqliteStore) migrateToVectors(
 		"count", len(entries))
 
 	return nil
+}
+
+// warnDimensionMismatch logs a warning when the persisted vector
+// collection holds embeddings of a different dimension than the
+// configured embedder produces. Mixed-dimension collections make
+// chromem's dot product fail on length mismatch, and the retriever
+// swallows those search errors, silently degrading memory lookup.
+func (s *sqliteStore) warnDimensionMismatch(
+	ctx context.Context, vs *VectorStore, emb Embedder,
+) {
+	dim := emb.Dimension()
+	if dim <= 0 {
+		return
+	}
+
+	entries, err := s.List(1, 0)
+	if err != nil || len(entries) == 0 {
+		return
+	}
+
+	doc, err := vs.Collection.GetByID(ctx, entries[0].ID)
+	if err != nil || len(doc.Embedding) == 0 {
+		return
+	}
+
+	if len(doc.Embedding) != dim {
+		slog.Warn(
+			"existing vector index dimension differs from configured "+
+				"embedding dimension; clear the vector index to rebuild",
+			"stored_dimension", len(doc.Embedding),
+			"configured_dimension", dim,
+		)
+	}
 }
 
 func (s *sqliteStore) scanEntry(
@@ -494,7 +512,11 @@ func (s *sqliteStore) scanEntries(
 	return entries, nil
 }
 
-// Parses a simple JSON string array "[a,b,c]" without encoding/json.
+// Scans a JSON-style quoted string array "[a,b,c]" without
+// encoding/json. The scan is quote-aware: commas, spaces, and other
+// separators inside quotes belong to the tag, and \" and \\ are
+// unescaped so tags containing quotes round-trip instead of being
+// silently split or corrupted.
 func parseTagsJSON(s string) []string {
 	s = strings.TrimSpace(s)
 	if s == "" || s == "[]" || s == "null" {
@@ -504,23 +526,58 @@ func parseTagsJSON(s string) []string {
 	s = strings.TrimPrefix(s, "[")
 	s = strings.TrimSuffix(s, "]")
 
-	if s == "" {
-		return nil
+	var (
+		tags    []string
+		cur     strings.Builder
+		inQuote bool
+		escaped bool
+	)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case escaped:
+			cur.WriteByte(c)
+			escaped = false
+
+		case inQuote && c == '\\':
+			escaped = true
+
+		case c == '"':
+			if inQuote {
+				tags = append(tags, cur.String())
+				cur.Reset()
+			}
+			inQuote = !inQuote
+
+		case inQuote:
+			cur.WriteByte(c)
+		}
+		// Outside quotes only separators remain: commas and
+		// whitespace, which the switch simply skips.
+	}
+	// Unterminated quote means corrupt data; emit what we have
+	// rather than dropping it silently.
+	if inQuote {
+		tags = append(tags, cur.String())
 	}
 
-	var tags []string
-	for _, part := range strings.Split(s, ",") {
-		part = strings.TrimSpace(part)
-		part = strings.Trim(part, "\"")
-		if part != "" {
-			tags = append(tags, part)
+	// Historical behaviour dropped empty tags; keep that.
+	var result []string
+	for _, t := range tags {
+		if t != "" {
+			result = append(result, t)
 		}
 	}
 
-	return tags
+	return result
 }
 
-// Joins strings with quotes: a,b,c → "a","b","c".
+// Escapes the characters that are special inside quoted tags.
+var tagEscaper = strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+
+// Joins strings with quotes: a,b,c → "a","b","c". Backslashes and
+// quotes inside a part are escaped so the result re-parses to the
+// original values.
 func quoteJoin(parts []string, sep string) string {
 	var b strings.Builder
 	for i, p := range parts {
@@ -528,7 +585,7 @@ func quoteJoin(parts []string, sep string) string {
 			b.WriteString(sep)
 		}
 		b.WriteString("\"")
-		b.WriteString(p)
+		b.WriteString(tagEscaper.Replace(p))
 		b.WriteString("\"")
 	}
 
