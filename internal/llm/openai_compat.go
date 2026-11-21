@@ -3,6 +3,7 @@ package llm
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -51,12 +52,28 @@ func IsReasoningModel(model string) bool {
 	return false
 }
 
+// openaiMessage mirrors the OpenAI chat message shape. Content holds
+// either a JSON string (text-only messages) or, for image-bearing
+// user messages, a content-parts array (openaiContentPart values).
 type openaiMessage struct {
 	Role         string              `json:"role"`
-	Content      *string             `json:"content"`
+	Content      any                 `json:"content"`
 	ToolCalls    []openaiToolCall    `json:"tool_calls,omitempty"`
 	ToolCallID   string              `json:"tool_call_id,omitempty"`
 	FunctionCall *openaiFunctionCall `json:"function_call,omitempty"`
+}
+
+// Is one element of a multimodal content array. Exactly one of
+// Text/ImageURL is set per element, keyed by Type.
+type openaiContentPart struct {
+	Type     string          `json:"type"`
+	Text     string          `json:"text,omitempty"`
+	ImageURL *openaiImageURL `json:"image_url,omitempty"`
+}
+
+// Carries a data-URI for inline images (data:<media>;base64,<payload>).
+type openaiImageURL struct {
+	URL string `json:"url"`
 }
 
 type openaiTool struct {
@@ -213,6 +230,57 @@ func doOpenAIRequest(
 		fmt.Errorf("%s request failed after retry: %w", providerName, lastErr)
 }
 
+// GETs a model endpoint and decodes its JSON body into out, which
+// must point at the shape that endpoint returns. Zero or more header
+// maps are applied to the request.
+//
+// Errors carry the provider name; the error body is limited to 1024
+// bytes and redacted so an API key echoed back by the server cannot
+// reach logs.
+func fetchModelJSON(
+	ctx context.Context,
+	client *http.Client,
+	url, provider string,
+	out any,
+	headers ...http.Header,
+) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	for _, h := range headers {
+		for k, v := range h {
+			for _, val := range v {
+				req.Header.Set(k, val)
+			}
+		}
+	}
+
+	httpResp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("http request: %w", err)
+	}
+	defer func() { _ = httpResp.Body.Close() }()
+
+	if httpResp.StatusCode >= 400 {
+		// Limit and redact error body to prevent API key
+		// echo-back from leaking into logs.
+		bodyBytes, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1024))
+
+		return fmt.Errorf(
+			"%s returned status %d: %s",
+			provider, httpResp.StatusCode,
+			redact.SecretString(string(bodyBytes)),
+		)
+	}
+
+	if err := json.NewDecoder(httpResp.Body).Decode(out); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
+
+	return nil
+}
+
 // Builds the OpenAI message array from internal ChatRequest, prepending
 // system prompt as a system-role (or developer-role for reasoning
 // models) message when non-empty.
@@ -240,6 +308,9 @@ func buildOpenAIMessages(req ChatRequest) []openaiMessage {
 		if m.Content != "" || m.Role == "tool" {
 			om.Content = &m.Content
 		}
+		if len(m.Images) > 0 && m.Role == "user" {
+			om.Content = buildOpenAIContentParts(m)
+		}
 		for _, tc := range m.ToolCalls {
 			om.ToolCalls = append(om.ToolCalls, openaiToolCall{
 				ID:   tc.ID,
@@ -256,6 +327,34 @@ func buildOpenAIMessages(req ChatRequest) []openaiMessage {
 		messages = append(messages, om)
 	}
 	return messages
+}
+
+// Builds a multimodal content-parts array for an image-bearing user
+// message: the text part first (when non-empty), then one image part
+// per attached image as a base64 data URI.
+func buildOpenAIContentParts(m Message) []openaiContentPart {
+	parts := make([]openaiContentPart, 0, 1+len(m.Images))
+
+	if m.Content != "" {
+		parts = append(parts, openaiContentPart{
+			Type: "text",
+			Text: m.Content,
+		})
+	}
+	for _, img := range m.Images {
+		parts = append(parts, openaiContentPart{
+			Type: "image_url",
+			ImageURL: &openaiImageURL{
+				URL: fmt.Sprintf(
+					"data:%s;base64,%s",
+					img.MediaType,
+					base64.StdEncoding.EncodeToString(img.Data),
+				),
+			},
+		})
+	}
+
+	return parts
 }
 
 // Converts internal tool definitions to OpenAI tools format.
@@ -293,8 +392,14 @@ func parseOpenAIResponse(resp openaiResponse) (ChatResponse, error) {
 		ID: resp.ID,
 	}
 
-	if ch.Message.Content != nil {
-		cr.Message.Content = *ch.Message.Content
+	// Content decodes as a plain string for most providers; some
+	// return a content-parts array (text + optional image parts),
+	// from which the text parts are concatenated. Images are never
+	// returned by assistants.
+	if s, ok := ch.Message.Content.(string); ok {
+		cr.Message.Content = s
+	} else {
+		cr.Message.Content = extractContentPartsText(ch.Message.Content)
 	}
 
 	// Capture token usage when present (non-streaming responses).
@@ -339,6 +444,27 @@ func parseOpenAIResponse(resp openaiResponse) (ChatResponse, error) {
 	cr.Message.ToolCalls = cr.ToolCalls
 
 	return cr, nil
+}
+
+// Joins the text parts of a content-parts array response. Non-array
+// values decode as empty, matching providers that omit content.
+func extractContentPartsText(content any) string {
+	raw, err := json.Marshal(content)
+	if err != nil {
+		return ""
+	}
+	var parts []openaiContentPart
+	if json.Unmarshal(raw, &parts) != nil {
+		return ""
+	}
+	texts := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p.Type == "text" && p.Text != "" {
+			texts = append(texts, p.Text)
+		}
+	}
+
+	return strings.Join(texts, "\n")
 }
 
 // Strips trailing /v1 from a base URL so doOpenAIRequest does not

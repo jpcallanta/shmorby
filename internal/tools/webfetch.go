@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"shmorby/internal/audit"
+	"shmorby/internal/execution"
 	"shmorby/internal/health"
 )
 
@@ -285,41 +286,64 @@ func (w *WebFetchTool) Run(
 	if err != nil {
 		elapsed := time.Since(start)
 		errMsg := err.Error()
+		var runErr error
 		if cmdCtx.Err() != nil {
 			errMsg = "request cancelled or timed out"
-		}
-		w.logAudit(a.URL, string(args), elapsed, 0, errMsg)
-		if cmdCtx.Err() != nil {
-			return "", health.Wrap("webfetch", elapsed,
+			runErr = health.Wrap("webfetch", elapsed,
 				fmt.Errorf(
 					"webfetch: request cancelled or timed out: %w",
 					cmdCtx.Err(),
 				),
 			)
+		} else {
+			runErr = health.Wrap("webfetch", elapsed,
+				fmt.Errorf("webfetch: request failed: %w", err),
+			)
 		}
-		return "", health.Wrap("webfetch", elapsed,
-			fmt.Errorf("webfetch: request failed: %w", err),
+		auditErr := w.logAudit(
+			ctx, a.URL, string(args), elapsed, 0, errMsg,
 		)
+		if auditErr != nil {
+			auditErr = fmt.Errorf("webfetch audit: %w", auditErr)
+		}
+
+		return "", joinAuditErr(runErr, auditErr)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		elapsed := time.Since(start)
 		errMsg := fmt.Sprintf("GET %s returned %d", a.URL, resp.StatusCode)
-		w.logAudit(a.URL, string(args), elapsed, resp.StatusCode, errMsg)
-		return "", health.Wrap("webfetch", elapsed,
+		runErr := health.Wrap("webfetch", elapsed,
 			fmt.Errorf("webfetch: %s", errMsg),
 		)
+		auditErr := w.logAudit(
+			ctx, a.URL, string(args), elapsed, resp.StatusCode,
+			errMsg,
+		)
+		if auditErr != nil {
+			auditErr = fmt.Errorf("webfetch audit: %w", auditErr)
+		}
+
+		return "", joinAuditErr(runErr, auditErr)
 	}
 
 	// Read maxBytes+1 so we can detect truncation accurately.
 	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(maxBytes)+1))
 	if err != nil {
 		elapsed := time.Since(start)
-		w.logAudit(a.URL, string(args), elapsed, resp.StatusCode, err.Error())
-		return "", health.Wrap("webfetch", elapsed,
+		runErr := health.Wrap("webfetch", elapsed,
 			fmt.Errorf("webfetch: read body: %w", err),
 		)
+		auditErr := w.logAudit(
+			ctx, a.URL, string(args), elapsed,
+			resp.StatusCode, err.Error(),
+		)
+		if auditErr != nil {
+			auditErr = fmt.Errorf("webfetch audit: %w", auditErr)
+		}
+
+		return "", joinAuditErr(runErr, auditErr)
 	}
 
 	elapsed := time.Since(start)
@@ -328,7 +352,11 @@ func (w *WebFetchTool) Run(
 		"duration_ms", elapsed.Milliseconds(),
 		"bytes", len(body),
 	)
-	w.logAudit(a.URL, string(args), elapsed, resp.StatusCode, "")
+	if auditErr := w.logAudit(
+		ctx, a.URL, string(args), elapsed, resp.StatusCode, "",
+	); auditErr != nil {
+		return "", fmt.Errorf("webfetch audit: %w", auditErr)
+	}
 
 	// Strip null bytes (some pages return binary garbage).
 	cleaned := strings.ReplaceAll(string(body), "\x00", "")
@@ -348,23 +376,28 @@ func (w *WebFetchTool) Run(
 
 // Sends a tool-run entry to the audit logger if configured.
 func (w *WebFetchTool) logAudit(
-	url, args string, duration time.Duration,
+	ctx context.Context, url, args string, duration time.Duration,
 	statusCode int, errMsg string,
-) {
+) error {
 	if w.auditLogger == nil {
-		return
+		return nil
 	}
 	code := statusCode
 	// Redact args before audit logging to prevent secrets embedded
 	// in URLs (API keys, tokens) from persisting in plaintext in
 	// the SQLite audit database.
-	w.auditLogger.LogToolRun(
+	return w.auditLogger.LogToolRun(
 		audit.AuditEntry{
-			Tool:       "webfetch",
-			Args:       string(RedactArgs([]byte(args))),
-			DurationMs: duration.Milliseconds(),
-			ExitCode:   &code,
-			Error:      errMsg,
+			SessionID:   SessionIDFrom(ctx),
+			InputID:     InputIDFrom(ctx),
+			ExecutionID: executionIDFromContext(ctx),
+			MessageID:   execution.MessageIDFrom(ctx),
+			ToolCallID:  execution.ToolCallIDFrom(ctx),
+			Tool:        "webfetch",
+			Args:        string(RedactArgs([]byte(args))),
+			DurationMs:  duration.Milliseconds(),
+			ExitCode:    &code,
+			Error:       errMsg,
 		},
 		nil,
 	)

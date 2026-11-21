@@ -2,15 +2,20 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
 	"time"
 
+	"shmorby/internal/approval"
 	"shmorby/internal/audit"
 	ctxcomp "shmorby/internal/context"
+	"shmorby/internal/execution"
 	"shmorby/internal/health"
 	"shmorby/internal/llm"
 	"shmorby/internal/memory"
@@ -21,11 +26,19 @@ import (
 
 // AgentEvent is emitted during tool execution for UI status updates.
 type AgentEvent struct {
-	Type   string // "tool-start", "tool-end", "tool-status"
-	Name   string // tool name
-	Info   string // command or status text
-	Output string // tool output (only on tool-end)
-	Status string // inference-generated status description (only on tool-status)
+	Type             string // Event type, e.g. tool-start or tool-end.
+	Name             string // tool name
+	Info             string // command or status text
+	Output           string // tool output (only on tool-end)
+	Status           string // Inference-generated status description.
+	SessionID        string
+	InputID          string
+	ExecutionID      string
+	ApprovalID       string
+	Model            string
+	PromptTokens     int
+	CompletionTokens int
+	TotalTokens      int
 }
 
 // StreamFunc receives text deltas from LLM streaming responses.
@@ -43,9 +56,33 @@ const (
 	PermAllowAll
 )
 
+// ToolPermissionResolution carries the durable decision attribution.
+type ToolPermissionResolution struct {
+	ApprovalID     string
+	DecidedBy      string
+	DecisionSource string
+	Scope          string
+}
+
+// ToolPermissionRequest contains the context required to persist a
+// permission request before presenting it to the user.
+type ToolPermissionRequest struct {
+	Context         context.Context
+	SessionID       string
+	InputID         string
+	ExecutionID     string
+	Tool            string
+	Command         string
+	CommandRedacted string
+	RulePattern     string
+	RuleAction      string
+	Reason          string
+	Resolution      *ToolPermissionResolution
+}
+
 // ToolPermissionFunc is called when permission evaluates to "ask".
 // Return PermAllow, PermDeny, or PermAllowAll.
-type ToolPermissionFunc func(toolName, command, reason string) ToolPermissionResponse
+type ToolPermissionFunc func(ToolPermissionRequest) ToolPermissionResponse
 
 // Runs a single chat turn: builds system prompt, retrieves relevant memory,
 // sends user text to LLM with session history, and on success stores both
@@ -53,6 +90,8 @@ type ToolPermissionFunc func(toolName, command, reason string) ToolPermissionRes
 // ledgerCtx is pre-formatted ledger context for injection (empty if disabled).
 // projectRoot is the resolved project directory for the env
 // hint (empty = default).
+// userImages carries optional images attached to this user turn;
+// empty for text-only turns.
 func RunTurn(
 	ctx context.Context,
 	p llm.Provider,
@@ -64,11 +103,19 @@ func RunTurn(
 	modelInfo llm.ModelInfo,
 	ledgerCtx string,
 	projectRoot string,
+	userImages ...llm.ImageData,
 ) (string, error) {
+	ctx, inputID := ensureInputID(ctx)
+	if reply, ok := existingTurnReply(sess, inputID); ok {
+		return reply, nil
+	}
+
 	sys, err := SystemPrompt(mode, scope, override, projectRoot)
 	if err != nil {
 		return "", fmt.Errorf("build system prompt: %w", err)
 	}
+
+	userRefs := persistUserImages(sess.ID(), userImages)
 
 	// Compress session before LLM call if configured.
 	if compressor != nil {
@@ -106,11 +153,13 @@ func RunTurn(
 		msgs = append(msgs, llm.Message{
 			Role:    m.Role,
 			Content: m.Content,
+			Images:  session.LoadImages(m.Images),
 		})
 	}
 	msgs = append(msgs, llm.Message{
 		Role:    "user",
 		Content: userText,
+		Images:  session.LoadImages(userRefs),
 	})
 
 	req := llm.ChatRequest{
@@ -139,10 +188,40 @@ func RunTurn(
 	}
 
 	// Only persist messages on successful chat.
-	sess.Append("user", userText)
-	sess.Append("assistant", resp.Text())
+	sess.AppendMessages([]session.Message{
+		{Role: "user", Content: userText, InputID: inputID,
+			Images: userRefs},
+		{Role: "assistant", Content: resp.Text()},
+	})
 
 	return resp.Text(), nil
+}
+
+// Returns an existing assistant reply for a duplicate input key.
+// The bool is false when the key has not been persisted yet.
+func existingTurnReply(
+	sess *session.Session, inputID string,
+) (string, bool) {
+	if inputID == "" {
+		return "", false
+	}
+	if _, ok := sess.FindInput(inputID); !ok {
+		return "", false
+	}
+	if reply, ok := sess.FindInputReply(inputID); ok {
+		return reply.Content, true
+	}
+
+	return "duplicate input ignored: previous turn produced " +
+		"no assistant reply", true
+}
+
+// Persists turn image bytes up front so the user message can carry
+// file-backed refs; identical bytes dedupe to the same file.
+func persistUserImages(
+	sessionID string, images []llm.ImageData,
+) []session.ImageRef {
+	return session.SaveImages(sessionID, images)
 }
 
 // Runs chat turns with tool execution loop up to max iterations.
@@ -155,7 +234,7 @@ type turnState struct {
 	toolDefs        []llm.ToolDef
 	pending         []session.Message
 	cacheablePrefix []llm.Message
-	toolOverrides   map[string]bool
+	toolOverrides   map[string]ToolPermissionResolution
 	degraded        []*health.Degraded
 	iterStart       time.Time
 	iterBudget      time.Duration
@@ -165,6 +244,7 @@ type turnState struct {
 // initTurnState builds the common setup shared by streaming and
 // non-streaming turn runs: system prompt, tool defs, pending messages,
 // memory context, cacheable prefix, and compressor registration.
+// userImages are attached to the turn's user message (empty = none).
 func initTurnState(
 	ctx context.Context,
 	sess *session.Session,
@@ -175,6 +255,7 @@ func initTurnState(
 	retriever *memory.Retriever,
 	compressor *ctxcomp.Compressor,
 	ledgerCtx, projectRoot string,
+	userImages []llm.ImageData,
 ) (*turnState, error) {
 	if maxIterations < 1 {
 		maxIterations = 1
@@ -187,10 +268,14 @@ func initTurnState(
 
 	toolDefs := buildToolDefs(registry, mode, shellEnabled)
 
+	userRefs := persistUserImages(sess.ID(), userImages)
+
 	pending := make([]session.Message, 0, 8)
 	pending = append(pending, session.Message{
 		Role:    "user",
 		Content: userText,
+		InputID: InputIDFrom(ctx),
+		Images:  userRefs,
 	})
 
 	memoryCtx := retrieveMemoryContext(ctx, userText, sess, retriever)
@@ -215,7 +300,7 @@ func initTurnState(
 		toolDefs:        toolDefs,
 		pending:         pending,
 		cacheablePrefix: cacheablePrefix,
-		toolOverrides:   make(map[string]bool),
+		toolOverrides:   make(map[string]ToolPermissionResolution),
 		degraded:        nil,
 		iterStart:       time.Now(),
 		iterBudget:      time.Duration(maxIterations) * 240 * time.Second,
@@ -228,9 +313,12 @@ func initTurnState(
 // onEvent receives tool status updates; may be nil.
 // permFunc is called when a tool's permission evaluates to "ask"
 // (nil = always allow). toolRules are per-tool RuleSets from config.
+// statusGen *StatusGenerator,
 // ledgerCtx is pre-formatted ledger context for injection (empty if disabled).
 // projectRoot is the resolved project directory for the env
 // hint (empty = default).
+// userImages carries optional images attached to this user turn;
+// empty for text-only turns.
 func RunTurnWithTools(
 	ctx context.Context,
 	p llm.Provider,
@@ -249,10 +337,16 @@ func RunTurnWithTools(
 	statusGen *StatusGenerator,
 	ledgerCtx string,
 	projectRoot string,
+	userImages ...llm.ImageData,
 ) (string, error) {
+	ctx, inputID := ensureInputID(ctx)
+	if reply, ok := existingTurnReply(sess, inputID); ok {
+		return reply, nil
+	}
+
 	ts, err := initTurnState(ctx, sess, mode, scope, override, model, userText,
 		registry, maxIterations, shellEnabled, retriever, compressor,
-		ledgerCtx, projectRoot)
+		ledgerCtx, projectRoot, userImages)
 	if err != nil {
 		return "", err
 	}
@@ -300,6 +394,14 @@ func RunTurnWithTools(
 				"completion_tokens", resp.Usage.CompletionTokens,
 				"total_tokens", resp.Usage.TotalTokens,
 			)
+			if onEvent != nil {
+				onEvent(AgentEvent{
+					Type: "usage-updated", Model: model,
+					PromptTokens:     resp.Usage.PromptTokens,
+					CompletionTokens: resp.Usage.CompletionTokens,
+					TotalTokens:      resp.Usage.TotalTokens,
+				})
+			}
 		}
 
 		// No tool calls: final assistant text, flush everything.
@@ -352,12 +454,9 @@ func RunTurnWithTools(
 	return text, nil
 }
 
-// RunTurnWithToolsStream is like RunTurnWithTools but uses ChatStream
-// for progressive text output. Calls onDelta for each text/reasoning
-// chunk as it arrives from the provider.
-// ledgerCtx is pre-formatted ledger context for injection (empty if disabled).
-// projectRoot is the resolved project directory for the env
-// hint (empty = default).
+// Streams a tool-enabled turn, forwarding text and reasoning chunks to
+// onDelta. ledgerCtx and projectRoot are prompt context; userImages are
+// optional images attached to the turn.
 func RunTurnWithToolsStream(
 	ctx context.Context,
 	p llm.Provider,
@@ -377,7 +476,77 @@ func RunTurnWithToolsStream(
 	statusGen *StatusGenerator,
 	ledgerCtx string,
 	projectRoot string,
+	userImages ...llm.ImageData,
 ) (string, error) {
+	return runTurnWithToolsStream(
+		ctx, p, sess, mode, scope, override, model, userText,
+		registry, maxIterations, shellEnabled, store, retriever,
+		compressor, modelInfo, onEvent, onDelta, onDelta,
+		permFunc, toolRules, statusGen, ledgerCtx, projectRoot,
+		userImages...,
+	)
+}
+
+// Streams a tool-enabled turn, sending reasoning separately from text.
+// ledgerCtx and projectRoot are prompt context; userImages are optional.
+func RunTurnWithToolsStreamEvents(
+	ctx context.Context,
+	p llm.Provider,
+	sess *session.Session,
+	mode, scope, override, model, userText string,
+	registry *tools.Registry,
+	maxIterations int,
+	shellEnabled bool,
+	store memory.Store,
+	retriever *memory.Retriever,
+	compressor *ctxcomp.Compressor,
+	modelInfo llm.ModelInfo,
+	onEvent AgentEventFunc,
+	onDelta StreamFunc,
+	onReasoning StreamFunc,
+	permFunc ToolPermissionFunc,
+	toolRules map[string]*tools.RuleSet,
+	statusGen *StatusGenerator,
+	ledgerCtx string,
+	projectRoot string,
+	userImages ...llm.ImageData,
+) (string, error) {
+	return runTurnWithToolsStream(
+		ctx, p, sess, mode, scope, override, model, userText,
+		registry, maxIterations, shellEnabled, store, retriever,
+		compressor, modelInfo, onEvent, onDelta, onReasoning,
+		permFunc, toolRules, statusGen, ledgerCtx, projectRoot,
+		userImages...,
+	)
+}
+
+func runTurnWithToolsStream(
+	ctx context.Context,
+	p llm.Provider,
+	sess *session.Session,
+	mode, scope, override, model, userText string,
+	registry *tools.Registry,
+	maxIterations int,
+	shellEnabled bool,
+	store memory.Store,
+	retriever *memory.Retriever,
+	compressor *ctxcomp.Compressor,
+	modelInfo llm.ModelInfo,
+	onEvent AgentEventFunc,
+	onDelta StreamFunc,
+	onReasoning StreamFunc,
+	permFunc ToolPermissionFunc,
+	toolRules map[string]*tools.RuleSet,
+	statusGen *StatusGenerator,
+	ledgerCtx string,
+	projectRoot string,
+	userImages ...llm.ImageData,
+) (string, error) {
+	ctx, inputID := ensureInputID(ctx)
+	if reply, ok := existingTurnReply(sess, inputID); ok {
+		return reply, nil
+	}
+
 	// Stream variant safely handles nil registry for tool defs.
 	registryForDefs := registry
 	if registryForDefs == nil {
@@ -386,7 +555,7 @@ func RunTurnWithToolsStream(
 
 	ts, err := initTurnState(ctx, sess, mode, scope, override, model, userText,
 		registryForDefs, maxIterations, shellEnabled, retriever, compressor,
-		ledgerCtx, projectRoot)
+		ledgerCtx, projectRoot, userImages)
 	if err != nil {
 		return "", err
 	}
@@ -436,21 +605,29 @@ func RunTurnWithToolsStream(
 					onDelta(event.Delta)
 				}
 			case "reasoning":
-				// Reasoning deltas are surfaced via onDelta
-				// for UI display but NOT concatenated into the
-				// persisted assistant content (CoT tokens
-				// would leak into the session message).
-				if onDelta != nil {
-					onDelta(event.Delta)
+				// Reasoning is never persisted as assistant text.
+				if onReasoning != nil {
+					onReasoning(event.Delta)
 				}
 			case "usage":
-				// Log token usage from stream_options for
-				// cost visibility. The chunk contains JSON
-				// with prompt/completion/total tokens.
-				slog.Debug("stream usage",
-					"model", model,
-					"usage", event.Content,
-				)
+				// The provider encodes stream usage as JSON.
+				var usage llm.Usage
+				if err := json.Unmarshal(
+					[]byte(event.Content), &usage,
+				); err == nil && usage.TotalTokens > 0 {
+					slog.Debug("stream usage",
+						"model", model,
+						"usage", event.Content,
+					)
+					if onEvent != nil {
+						onEvent(AgentEvent{
+							Type: "usage-updated", Model: model,
+							PromptTokens:     usage.PromptTokens,
+							CompletionTokens: usage.CompletionTokens,
+							TotalTokens:      usage.TotalTokens,
+						})
+					}
+				}
 			case "tool-call":
 				toolCalls = append(toolCalls, llm.ToolCall{
 					ID:   event.ToolID,
@@ -619,6 +796,7 @@ func buildCacheablePrefix(
 			ToolName:   m.ToolName,
 			ToolCallID: m.ToolCallID,
 			ToolCalls:  m.ToolCalls,
+			Images:     session.LoadImages(m.Images),
 		})
 	}
 
@@ -641,6 +819,7 @@ func buildIterationMessages(
 			ToolName:   m.ToolName,
 			ToolCallID: m.ToolCallID,
 			ToolCalls:  m.ToolCalls,
+			Images:     session.LoadImages(m.Images),
 		})
 	}
 
@@ -666,7 +845,7 @@ func processToolCall(
 	ctx context.Context,
 	tc llm.ToolCall,
 	registry *tools.Registry,
-	toolOverrides map[string]bool,
+	toolOverrides map[string]ToolPermissionResolution,
 	toolRules map[string]*tools.RuleSet,
 	permFunc ToolPermissionFunc,
 	shellEnabled bool,
@@ -679,13 +858,24 @@ func processToolCall(
 ) string {
 	cmd := extractCommand(tc.Name, tc.Args)
 	argsBytes := json.RawMessage(tc.Args)
+	ctx = execution.WithCorrelation(
+		ctx, tools.InputIDFrom(ctx), tc.ID,
+	)
+
+	execHandle := beginExecution(ctx, tc, cmd)
+	if execHandle != nil {
+		ctx = execution.WithHandle(ctx, execHandle)
+	}
 
 	// Emit tool-start event.
 	if onEvent != nil {
 		onEvent(AgentEvent{
-			Type: "tool-start",
-			Name: tc.Name,
-			Info: cmd,
+			Type:        "tool-start",
+			Name:        tc.Name,
+			Info:        cmd,
+			SessionID:   tools.SessionIDFrom(ctx),
+			InputID:     tools.InputIDFrom(ctx),
+			ExecutionID: executionID(execHandle),
 		})
 	}
 
@@ -710,9 +900,12 @@ func processToolCall(
 			case <-ctx.Done():
 			default:
 				onEvent(AgentEvent{
-					Type:   "tool-status",
-					Name:   name,
-					Status: desc,
+					Type:        "tool-status",
+					Name:        name,
+					Status:      desc,
+					SessionID:   tools.SessionIDFrom(ctx),
+					InputID:     tools.InputIDFrom(ctx),
+					ExecutionID: executionID(execHandle),
 				})
 			}
 		}(tc.Name, toolDescription(registry, tc.Name), cmd)
@@ -720,60 +913,213 @@ func processToolCall(
 
 	var result string
 	var runErr error
+	decision := "deny"
+	decisionSource := "tool_not_found"
+	decidedBy := "system"
+	scope := "call"
+	var approvalID, reason, rulePattern, ruleAction, action string
 
 	// Permission evaluation: check tool-level perm + rule set
-	// before execution. When registry is nil or tool is not found,
-	// short-circuit to error without further checks.
+	// before execution. Missing tools are denied and audited too.
 	if registry == nil {
 		result = "error: tool not found"
+		reason = "tool not found"
 	} else if tool, ok := registry.Lookup(tc.Name); ok {
-		if !toolOverrides[tc.Name] {
-			action, reason, rulePattern, ruleAction, pErr := tools.EvaluateToolPermission(
+		var permissionErr error
+		action, reason, rulePattern, ruleAction, permissionErr =
+			tools.EvaluateToolPermission(
 				tool.PermLevel(), cmd, toolRules[tc.Name],
 			)
-			if pErr != nil {
-				result = "error: " + pErr.Error()
-			} else if action == "ask" {
-				// Default allow preserves v1 behavior
-				// when no interactive func is wired.
-				resp := PermAllow
-				if permFunc != nil {
-					resp = permFunc(tc.Name, cmd, reason)
+		decision = "allow"
+		decisionSource = "tool_allow"
+		if ruleAction == "allow" {
+			decisionSource = "rule_allow"
+		}
+
+		if permissionErr != nil {
+			result = "error: " + permissionErr.Error()
+			decision = "deny"
+			if reason == "" {
+				reason = permissionErr.Error()
+			}
+			if ruleAction == "deny" {
+				decisionSource = "rule_deny"
+			} else {
+				decisionSource = "tool_deny"
+			}
+		} else if action == "ask" {
+			if grant, ok := toolOverrides[tc.Name]; ok {
+				decisionSource = "allow_all"
+				approvalID = grant.ApprovalID
+				if grant.DecidedBy != "" {
+					decidedBy = grant.DecidedBy
 				}
+				scope = "turn"
+			} else {
+				resp := PermDeny
+				requestAllowed := true
+				if permFunc == nil {
+					resp = PermAllow
+					decisionSource = "default_allow"
+				} else {
+					if auditLog := tools.AuditLoggerFrom(ctx); auditLog != nil {
+						err := auditLog.LogLifecycleSync(
+							audit.LifecycleEvent{
+								Type:        "approval_requested",
+								SessionID:   tools.SessionIDFrom(ctx),
+								InputID:     tools.InputIDFrom(ctx),
+								MessageID:   execution.MessageIDFrom(ctx),
+								ToolCallID:  execution.ToolCallIDFrom(ctx),
+								ExecutionID: executionID(execHandle),
+								Tool:        tc.Name,
+								Command:     redactedPermissionArgs(argsBytes),
+							},
+						)
+						if err != nil {
+							requestAllowed = false
+							result = "error: " +
+								"audit " +
+								"approval " +
+								"request: " +
+								err.Error()
+							decisionSource = "audit_failure"
+						}
+					}
+					if requestAllowed {
+						resolution := ToolPermissionResolution{}
+						resp = permFunc(ToolPermissionRequest{
+							Context:         ctx,
+							SessionID:       tools.SessionIDFrom(ctx),
+							InputID:         tools.InputIDFrom(ctx),
+							ExecutionID:     executionID(execHandle),
+							Tool:            tc.Name,
+							Command:         redact.SecretString(cmd),
+							CommandRedacted: redactedPermissionArgs(argsBytes),
+							RulePattern:     rulePattern,
+							RuleAction:      ruleAction,
+							Reason:          reason,
+							Resolution:      &resolution,
+						})
+						approvalID = resolution.ApprovalID
+						decidedBy = resolution.DecidedBy
+						if decidedBy == "" {
+							decidedBy = approval.LocalIdentity()
+						}
+						if resolution.Scope != "" {
+							scope = resolution.Scope
+						}
+						decisionSource = permissionResolutionSource(
+							resp, resolution.DecisionSource,
+						)
+					}
+				}
+
 				switch resp {
 				case PermDeny:
-					result = fmt.Sprintf(
-						"error: permission denied for %s: %s",
-						tc.Name, cmd,
-					)
-				case PermAllowAll:
-					toolOverrides[tc.Name] = true
-				case PermAllow:
-					// fall through to execute
-				}
-			}
-
-			if auditLog := tools.AuditLoggerFrom(ctx); auditLog != nil {
-				decision := "allow"
-				if result != "" && strings.HasPrefix(result, "error: permission denied") {
+					if requestAllowed {
+						result = fmt.Sprintf(
+							"error: permission denied for %s: %s",
+							tc.Name, cmd,
+						)
+					}
 					decision = "deny"
+				case PermAllowAll:
+					decision = "allow_all"
+					decisionSource = "allow_all"
+					scope = "turn"
+					toolOverrides[tc.Name] =
+						ToolPermissionResolution{
+							ApprovalID: approvalID,
+							DecidedBy:  decidedBy,
+						}
 				}
-				auditLog.LogPermission(audit.PermissionAudit{
-					SessionID:   tools.SessionIDFrom(ctx),
-					Tool:        tc.Name,
-					Command:     string(tools.RedactArgs(argsBytes)),
-					RulePattern: rulePattern,
-					RuleAction:  ruleAction,
-					Decision:    decision,
-					Reason:      reason,
-				})
 			}
 		}
 	} else {
 		result = "error: tool not found"
+		reason = "tool not found"
+	}
+
+	if auditLog := tools.AuditLoggerFrom(ctx); auditLog != nil {
+		if approvalID != "" {
+			if err := auditLog.LogLifecycleSync(audit.LifecycleEvent{
+				Type:        "approval_decided",
+				SessionID:   tools.SessionIDFrom(ctx),
+				InputID:     tools.InputIDFrom(ctx),
+				MessageID:   execution.MessageIDFrom(ctx),
+				ToolCallID:  execution.ToolCallIDFrom(ctx),
+				ExecutionID: executionID(execHandle),
+				ApprovalID:  approvalID,
+				Tool:        tc.Name,
+				Command:     redactedPermissionArgs(argsBytes),
+				Decision:    decision,
+			}); err != nil {
+				result = "error: audit approval decision: " + err.Error()
+				decision = "deny"
+				decisionSource = "audit_failure"
+			}
+		}
+		if err := auditLog.LogPermissionSync(audit.PermissionAudit{
+			SessionID:      tools.SessionIDFrom(ctx),
+			InputID:        tools.InputIDFrom(ctx),
+			ExecutionID:    executionID(execHandle),
+			ApprovalID:     approvalID,
+			Tool:           tc.Name,
+			Command:        redactedPermissionArgs(argsBytes),
+			RulePattern:    rulePattern,
+			RuleAction:     ruleAction,
+			Decision:       decision,
+			Reason:         reason,
+			DecidedBy:      decidedBy,
+			DecisionSource: decisionSource,
+			Scope:          scope,
+		}); err != nil {
+			slog.Warn("audit permission insert failed",
+				"tool", tc.Name, "err", err)
+			result = "error: audit permission decision: " + err.Error()
+			decision = "deny"
+			decisionSource = "audit_failure"
+		}
+	}
+	if action == "ask" && permFunc != nil && onEvent != nil {
+		onEvent(AgentEvent{
+			Type:        "permission-resolved",
+			Name:        tc.Name,
+			Info:        decision,
+			SessionID:   tools.SessionIDFrom(ctx),
+			InputID:     tools.InputIDFrom(ctx),
+			ExecutionID: executionID(execHandle),
+			ApprovalID:  approvalID,
+		})
 	}
 
 	// Execute tool if no permission error.
+	runTool := func() {
+		if auditLog := tools.AuditLoggerFrom(ctx); auditLog != nil {
+			err := auditLog.LogLifecycleSync(audit.LifecycleEvent{
+				Type:        "execution_started",
+				SessionID:   tools.SessionIDFrom(ctx),
+				InputID:     tools.InputIDFrom(ctx),
+				MessageID:   execution.MessageIDFrom(ctx),
+				ToolCallID:  execution.ToolCallIDFrom(ctx),
+				ExecutionID: executionID(execHandle),
+				Tool:        tc.Name,
+				Command:     redactedPermissionArgs(argsBytes),
+				Status:      "running",
+			})
+			if err != nil {
+				result = "error: audit execution start: " + err.Error()
+				runErr = err
+				return
+			}
+		}
+		runCtx := ctx
+		if execHandle != nil {
+			runCtx = execHandle.Start(ctx)
+		}
+		result, runErr = registry.Run(runCtx, tc.Name, argsBytes)
+	}
+
 	if result == "" && registry != nil {
 		// Reject shell tool when not enabled; other
 		// tools (ssh/sudo/aws) still work.
@@ -796,10 +1142,7 @@ func processToolCall(
 				); mErr != nil {
 					result = "error: " + mErr.Error()
 				} else {
-					result, runErr = registry.Run(
-						ctx, tc.Name,
-						argsBytes,
-					)
+					runTool()
 				}
 			} else {
 				result = "error: diagnose mode " +
@@ -808,10 +1151,44 @@ func processToolCall(
 					" empty command"
 			}
 		} else {
-			result, runErr = registry.Run(
-				ctx, tc.Name,
-				argsBytes,
-			)
+			runTool()
+		}
+	}
+
+	if execHandle != nil {
+		execHandle.Finish(result, runErr)
+	}
+	if auditLog := tools.AuditLoggerFrom(ctx); auditLog != nil {
+		eventType := "execution_finished"
+		status := "succeeded"
+		if errors.Is(runErr, context.Canceled) ||
+			ctx.Err() == context.Canceled {
+			eventType = "execution_cancelled"
+			status = "cancelled"
+		} else if runErr != nil || strings.HasPrefix(result, "error:") {
+			status = "failed"
+			if strings.HasPrefix(result, "error: permission denied") {
+				status = "denied"
+			}
+		}
+		errText := ""
+		if runErr != nil {
+			errText = runErr.Error()
+		}
+		err := auditLog.LogLifecycleSync(audit.LifecycleEvent{
+			Type:        eventType,
+			SessionID:   tools.SessionIDFrom(ctx),
+			InputID:     tools.InputIDFrom(ctx),
+			MessageID:   execution.MessageIDFrom(ctx),
+			ToolCallID:  execution.ToolCallIDFrom(ctx),
+			ExecutionID: executionID(execHandle),
+			Tool:        tc.Name,
+			Status:      status,
+			Error:       errText,
+		})
+		if err != nil {
+			result = "error: audit execution finish: " + err.Error()
+			runErr = err
 		}
 	}
 
@@ -853,10 +1230,14 @@ func processToolCall(
 			status = "error: " + runErr.Error()
 		}
 		onEvent(AgentEvent{
-			Type:   "tool-end",
-			Name:   tc.Name,
-			Info:   status,
-			Output: result,
+			Type:        "tool-end",
+			Name:        tc.Name,
+			Info:        status,
+			Output:      result,
+			SessionID:   tools.SessionIDFrom(ctx),
+			InputID:     tools.InputIDFrom(ctx),
+			ExecutionID: executionID(execHandle),
+			ApprovalID:  approvalID,
 		})
 	}
 
@@ -865,6 +1246,93 @@ func processToolCall(
 	// LLM must never see credentials captured in tool output such
 	// as API keys, passwords, or tokens.
 	return redact.SecretString(result)
+}
+
+// Persists a pending execution before permission evaluation. Returns
+// nil when no execution manager is wired into ctx.
+func beginExecution(
+	ctx context.Context, tc llm.ToolCall, cmd string,
+) *execution.Handle {
+	mgr := execution.ManagerFrom(ctx)
+	if mgr == nil {
+		return nil
+	}
+
+	h, err := mgr.Begin(ctx, execution.New{
+		SessionID:    tools.SessionIDFrom(ctx),
+		MessageID:    execution.MessageIDFrom(ctx),
+		ToolCallID:   execution.ToolCallIDFrom(ctx),
+		Tool:         tc.Name,
+		Command:      redact.SecretString(cmd),
+		ArgsRedacted: redact.SecretString(tc.Args),
+		ArgsHash:     canonicalArgsHash(tc.Args),
+	})
+	if err != nil {
+		slog.Warn("start execution record failed",
+			"tool", tc.Name, "err", err)
+
+		return nil
+	}
+
+	return h
+}
+
+// Returns the durable execution ID for a handle, or an empty string.
+func executionID(h *execution.Handle) string {
+	if h == nil {
+		return ""
+	}
+
+	return h.ID()
+}
+
+// Classifies a permission response for audit records.
+func permissionResolutionSource(
+	response ToolPermissionResponse, source string,
+) string {
+	if response == PermAllowAll {
+		return "allow_all"
+	}
+
+	switch source {
+	case "timeout":
+		return "timeout_deny"
+	case "interactive", "":
+		if response == PermDeny {
+			return "human_deny"
+		}
+
+		return "human_allow"
+	default:
+		if response == PermDeny {
+			return source + "_deny"
+		}
+
+		return source
+	}
+}
+
+// Redacts permission arguments, including values under sensitive JSON keys.
+func redactedPermissionArgs(raw []byte) string {
+	command, _ := redact.PermissionFields(string(raw), "")
+
+	return command
+}
+
+// Returns a stable hash of JSON arguments with object keys sorted.
+func canonicalArgsHash(raw string) string {
+	data := []byte(raw)
+
+	var v any
+	if json.Unmarshal(data, &v) == nil {
+		if canon, err := json.Marshal(v); err == nil {
+			data = canon
+		}
+	}
+
+	sum := sha256.Sum256(data)
+
+	return hex.EncodeToString(sum[:])
 }
 
 // Records a tool execution result in the memory store. Failures
@@ -971,6 +1439,7 @@ func estimateRequestTokens(sysPrompt string, msgs []llm.Message, tools []llm.Too
 	total := (len(sysPrompt) + 3) / 4
 	for _, m := range msgs {
 		total += (len(m.Content) + 3) / 4
+		total += llm.EstimateImageTokens(m.Images)
 	}
 	if len(tools) > 0 {
 		data, err := json.Marshal(tools)
@@ -1035,6 +1504,7 @@ func checkContextWindow(
 				ToolName:   m.ToolName,
 				ToolCallID: m.ToolCallID,
 				ToolCalls:  m.ToolCalls,
+				Images:     session.LoadImages(m.Images),
 			})
 		}
 		for i := len(history); i < len(req.Messages); i++ {

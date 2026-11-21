@@ -31,6 +31,7 @@ go.work.sum
 # IDE and editor
 .idea/
 .vscode/
+.serena/
 *.swp
 *.swo
 *~

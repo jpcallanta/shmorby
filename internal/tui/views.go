@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"shmorby/internal/llm"
 	"shmorby/internal/tui/styles"
 )
 
@@ -215,8 +216,5 @@ func logEndSep(width int, label string) string {
 
 // formatTokens formats a token count for display, e.g. 42000 → "42k".
 func formatTokens(n int) string {
-	if n >= 1000 {
-		return fmt.Sprintf("%dk", n/1000)
-	}
-	return fmt.Sprintf("%d", n)
+	return llm.FormatTokenCount(n)
 }

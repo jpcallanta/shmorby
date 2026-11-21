@@ -666,3 +666,155 @@ func TestZenModelContextWindows_DeadModelsRemoved(t *testing.T) {
 		})
 	}
 }
+
+// Tests the vision heuristic table and that unknown models default
+// to no vision.
+func TestSupportsVisionHeuristic_KnownFamiliesAndUnknown(t *testing.T) {
+	cases := []struct {
+		model string
+		want  bool
+	}{
+		{"gpt-4o", true},
+		{"gpt-4o-mini", true},
+		{"gpt-4.1-mini", true},
+		{"gpt-5.6-sol", true},
+		{"o3", true},
+		{"o4-mini", true},
+		{"claude-sonnet-4", true},
+		{"gemini-2.5-pro", true},
+		{"llava:13b", true},
+		{"qwen2.5vl:7b", true},
+		{"qwen3vl:8b", true},
+		{"minicpm-v2.6", true},
+		{"openai/gpt-4o", true},
+		{"gpt-3.5-turbo", false},
+		{"llama3.2", false},
+		{"some-unknown-model", false},
+	}
+	for _, tc := range cases {
+		if got := supportsVisionHeuristic(tc.model); got != tc.want {
+			t.Errorf("heuristic(%q) = %v, want %v",
+				tc.model, got, tc.want)
+		}
+	}
+}
+
+// Tests that the fallback path applies the heuristic and the config
+// override always wins over it.
+func TestFetchModelInfo_VisionResolution(t *testing.T) {
+	cases := []struct {
+		name     string
+		model    string
+		override *bool
+		want     bool
+	}{
+		{
+			name:  "heuristic true without override",
+			model: "gpt-4o",
+			want:  true,
+		},
+		{
+			name:  "unknown model defaults false",
+			model: "some-unknown-model",
+			want:  false,
+		},
+		{
+			name:     "override false beats heuristic",
+			model:    "gpt-4o",
+			override: boolPtr(false),
+			want:     false,
+		},
+		{
+			name:     "override true beats heuristic miss",
+			model:    "some-unknown-model",
+			override: boolPtr(true),
+			want:     true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resetModelInfoCache()
+			defer resetModelInfoCache()
+
+			cfg := config.Config{Context: config.ContextConfig{
+				FallbackContextWindow: 8192,
+			}}
+			if tc.override != nil {
+				cfg.Models = map[string]config.ModelOverride{
+					tc.model: {SupportsVision: tc.override},
+				}
+			}
+
+			info, err := FetchModelInfo(
+				context.Background(), &mockFetcher{
+					err: fmt.Errorf("no api"),
+				}, tc.model, cfg,
+			)
+			// Without an override the fallback error is returned;
+			// an override short-circuits it.
+			if tc.override == nil && err != ErrModelInfoFallback {
+				t.Fatalf("want ErrModelInfoFallback, got %v", err)
+			}
+			if tc.override != nil && err != nil {
+				t.Fatalf("want nil error with override, got %v", err)
+			}
+			if info.SupportsVision != tc.want {
+				t.Errorf("want SupportsVision %v, got %v",
+					tc.want, info.SupportsVision)
+			}
+		})
+	}
+}
+
+// Tests that a vision override keyed by the bare model name is
+// found for vendor-prefixed IDs (e.g. "openai/gpt-4o").
+func TestFetchModelInfo_VisionOverride_BareKeyWithVendorPrefix(t *testing.T) {
+	resetModelInfoCache()
+	defer resetModelInfoCache()
+
+	cfg := config.Config{
+		Context: config.ContextConfig{FallbackContextWindow: 8192},
+		Models: map[string]config.ModelOverride{
+			"gpt-4o": {SupportsVision: boolPtr(false)},
+		},
+	}
+
+	info, err := FetchModelInfo(
+		context.Background(), &mockFetcher{
+			err: fmt.Errorf("no api"),
+		}, "openai/gpt-4o", cfg,
+	)
+	if info.SupportsVision {
+		t.Error("want bare-key override false to win over heuristic")
+	}
+	if err != ErrModelInfoFallback {
+		t.Errorf("want ErrModelInfoFallback, got %v", err)
+	}
+}
+
+// Tests that a live Ollama vision report flows through FetchModelInfo
+// (API truth before heuristic).
+func TestFetchModelInfo_OllamaVisionCapabilityFlows(t *testing.T) {
+	resetModelInfoCache()
+	defer resetModelInfoCache()
+
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"model_info":   map[string]any{"context_length": 8192},
+				"capabilities": []string{"vision"},
+			})
+		},
+	))
+	defer srv.Close()
+
+	p := newOllamaProvider(srv.URL, "custom-vision-model", config.Config{})
+	info, err := p.fetchModelInfo(context.Background(), "custom-vision-model")
+	if err != nil {
+		t.Fatalf("fetchModelInfo: %v", err)
+	}
+	if !info.SupportsVision {
+		t.Error("want SupportsVision true from capabilities")
+	}
+}

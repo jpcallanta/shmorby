@@ -2,8 +2,11 @@ package audit
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -18,6 +21,72 @@ func newTestStore(t *testing.T) *AuditStore {
 	}
 	t.Cleanup(func() { store.Close() })
 	return store
+}
+
+func TestAuditStore_AdditiveMigrationKeepsRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.db")
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE audit_entries (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			tool TEXT NOT NULL,
+			args TEXT NOT NULL,
+			duration_ms INTEGER NOT NULL DEFAULT 0,
+			exit_code INTEGER,
+			error TEXT,
+			output_hash TEXT,
+			captured_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+		CREATE TABLE audit_permissions (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			session_id TEXT NOT NULL,
+			entry_id INTEGER REFERENCES audit_entries(id),
+			tool TEXT NOT NULL,
+			command TEXT NOT NULL,
+			rule_pattern TEXT,
+			rule_action TEXT,
+			decision TEXT NOT NULL,
+			reason TEXT,
+			decided_at TEXT NOT NULL DEFAULT (datetime('now'))
+		);
+		INSERT INTO audit_entries (session_id, tool, args)
+		VALUES ('old-session', 'shell', '{}');
+		INSERT INTO audit_permissions (session_id, tool, command, decision)
+		VALUES ('old-session', 'shell', 'ls', 'allow');
+	`)
+	if err != nil {
+		db.Close()
+		t.Fatalf("create legacy schema: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close legacy db: %v", err)
+	}
+
+	store, err := NewAuditStore(path)
+	if err != nil {
+		t.Fatalf("NewAuditStore: %v", err)
+	}
+	defer store.Close()
+
+	entries, err := store.QueryEntries(QueryFilter{})
+	if err != nil {
+		t.Fatalf("QueryEntries: %v", err)
+	}
+	if len(entries) != 1 || entries[0].SessionID != "old-session" {
+		t.Errorf("entries = %+v, want legacy entry", entries)
+	}
+
+	perms, err := store.QueryPermissions(QueryFilter{})
+	if err != nil {
+		t.Fatalf("QueryPermissions: %v", err)
+	}
+	if len(perms) != 1 || perms[0].Decision != "allow" {
+		t.Errorf("permissions = %+v, want legacy decision", perms)
+	}
 }
 
 func TestAuditStore_InsertEntry(t *testing.T) {
@@ -163,14 +232,17 @@ func TestAuditStore_PermissionInsert(t *testing.T) {
 	})
 
 	perm := PermissionAudit{
-		SessionID:   "s",
-		EntryID:     &entryID,
-		Tool:        "shell",
-		Command:     "rm -rf /",
-		RulePattern: "*",
-		RuleAction:  "deny",
-		Decision:    "deny",
-		Reason:      "destructive",
+		SessionID:      "s",
+		EntryID:        &entryID,
+		Tool:           "shell",
+		Command:        "rm -rf /",
+		RulePattern:    "*",
+		RuleAction:     "deny",
+		Decision:       "deny",
+		Reason:         "destructive",
+		DecidedBy:      "local",
+		DecisionSource: "interactive",
+		Scope:          "call",
 	}
 	id, err := store.InsertPermission(perm)
 	if err != nil {
@@ -189,6 +261,12 @@ func TestAuditStore_PermissionInsert(t *testing.T) {
 	}
 	if perms[0].Decision != "deny" {
 		t.Errorf("expected decision deny, got %s", perms[0].Decision)
+	}
+	if perms[0].DecidedBy != "local" ||
+		perms[0].DecisionSource != "interactive" ||
+		perms[0].Scope != "call" {
+		t.Errorf("audit attribution = %+v, want local interactive call",
+			perms[0])
 	}
 }
 
@@ -355,6 +433,117 @@ func TestAuditStore_IntegrityChecksum(t *testing.T) {
 	}
 }
 
+func TestAuditStore_VerifyChain(t *testing.T) {
+	store := newTestStore(t)
+	if _, err := store.InsertEntry(AuditEntry{
+		SessionID: "chain", Tool: "shell", Args: `{}`,
+	}); err != nil {
+		t.Fatalf("InsertEntry: %v", err)
+	}
+	if _, err := store.InsertPermission(PermissionAudit{
+		SessionID: "chain", Tool: "shell", Command: "true",
+		Decision: "allow",
+	}); err != nil {
+		t.Fatalf("InsertPermission: %v", err)
+	}
+	if err := store.AppendLifecycleEvent(LifecycleEvent{
+		Type: "execution_finished", ExecutionID: "exec-1",
+		Status: "succeeded",
+	}); err != nil {
+		t.Fatalf("AppendLifecycleEvent: %v", err)
+	}
+
+	result, err := store.VerifyChain(1, 0)
+	if err != nil {
+		t.Fatalf("VerifyChain: %v", err)
+	}
+	if result.From != 1 || result.To != 3 || result.Verified != 3 {
+		t.Errorf("result = %+v, want rows 1-3 verified", result)
+	}
+	found, err := store.HasLifecycleEvent("exec-1", "execution_finished")
+	if err != nil || !found {
+		t.Errorf("HasLifecycleEvent = %v, %v; want true, nil", found, err)
+	}
+
+	if _, err := store.db.Exec(
+		`UPDATE audit_chain SET payload = '{}' WHERE seq = 2`,
+	); err != nil {
+		t.Fatalf("tamper chain: %v", err)
+	}
+	_, err = store.VerifyChain(1, 0)
+	chainErr, ok := err.(*ChainVerificationError)
+	if !ok || chainErr.Sequence != 2 {
+		t.Errorf("VerifyChain error = %v, want first bad row 2", err)
+	}
+}
+
+func TestAuditStore_VerifyChainDetectsSourceRowEdit(t *testing.T) {
+	store := newTestStore(t)
+	id, err := store.InsertEntry(AuditEntry{
+		SessionID: "chain-edit", Tool: "shell", Args: "original",
+	})
+	if err != nil {
+		t.Fatalf("InsertEntry: %v", err)
+	}
+	if _, err := store.db.Exec(
+		`UPDATE audit_entries SET args = 'modified' WHERE id = ?`, id,
+	); err != nil {
+		t.Fatalf("tamper audit entry: %v", err)
+	}
+
+	_, err = store.VerifyChain(1, 0)
+	chainErr, ok := err.(*ChainVerificationError)
+	if !ok || chainErr.Sequence != 1 {
+		t.Errorf("VerifyChain error = %v, want first bad row 1", err)
+	}
+}
+
+func TestAuditStore_VerifyChainDetectsOutputEdit(t *testing.T) {
+	store := newTestStore(t)
+	entryID, err := store.InsertEntry(AuditEntry{
+		SessionID: "chain-output", Tool: "shell", Args: "{}",
+	})
+	if err != nil {
+		t.Fatalf("InsertEntry: %v", err)
+	}
+	if err := store.InsertOutput(OutputCapture{
+		EntryID: entryID, SessionID: "chain-output", Stdout: "original",
+	}); err != nil {
+		t.Fatalf("InsertOutput: %v", err)
+	}
+	if _, err := store.db.Exec(
+		`UPDATE audit_output SET stdout = 'modified' WHERE entry_id = ?`,
+		entryID,
+	); err != nil {
+		t.Fatalf("tamper output: %v", err)
+	}
+
+	_, err = store.VerifyChain(1, 0)
+	chainErr, ok := err.(*ChainVerificationError)
+	if !ok || chainErr.Sequence != 2 {
+		t.Errorf("VerifyChain error = %v, want first bad row 2", err)
+	}
+}
+
+func TestAuditStore_VerifyChainRange(t *testing.T) {
+	store := newTestStore(t)
+	for i := 0; i < 3; i++ {
+		if err := store.AppendLifecycleEvent(LifecycleEvent{
+			Type: "execution_finished", ExecutionID: strconv.Itoa(i),
+		}); err != nil {
+			t.Fatalf("AppendLifecycleEvent: %v", err)
+		}
+	}
+
+	result, err := store.VerifyChain(2, 3)
+	if err != nil {
+		t.Fatalf("VerifyChain: %v", err)
+	}
+	if result.From != 2 || result.To != 3 || result.Verified != 2 {
+		t.Errorf("result = %+v, want rows 2-3 verified", result)
+	}
+}
+
 func TestAuditStore_ConcurrentWrites(t *testing.T) {
 	store := newTestStore(t)
 
@@ -383,6 +572,13 @@ func TestAuditStore_ConcurrentWrites(t *testing.T) {
 	if len(entries) != 500 {
 		t.Errorf("expected 500 entries, got %d", len(entries))
 	}
+	result, err := store.VerifyChain(1, 0)
+	if err != nil {
+		t.Fatalf("VerifyChain: %v", err)
+	}
+	if result.Verified != 500 {
+		t.Errorf("verified records = %d, want 500", result.Verified)
+	}
 }
 
 func TestAuditStore_Stats(t *testing.T) {
@@ -399,5 +595,201 @@ func TestAuditStore_Stats(t *testing.T) {
 	}
 	if stats.DBSize <= 0 {
 		t.Errorf("expected positive DB size, got %d", stats.DBSize)
+	}
+}
+
+// TestAuditStore_InputIDRoundTrip verifies the input idempotency key
+// is persisted with tool and permission audit entries.
+func TestAuditStore_InputIDRoundTrip(t *testing.T) {
+	store := newTestStore(t)
+
+	if _, err := store.InsertEntry(AuditEntry{
+		SessionID: "s1", InputID: "input-1",
+		Tool: "shell", Args: "{}",
+	}); err != nil {
+		t.Fatalf("InsertEntry: %v", err)
+	}
+	if _, err := store.InsertPermission(PermissionAudit{
+		SessionID: "s1", InputID: "input-1",
+		Tool: "shell", Command: "ls", Decision: "allow",
+	}); err != nil {
+		t.Fatalf("InsertPermission: %v", err)
+	}
+
+	entries, err := store.QueryEntries(QueryFilter{SessionID: "s1"})
+	if err != nil {
+		t.Fatalf("QueryEntries: %v", err)
+	}
+	if len(entries) != 1 || entries[0].InputID != "input-1" {
+		t.Errorf("entries = %+v, want InputID input-1", entries)
+	}
+
+	perms, err := store.QueryPermissions(QueryFilter{SessionID: "s1"})
+	if err != nil {
+		t.Fatalf("QueryPermissions: %v", err)
+	}
+	if len(perms) != 1 || perms[0].InputID != "input-1" {
+		t.Errorf("permissions = %+v, want InputID input-1", perms)
+	}
+}
+
+// TestAuditStore_ExecutionLink verifies entries and permissions keep
+// the durable execution ID.
+func TestAuditStore_ExecutionLink(t *testing.T) {
+	store := newTestStore(t)
+
+	id, err := store.InsertEntry(AuditEntry{
+		SessionID:   "s",
+		InputID:     "input-1",
+		ExecutionID: "exec-1",
+		MessageID:   "input-1",
+		ToolCallID:  "call-1",
+		Tool:        "shell",
+		Args:        "{}",
+	})
+	if err != nil {
+		t.Fatalf("InsertEntry: %v", err)
+	}
+
+	got, err := store.GetEntry(id)
+	if err != nil {
+		t.Fatalf("GetEntry: %v", err)
+	}
+	if got.ExecutionID != "exec-1" || got.MessageID != "input-1" ||
+		got.ToolCallID != "call-1" {
+		t.Errorf("entry = %+v, want execution, message, and call IDs",
+			got)
+	}
+
+	if _, err := store.InsertPermission(PermissionAudit{
+		SessionID:   "s",
+		ExecutionID: "exec-1",
+		ApprovalID:  "approval-1",
+		Tool:        "shell",
+		Command:     "ls",
+		Decision:    "allow",
+	}); err != nil {
+		t.Fatalf("InsertPermission: %v", err)
+	}
+	if _, err := store.InsertPermission(PermissionAudit{
+		SessionID: "s", ExecutionID: "exec-2",
+		ApprovalID: "approval-2", Tool: "shell", Command: "pwd",
+		Decision: "allow",
+	}); err != nil {
+		t.Fatalf("InsertPermission: %v", err)
+	}
+
+	perms, err := store.QueryPermissions(QueryFilter{
+		SessionID: "s", ExecutionID: "exec-1", ApprovalID: "approval-1",
+	})
+	if err != nil {
+		t.Fatalf("QueryPermissions: %v", err)
+	}
+	if len(perms) != 1 || perms[0].ExecutionID != "exec-1" ||
+		perms[0].ApprovalID != "approval-1" {
+		t.Errorf("permissions = %+v, want execution exec-1 and approval-1",
+			perms)
+	}
+
+	byExecution, err := store.QueryPermissions(
+		QueryFilter{ExecutionID: "exec-2"},
+	)
+	if err != nil {
+		t.Fatalf("QueryPermissions by execution: %v", err)
+	}
+	if len(byExecution) != 1 || byExecution[0].ApprovalID != "approval-2" {
+		t.Errorf("execution filter = %+v, want approval-2", byExecution)
+	}
+	byApproval, err := store.QueryPermissions(
+		QueryFilter{ApprovalID: "approval-1"},
+	)
+	if err != nil {
+		t.Fatalf("QueryPermissions by approval: %v", err)
+	}
+	if len(byApproval) != 1 || byApproval[0].ExecutionID != "exec-1" {
+		t.Errorf("approval filter = %+v, want exec-1", byApproval)
+	}
+
+	entries, err := store.QueryEntries(QueryFilter{ExecutionID: "exec-1"})
+	if err != nil {
+		t.Fatalf("QueryEntries: %v", err)
+	}
+	if len(entries) != 1 || entries[0].ToolCallID != "call-1" {
+		t.Errorf("entries = %+v, want call-1 for exec-1", entries)
+	}
+}
+
+// TestAuditStore_CompleteSubagentNotFound checks completing an unknown
+// child session returns a not-found error.
+func TestAuditStore_CompleteSubagentNotFound(t *testing.T) {
+	store := newTestStore(t)
+
+	err := store.CompleteSubagent("missing-child", 10, "completed")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("CompleteSubagent error = %v, want not found", err)
+	}
+}
+
+// TestAuditStore_VerifyChainSubagentRows checks completed subagent rows
+// verify, and a source-table edit is detected at the finished record.
+func TestAuditStore_VerifyChainSubagentRows(t *testing.T) {
+	store := newTestStore(t)
+	if _, err := store.InsertSubagent(SubagentAudit{
+		ParentSessionID: "parent",
+		ChildSessionID:  "child-1",
+		Tool:            "task",
+		Status:          "running",
+	}); err != nil {
+		t.Fatalf("InsertSubagent: %v", err)
+	}
+	err := store.CompleteSubagent("child-1", 10, "completed")
+	if err != nil {
+		t.Fatalf("CompleteSubagent: %v", err)
+	}
+
+	result, err := store.VerifyChain(1, 0)
+	if err != nil {
+		t.Fatalf("VerifyChain: %v", err)
+	}
+	if result.Verified != 2 {
+		t.Errorf("Verified = %d, want 2", result.Verified)
+	}
+
+	if _, err := store.db.Exec(
+		`UPDATE audit_subagents SET status = 'failed'
+		 WHERE child_session_id = 'child-1'`,
+	); err != nil {
+		t.Fatalf("tamper subagent: %v", err)
+	}
+	_, err = store.VerifyChain(1, 0)
+	chainErr, ok := err.(*ChainVerificationError)
+	if !ok || chainErr.Sequence != 2 {
+		t.Errorf("VerifyChain error = %v, want first bad row 2", err)
+	}
+}
+
+// TestAuditStore_VerifyChainDetectsSubagentStartedEdit checks an edit
+// to a started-only subagent record is detected.
+func TestAuditStore_VerifyChainDetectsSubagentStartedEdit(t *testing.T) {
+	store := newTestStore(t)
+	if _, err := store.InsertSubagent(SubagentAudit{
+		ParentSessionID: "parent",
+		ChildSessionID:  "child-1",
+		Tool:            "task",
+		Status:          "running",
+	}); err != nil {
+		t.Fatalf("InsertSubagent: %v", err)
+	}
+	if _, err := store.db.Exec(
+		`UPDATE audit_subagents SET status = 'changed'
+		 WHERE child_session_id = 'child-1'`,
+	); err != nil {
+		t.Fatalf("tamper subagent: %v", err)
+	}
+
+	_, err := store.VerifyChain(1, 0)
+	chainErr, ok := err.(*ChainVerificationError)
+	if !ok || chainErr.Sequence != 1 {
+		t.Errorf("VerifyChain error = %v, want first bad row 1", err)
 	}
 }

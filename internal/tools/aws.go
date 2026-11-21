@@ -114,7 +114,8 @@ func (a *AWSTool) Run(
 		"args", string(RedactArgs(args)),
 	)
 
-	logAuditEvent(a.auditLogger, ctx, ToolAWS, args, elapsed, err, out,
+	auditErr := logAuditEvent(
+		a.auditLogger, ctx, ToolAWS, args, elapsed, err, out,
 		&audit.OutputCapture{
 			SessionID:  SessionIDFrom(ctx),
 			Stdout:     string(out),
@@ -125,9 +126,14 @@ func (a *AWSTool) Run(
 
 	result := string(TruncateOutput(out))
 
+	var runErr error
 	if err != nil {
-		return exitCodeResult(result, err, elapsed, ToolAWS)
+		result, runErr = exitCodeResult(result, err, elapsed, ToolAWS)
 	}
 
-	return result, nil
+	if auditErr != nil {
+		auditErr = fmt.Errorf("aws audit: %w", auditErr)
+	}
+
+	return result, joinAuditErr(runErr, auditErr)
 }

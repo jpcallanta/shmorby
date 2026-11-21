@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/pkoukk/tiktoken-go"
+	"shmorby/internal/llm"
 	"shmorby/internal/session"
 )
 
@@ -38,6 +39,7 @@ func (t *TiktokenEstimator) EstimateMessages(messages []session.Message) int {
 
 	for _, m := range messages {
 		total += t.Estimate(m.Content)
+		total += llm.EstimateImageTokens(session.LoadImages(m.Images))
 	}
 
 	return total

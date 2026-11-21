@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -346,6 +347,10 @@ func TestCheckLedger_KeyInitialized(t *testing.T) {
 
 // TestCheckLedger_WorldReadable ensures degraded on bad perms.
 func TestCheckLedger_WorldReadable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows FileMode does not expose ACLs")
+	}
+
 	dir := t.TempDir()
 	dataFile := filepath.Join(dir, "ledger.json.age")
 	if err := os.WriteFile(dataFile, []byte("data"), 0o644); err != nil {

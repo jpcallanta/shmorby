@@ -16,6 +16,7 @@ import (
 
 	"shmorby/internal/audit"
 	cmdexec "shmorby/internal/exec"
+	"shmorby/internal/execution"
 	"shmorby/internal/health"
 	"shmorby/internal/xdg"
 )
@@ -194,6 +195,7 @@ func (s *ShellTool) Run(
 		return "", health.Wrap("shell", time.Since(start),
 			fmt.Errorf("start: %w", err))
 	}
+	execution.SetPID(ctx, cmd.Process.Pid)
 
 	done := make(chan struct{})
 
@@ -268,7 +270,8 @@ func (s *ShellTool) Run(
 		"args", string(RedactArgs(args)),
 	)
 
-	logAuditEvent(s.auditLogger, ctx, ToolShell, args, elapsed, waitErr, nil,
+	auditErr := logAuditEvent(
+		s.auditLogger, ctx, ToolShell, args, elapsed, waitErr, nil,
 		&audit.OutputCapture{
 			SessionID:  SessionIDFrom(ctx),
 			Stdout:     outBuf.String(),
@@ -281,22 +284,27 @@ func (s *ShellTool) Run(
 
 	result := string(TruncateOutput(out))
 
+	var runErr error
 	if errors.Is(cmdCtx.Err(), context.DeadlineExceeded) {
-		return result, health.Wrap(ToolShell, elapsed,
+		runErr = health.Wrap(ToolShell, elapsed,
 			fmt.Errorf("shell exec timed out after %ds: %w",
 				timeout, cmdCtx.Err()),
 		)
-	}
-	if errors.Is(cmdCtx.Err(), context.Canceled) {
-		return result, health.Wrap(ToolShell, elapsed,
+	} else if errors.Is(cmdCtx.Err(), context.Canceled) {
+		runErr = health.Wrap(ToolShell, elapsed,
 			fmt.Errorf("shell exec cancelled: %w", cmdCtx.Err()),
 		)
-	}
-	if waitErr != nil {
-		return exitCodeResult(result, waitErr, elapsed, ToolShell)
+	} else if waitErr != nil {
+		result, runErr = exitCodeResult(
+			result, waitErr, elapsed, ToolShell,
+		)
 	}
 
-	return result, nil
+	if auditErr != nil {
+		auditErr = fmt.Errorf("shell audit: %w", auditErr)
+	}
+
+	return result, joinAuditErr(runErr, auditErr)
 }
 
 // Builds an exec.Cmd with OS-appropriate flags for the

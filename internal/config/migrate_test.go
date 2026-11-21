@@ -55,32 +55,6 @@ tui:
   nav:
     follow_mode: true
     history_size: 100
-    keybinds:
-      agent_cycle: tab
-      agent_cycle_reverse: shift+tab
-      agent_list: <leader>a
-      app_exit: <leader>q
-      command_list: ctrl+p
-      editor_open: <leader>e
-      history_search: ctrl+r
-      leader: ctrl+x
-      messages_copy: <leader>y
-      model_list: <leader>m
-      session_child_cycle: right
-      session_child_cycle_reverse: left
-      session_child_first: <leader>down
-      session_compact: <leader>c
-      session_export: <leader>x
-      session_list: <leader>l
-      session_new: <leader>n
-      session_parent: up
-      session_redo: <leader>r
-      session_undo: <leader>u
-      sidebar_toggle: <leader>b
-      status_view: <leader>s
-      theme_list: <leader>t
-      tips_toggle: <leader>h
-    leader_timeout: 2000
     scroll_lines_per_tick: 5
 scope:
   workdir: ""

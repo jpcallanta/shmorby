@@ -100,7 +100,11 @@ type Config struct {
 
 	TUI struct {
 		Fullscreen bool   `yaml:"fullscreen"`
+		Mouse      bool   `yaml:"mouse"`
 		Theme      string `yaml:"theme"`
+		// ThemeFiles lists external theme files whose named themes
+		// become selectable via tui.theme.
+		ThemeFiles []string `yaml:"theme_files"`
 		Glamour    struct {
 			Enabled bool `yaml:"enabled"`
 		} `yaml:"glamour"`
@@ -154,6 +158,10 @@ type ModelOverride struct {
 	ContextWindow   int    `yaml:"context_window"`
 	MaxOutputTokens int    `yaml:"max_output_tokens"`
 	TokenizerModel  string `yaml:"tokenizer_model"`
+	// SupportsVision is a pointer so unset (nil) is distinct from
+	// an explicit true/false; overrides win over the vision
+	// heuristic in llm.FetchModelInfo.
+	SupportsVision *bool `yaml:"supports_vision"`
 }
 
 // ContextConfig holds compression settings.
@@ -187,6 +195,7 @@ type SessionConfig struct {
 type AuditConfig struct {
 	Enabled               bool   `yaml:"enabled"`
 	DBPath                string `yaml:"db_path"`
+	Delivery              string `yaml:"delivery"`
 	OutputCaptureMaxBytes int    `yaml:"output_capture_max_bytes"`
 	RetentionDays         int    `yaml:"retention_days"`
 	AsyncBufferSize       int    `yaml:"async_buffer_size"`
@@ -274,32 +283,7 @@ func defaultConfig() Config {
 	cfg.TUI.Logging.CollapseThreshold = 5
 	cfg.TUI.Nav.FollowMode = true
 	cfg.TUI.Nav.ScrollLinesPerTick = 5
-	cfg.TUI.Nav.LeaderTimeout = 2000
 	cfg.TUI.Nav.HistorySize = 100
-	cfg.TUI.Nav.Keybinds.Leader = "ctrl+x"
-	cfg.TUI.Nav.Keybinds.AgentCycle = "tab"
-	cfg.TUI.Nav.Keybinds.AgentCycleReverse = "shift+tab"
-	cfg.TUI.Nav.Keybinds.CommandList = "ctrl+p"
-	cfg.TUI.Nav.Keybinds.HistorySearch = "ctrl+r"
-	cfg.TUI.Nav.Keybinds.SessionNew = "<leader>n"
-	cfg.TUI.Nav.Keybinds.SessionList = "<leader>l"
-	cfg.TUI.Nav.Keybinds.SessionCompact = "<leader>c"
-	cfg.TUI.Nav.Keybinds.ModelList = "<leader>m"
-	cfg.TUI.Nav.Keybinds.ThemeList = "<leader>t"
-	cfg.TUI.Nav.Keybinds.AgentList = "<leader>a"
-	cfg.TUI.Nav.Keybinds.SessionUndo = "<leader>u"
-	cfg.TUI.Nav.Keybinds.SessionRedo = "<leader>r"
-	cfg.TUI.Nav.Keybinds.EditorOpen = "<leader>e"
-	cfg.TUI.Nav.Keybinds.SessionExport = "<leader>x"
-	cfg.TUI.Nav.Keybinds.AppExit = "<leader>q"
-	cfg.TUI.Nav.Keybinds.StatusView = "<leader>s"
-	cfg.TUI.Nav.Keybinds.SidebarToggle = "<leader>b"
-	cfg.TUI.Nav.Keybinds.TipsToggle = "<leader>h"
-	cfg.TUI.Nav.Keybinds.MessagesCopy = "<leader>y"
-	cfg.TUI.Nav.Keybinds.SessionChildFirst = "<leader>down"
-	cfg.TUI.Nav.Keybinds.SessionParent = "up"
-	cfg.TUI.Nav.Keybinds.SessionChildCycle = "right"
-	cfg.TUI.Nav.Keybinds.SessionChildRev = "left"
 
 	cfg.Memory.Enabled = true
 	cfg.Memory.MaxEntries = 10000
@@ -318,6 +302,7 @@ func defaultConfig() Config {
 	cfg.Audit.OutputCaptureMaxBytes = 65536
 	cfg.Audit.RetentionDays = 365
 	cfg.Audit.AsyncBufferSize = 100
+	cfg.Audit.Delivery = "best_effort"
 
 	cfg.Session.Enabled = true
 	cfg.Session.DBPath = filepath.Join(xdg.UserDataDir(), "sessions.db")
@@ -372,6 +357,19 @@ func ValidatePermissionLevel(field, level string) error {
 		return fmt.Errorf(
 			"%s: invalid level %q (want allow|ask|deny)",
 			field, level,
+		)
+	}
+}
+
+// ValidateAuditDelivery rejects unknown audit delivery modes.
+func ValidateAuditDelivery(delivery string) error {
+	switch delivery {
+	case "", "best_effort", "required":
+		return nil
+	default:
+		return fmt.Errorf(
+			"invalid delivery %q (want required|best_effort)",
+			delivery,
 		)
 	}
 }

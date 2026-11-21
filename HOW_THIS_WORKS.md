@@ -1,6 +1,9 @@
 # How Shmorby Works — Architecture & Workflow
 ---
 
+For durability, approval, audit, and redaction guarantees, see
+[SAFETY.md](SAFETY.md).
+
 ## 1. What Is Shmorby?
 
 Shmorby is an **AI sysadmin agent** — primarily for operations, with an
@@ -26,25 +29,30 @@ development tasks like code review, refactoring, and bug fixes.
 
 ```
   TUI (bubbletea)  ────  stdin REPL (--no-tui)
-        │
-        ▼
-  Agent loop + session ◀────▶ LLM provider registry
-        │                           │
-        │                    ┌──────┴──────┐
-        │                    │             │
-        │               OpenAI      OpenRouter
-        │               Ollama       OpenCode Zen
-        │
-        ├── agent mode (operate | diagnose | chat | code)
-        ├── scope context (SCOPE.md + instructions)
-        ├── memory (vector similarity + SQLite metadata)
-        ├── context compressor (token estimation + offload)
-        └── permissions (granular rules + presets)
-        │
-        ▼
-  Tool runner (shell | ssh | sudo | aws | find | task |
-               websearch | webfetch | file_read | file_edit |
-               file_write | grep | mcp*)
+        │                  │
+        └──────────┬───────┘
+                   ▼
+          backend.Backend contract
+                   │
+          app.InProcess implementation
+                   │
+          Agent loop + session ◀────▶ LLM provider registry
+                   │                         │
+                   │                   ┌─────┴─────┐
+                   │                   │           │
+                   │                 OpenAI    OpenRouter
+                   │                 Ollama    OpenCode Zen
+                   │
+                   ├── agent mode (operate | diagnose | chat | code)
+                   ├── scope context (SCOPE.md + instructions)
+                   ├── memory (vector similarity + SQLite metadata)
+                   ├── context compressor (token estimation + offload)
+                   └── permissions (granular rules + presets)
+                   │
+                   ▼
+          Tool runner (shell | ssh | sudo | aws | find | task |
+                       websearch | webfetch | file_read | file_edit |
+                       file_write | grep | mcp*)
 ```
 
 ### Package map
@@ -56,6 +64,8 @@ development tasks like code review, refactoring, and bug fixes.
 | `internal/xdg` | Cross-platform path resolution |
 | `internal/llm` | Provider interface + backends |
 | `internal/agent` | Agent loop, modes, prompts, `/set` overrides, stdout fmt |
+| `internal/backend` | Frontend interface and stable event envelope |
+| `internal/app` | Shared in-process backend implementation |
 | `internal/tools` | Registry, schemas, permissions, find/task, file tools, MCP |
 | `internal/exec` | Unified Executor interface + OSExecutor (process-group isolation, context-aware pipe reads) |
 | `internal/session` | Message history + SQLite persistence/resume |
@@ -69,6 +79,31 @@ development tasks like code review, refactoring, and bug fixes.
 | `internal/ledger` | Encrypted environment ledger (age + flock / LockFileEx) |
 | `internal/health` | Self-diagnostics (`shmorby doctor`) + `Degraded` wrapper |
 | `internal/xuuid` | Shared UUID v4 generator (crypto/rand) |
+
+### Backend event contract
+
+The TUI and REPL submit turns through the same in-process backend. The
+TUI keeps its existing non-streaming turn behavior; the interactive REPL
+opts into progressive text events. Subscriptions use a stable JSON
+envelope; each emission has its own UUID and UTC timestamp. `data`
+contains the event-specific JSON payload.
+
+```json
+{
+  "id": "event-id",
+  "type": "execution.started",
+  "created": "2026-02-14T12:00:00Z",
+  "session_id": "session-id",
+  "input_id": "input-id",
+  "execution_id": "execution-id",
+  "approval_id": "",
+  "data": {}
+}
+```
+
+Defined types cover session, input, execution, approval, message, text and
+reasoning streams, tool, context-compaction, usage, and config lifecycle
+events. This channel is in-process only; it is not an HTTP or SSE API.
 
 ---
 
@@ -162,8 +197,12 @@ Three layers, evaluated in order:
 | Built-in presets | `destructive`, `service`, `package`, `network`, `user`, `ssh`, `aws`, `sudo` |
 
 **Interactive prompts**: tools with `ask` level show inline `y/n/a` in
-TUI. `a` allows all for this turn. Configurable
-`interactive: true/false`.
+TUI or REPL. Requests are stored in `sessions.db` before the prompt is
+delivered and link to the pending execution. Decisions are persisted
+before execution continues. `a` records an `always` decision scoped to
+the current turn; each covered call still gets an audit entry. Requests
+time out after five minutes and deny. Pending requests are expired and
+denied during startup recovery.
 
 **Audit trail**: every tool run, permission decision, and subagent
 dispatch is written to a SQLite database at
@@ -172,13 +211,14 @@ dispatch is written to a SQLite database at
 `%LOCALAPPDATA%\shmorby\audit.db` on Windows)
 with tool, args, exit code, duration, captured stdout/stderr (capped by
 `audit.output_capture_max_bytes`, default 64 KiB), and matched rule +
-decision + reason for permission checks. Secrets (AWS keys, Bearer
+decision + reason for permission checks, plus the approver, decision
+source, and scope. Secrets (AWS keys, Bearer
 tokens, API keys, private keys, Slack/Stripe/npm/GitLab tokens, JWTs,
 DB connection strings, etc.) are redacted from output and args
 before storage via `internal/redact`. Query it with the `audit` CLI
 subcommand: `audit list`, `audit get <id>`, `audit session <id>`,
 `audit export --format json|csv`, `audit vacuum`, `audit stats`.
-Retention is governed by `audit.retention_days` (default 365).
+Retention is manual through `audit vacuum` (default cutoff 365 days).
 
 ---
 
@@ -222,10 +262,19 @@ idioms as audit/memory: `mattn/go-sqlite3`, WAL, `PRAGMA
 user_version` migration ladder (newer DBs refuse to open), 0600 file
 mode.
 
-Two tables: `sessions` (metadata: title, directory, agent mode,
-provider, model, parent link, timestamps, `last_seq`) and
+Five tables: `sessions` (metadata: title, directory, agent mode,
+provider, model, parent link, timestamps, `last_seq`),
 `session_messages` (PK `(session_id, seq)`, role, content, tool
-correlation fields, JSON tool calls).
+correlation fields, JSON tool calls, images, `input_id`),
+`executions` (durable tool execution rows), `execution_output`
+(paginated output chunks), and `approvals` (durable requests and
+decisions). Schema v3 adds the `input_id` column with a per-session
+unique index plus the executions table. Schema v4 adds owner and
+process identity tokens so reconciliation can distinguish live
+sibling instances and recycled PIDs. Schema v5 adds execution
+correlation fields (`message_id`, `args_redacted`, `approval_id`),
+`output_ref`, and the `execution_output` table. Schema v6 adds the
+`approvals` table.
 
 **Write path.** `Session.BindStore()` turns every append into a
 write-through inside the session mutex: the agent loop flushes each
@@ -255,6 +304,21 @@ output run through `internal/redact` at store-write time
 payload stays parseable). The live in-memory window keeps the raw
 text; only disk copies are scrubbed — same policy as audit/memory.
 
+**Images.** Clipboard images attached to a user turn are persisted
+up front: `persistUserImages` content-addresses the bytes under
+`images/<session-id>/<sha256><ext>` in the xdg data dir (`0600`
+files inside `0700` dirs) and stores only an `ImageRef`
+(`media_type` + data-dir-relative path) JSON array in the
+`session_messages.images` column (schema v2 adds it), so multi-MiB
+base64 never bloats the database. Caps are 20 MiB per image and
+40 MiB per message; oversized, unrecognized, or unwritable images
+are dropped with a warning instead of failing the turn. Refs are
+re-resolved against the data dir on load, so a corrupted row cannot
+read arbitrary files, and `LoadImages` skips missing or unreadable
+files so content drift after a resume never hard-fails a request.
+Unlike every other persisted payload, image pixels are never
+redacted — the resume path re-attaches them verbatim.
+
 **Resume.** `shmorby -c` resumes the most recent root session for
 the launch directory, `-s <id>` a specific one. Sessions are scoped
 to their stored working directory: a resume from another cwd chdirs
@@ -274,6 +338,42 @@ row on every message). The sweep is manual in v1 (run it directly
 or from cron); both passes resolve to a single all-or-nothing
 delete transaction.
 
+**Input idempotency.** TUI and REPL submissions carry a generated
+`input_id`. The agent loop checks `Session.FindInput` before starting
+a turn and returns the persisted assistant reply via
+`FindInputReply` for a duplicate key. `appendLocked` drops a duplicate
+user message and everything after it so a retry cannot append a
+second assistant turn. The store enforces uniqueness per
+`(session_id, input_id)`, and the audit entries carry the same key.
+
+**Executions and cancellation.** `internal/execution` creates a row
+before permission evaluation (`pending_approval`), starts it before
+the tool runs (`running`), and records a terminal status on return.
+The row carries redacted arguments, a canonical argument hash, the
+tool-call ID, and the execution ID that audit entries and permission
+decisions reference. On finish, tool output is redacted, split into
+bounded chunks (32 KiB), capped at 1 MiB, and written to
+`execution_output`; `Manager.Output` pages it by cursor. The TUI's
+`/executions [all|status]` command reads these rows from the database,
+so active executions remain visible beyond in-memory tool events.
+Cancellation is execution-scoped: from the TUI or REPL, `/cancel <id>`
+requests it, and `cancel_requested` becomes `cancelled` only after the
+process group is confirmed gone, otherwise `kill_failed` with the PID.
+Command tools report their process-group leader and exit code through
+the execution context. Parent-death signals are intentionally not
+used: Go delivers `Pdeathsig` when the creating thread exits, which
+can kill a child while shmorby is still running. Orphaned groups are
+reported by reconciliation instead.
+
+**Startup reconciliation.** Before the TUI/REPL starts, and via
+`shmorby session executions --reconcile`, stale `pending_approval`,
+`running`, `cancel_requested`, and prior `orphaned` rows are checked.
+A row is `orphaned` only when its recorded process start identity
+still matches a live process group; otherwise it becomes `unknown`.
+Rows owned by a live shmorby instance are left alone, and `--kill`
+refuses to signal a PID whose identity changed. Rows are never marked
+succeeded.
+
 **Scope notes (v1).** Two processes resuming the same session are
 last-writer-wins per `(session_id, seq)`. Subagent child sessions
 stay in-memory; TUI pickers (`/sessions`), `--fork`, export, and
@@ -287,7 +387,10 @@ Evaluated before every LLM call:
 
 1. Get model's `ContextWindow` (API-fetched at startup; OpenAI falls
    back to a builtin registry of known context windows)
-2. Estimate token count (tiktoken, model-resolved — always tokenizer-based)
+2. Estimate token count (tiktoken, model-resolved); text is always
+   tokenizer-based, and attached images add a conservative tile cost
+   (`llm.EstimateImageTokens`: 85 base + 170 per 512-px tile, 2200
+   flat when the header can't be decoded)
 3. If over `ContextWindow × threshold` (default 80%): compress
 
 **Two-phase compression**:
@@ -356,6 +459,31 @@ Ollama embeddings support Matryoshka `dimensions` (64–768) via
 Fallback guesses are cached but re-checked against config overrides on
 every lookup, so a later `models.<name>.context_window` override still
 applies.
+
+**Vision capability resolution** (`resolveVision` in
+`internal/llm/modelinfo.go`):
+1. Config override `models.<name>.supports_vision` (a bare model
+   name also matches a vendor-prefixed runtime ID)
+2. Provider-reported value (Ollama reads `capabilities` from
+   `/api/show`)
+3. Known-family heuristic on the name prefix (`gpt-4o*`, `gpt-4.1*`,
+   `gpt-5*`, `o3`, `o4-mini`, `claude-*`, `gemini-*`, `llava*`,
+   `qwen2.5vl*`, `qwen3vl*`, `minicpm-v*`)
+4. Unknown → false; attaching an image to a non-vision model fails
+   before any request, pointing at `/model`
+
+OpenCode Zen returns no capability metadata from `/v1/models`, so
+vision there comes from an exact-ID map maintained next to the
+context-window map (`mimo-v2.5`, `mimo-v2.5-free`,
+`deepseek-v4-flash-vision-exp`; `mimo-v2.5-pro` is deliberately
+false — prefix rules cannot distinguish it).
+
+**Model listing**: providers optionally implement `ModelLister`
+(openai, openrouter, ollama, opencode_zen), which bare `/model` uses
+to print the platform catalog with context windows
+(`ModelSummary.FormatSummary`), capped at 50 entries with a 5s
+lookup timeout; providers without it show only the current model
+line.
 
 ---
 
@@ -432,6 +560,7 @@ terminal scrollback.
 | `context.threshold` | float | `/set context.threshold 0.9` |
 | `context.offload_to_memory` | bool | `/set context.offload_to_memory false` |
 | `tui.fullscreen` | bool | `/set tui.fullscreen true` (restart to apply) |
+| `tui.mouse` | bool | `/set tui.mouse true` (restart to apply) |
 | `tui.theme` | string | `/set tui.theme catppuccin-latte` |
 | `tui.glamour.enabled` | bool | `/set tui.glamour.enabled false` |
 | `tui.logging.enabled` | bool | `/set tui.logging.enabled false` |
@@ -447,9 +576,10 @@ CONFIG PARAMETERS section.
 `ollama.base_url`, ...), `scope.*`, `memory.db_path`/`max_entries`/
 `embedding.*`, `context.summary_*`/`fallback_context_window`/
 `max_tool_output_*`/`min_messages_to_compress`, `models.*`,
-`permission.presets`/`permission.rules`, `tui.nav.*`, and
-`tui.fullscreen` (alt-screen is fixed at program start) only take
-effect on restart. Provider/model/apikey changes recreate the LLM
+`permission.presets`/`permission.rules`, `tui.nav.*`,
+`tui.theme_files`, `tui.fullscreen` (alt-screen is fixed at program
+start), and `tui.mouse` (mouse mode is fixed at program creation)
+only take effect on restart. Provider/model/apikey changes recreate the LLM
 provider on the fly; theme/logging/memory toggles apply instantly.
 
 ---
@@ -476,12 +606,26 @@ Bottom-anchored layout, inspired by Claude Code CLI and OpenCode:
 - Collapsible log section (`ctrl+l`) — slog entries in viewport
 - Slash-command autocomplete, command palette (`ctrl+p`)
 - Reverse-i-search (`ctrl+r`) through input history
-- Leader key system (`ctrl+x` → which-key popup)
 - @-reference autocomplete (hostnames, services, paths)
 - !-prefixed raw shell commands (bypass LLM)
 - Multi-session tab bar
 - Scroll acceleration, selection copy/paste
-- Catppuccin themes (mocha, latte, frappe, macchiato, minimal)
+- Multiplexer/remote-friendly input: `ctrl+j` (and `shift+enter` where
+  the terminal reports extended keys) inserts a newline without
+  submitting, for tmux/Screen/SSH setups that cannot distinguish
+  `shift+enter`
+- Output selection mode: `g`/`G` jump to top/bottom, `j`/`k` scroll
+  by line, `d`/`u` (or `ctrl+d`/`ctrl+u`) half-page; entered by mouse
+  click/drag when mouse tracking is enabled
+- Mouse tracking off by default (`tui.mouse`); when enabled, the TUI
+  captures wheel and click-drag events, bypassing native/tmux
+  copy-mode selection unless `shift` is held
+- OSC-52 clipboard copies are wrapped in a tmux DCS passthrough
+  envelope when `$TMUX` is set (tmux needs `set -g allow-passthrough
+  on`)
+- Catppuccin themes (mocha, latte, frappe, macchiato, minimal) plus
+  external theme files (`tui.theme_files`) — each file defines named
+  color palettes selectable via `tui.theme`; see README "Theming"
 - Fullscreen mode (no flicker) vs `--no-tui` plain REPL
 - `--no-tui` REPL features ANSI markdown rendering, streaming
   spinners, and structured permission prompts via `internal/agent/stdout.go`
@@ -540,6 +684,11 @@ Header values support `${VAR}` env substitution so secrets stay out of
 the config file and are never logged. Gated by `permission.mcp` (default
 `ask`). Servers that send `tools/list_changed` notifications are
 re-listed automatically. Shut down cleanly on exit.
+
+The OpenAI provider caps each request at 128 tools (a platform limit),
+keeping built-in tools ahead of MCP tools and logging when excess
+tools are dropped. Spread across many MCP servers, a large tool count
+can therefore exceed the cap; disable unused servers to stay within it.
 
 ### Websearch and Webfetch
 

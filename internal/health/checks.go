@@ -12,6 +12,7 @@ import (
 	"os"
 	osexec "os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -623,16 +624,21 @@ func CheckLedger(ctx context.Context, cfg ProviderInfo) Result {
 		return resultFrom("ledger", start, err, "stat ledger")
 	}
 
-	// Verify file permissions are not world-readable.
-	mode := info.Mode().Perm()
-	if mode&0o007 != 0 {
-		return Result{
-			Name:     "ledger",
-			Status:   "degraded",
-			Duration: time.Since(start),
-			Details:  fmt.Sprintf("permissions %o (should be 0600)", mode),
-			Err: fmt.Errorf(
-				"ledger file permissions %o", mode),
+	// Verify file permissions are not world-readable. Windows
+	// FileMode does not expose ACLs, so this check is Unix-only.
+	if runtime.GOOS != "windows" {
+		mode := info.Mode().Perm()
+		if mode&0o007 != 0 {
+			return Result{
+				Name:     "ledger",
+				Status:   "degraded",
+				Duration: time.Since(start),
+				Details: fmt.Sprintf(
+					"permissions %o (should be 0600)", mode,
+				),
+				Err: fmt.Errorf(
+					"ledger file permissions %o", mode),
+			}
 		}
 	}
 

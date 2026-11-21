@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	cb "golang.design/x/clipboard"
+	"shmorby/internal/util"
 )
 
 var (
@@ -49,16 +50,42 @@ func Paste() string {
 	return string(bytes)
 }
 
-// osc52Copy sends an OSC-52 escape sequence to stdout for terminal-level
-// clipboard access. Supported by kitty, iTerm2, tmux, and other modern
-// terminals.
-func osc52Copy(text string) error {
+// Reads image bytes from the system clipboard. Returns (data, true)
+// when an image is present, (nil, false) otherwise. Data is
+// PNG-encoded on all supported platforms; anything that does not
+// sniff as PNG or JPEG is treated as absent.
+func PasteImage() ([]byte, bool) {
+	if initErr != nil {
+		return nil, false
+	}
+	data := cb.Read(cb.FmtImage)
+	if mime, _ := util.SniffImageType(data); mime == "" {
+		return nil, false
+	}
+
+	return data, true
+}
+
+// Formats OSC-52 sequence with optional tmux DCS passthrough envelope.
+func osc52Sequence(text string, isTmux bool) string {
 	encoded := base64.StdEncoding.EncodeToString([]byte(text))
-	// OSC-52 sequence: ESC ] 52 ; c ; <base64> BEL
-	seq := fmt.Sprintf("\033]52;c;%s\007", encoded)
+
+	// Wrap in DCS passthrough when running inside tmux.
+	if isTmux {
+		return fmt.Sprintf("\033Ptmux;\033\033]52;c;%s\007\033\\", encoded)
+	}
+
+	return fmt.Sprintf("\033]52;c;%s\007", encoded)
+}
+
+// Sends an OSC-52 escape sequence to stdout for terminal clipboard access.
+func osc52Copy(text string) error {
+	seq := osc52Sequence(text, os.Getenv("TMUX") != "")
+
 	_, err := os.Stdout.WriteString(seq)
 	if err != nil {
 		return fmt.Errorf("write OSC-52: %w", err)
 	}
+
 	return nil
 }

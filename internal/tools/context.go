@@ -10,6 +10,7 @@ type contextKey string
 
 const (
 	sessionIDKey   contextKey = "session_id"
+	inputIDKey     contextKey = "input_id"
 	auditLoggerKey contextKey = "audit_logger"
 )
 
@@ -22,6 +23,19 @@ func WithSessionID(ctx context.Context, id string) context.Context {
 func SessionIDFrom(ctx context.Context) string {
 	v, _ := ctx.Value(sessionIDKey).(string)
 	return v
+}
+
+// WithInputID stores the client input idempotency key in the
+// context.
+func WithInputID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, inputIDKey, id)
+}
+
+// InputIDFrom extracts the input idempotency key from the context.
+func InputIDFrom(ctx context.Context) string {
+	id, _ := ctx.Value(inputIDKey).(string)
+
+	return id
 }
 
 // WithAuditLogger stores the audit logger in the context.

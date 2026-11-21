@@ -12,8 +12,12 @@ import (
 	"shmorby/internal/agent"
 	"shmorby/internal/config"
 	ctxcomp "shmorby/internal/context"
+	"shmorby/internal/execution"
 	"shmorby/internal/llm"
+	"shmorby/internal/session"
+	"shmorby/internal/testutil"
 	"shmorby/internal/tools"
+	tuicompl "shmorby/internal/tui/completion"
 	"shmorby/internal/tui/navigation"
 )
 
@@ -84,6 +88,20 @@ func TestModelUpdate_CtrlC(t *testing.T) {
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
 	if cmd != nil {
 		t.Error("expected nil command (copied to clipboard)")
+	}
+}
+
+// Tests Ctrl+Z uses Bubble Tea's terminal-safe suspend flow.
+func TestModelUpdate_CtrlZ_Suspends(t *testing.T) {
+	m := NewModel(Config{})
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlZ})
+	if cmd == nil {
+		t.Fatal("expected suspend command")
+	}
+	msg := cmd()
+	if _, ok := msg.(tea.SuspendMsg); !ok {
+		t.Errorf("want tea.SuspendMsg, got %T", msg)
 	}
 }
 
@@ -799,6 +817,83 @@ func TestModelUpdate_EscDismissesPalette(t *testing.T) {
 	}
 }
 
+// Tests that every palette item is handled by the slash-command path.
+func TestModelCommand_PaletteItemsHandled(t *testing.T) {
+	m := NewModel(Config{
+		Mode:    "operate",
+		Model:   "test-model",
+		Session: session.New(),
+	})
+
+	items := m.commandPalette.Filtered()
+	if len(items) == 0 {
+		t.Fatal("no palette items registered")
+	}
+
+	for _, item := range items {
+		handled, done, err := m.handleCommand(item.Slash)
+		if err != nil {
+			t.Errorf("%s: unexpected error: %v", item.Slash, err)
+		}
+		if !handled {
+			t.Errorf("%s: not handled by slash-command path", item.Slash)
+		}
+		wantDone := item.Slash == "/quit"
+		if done != wantDone {
+			t.Errorf("%s: want done %v, got %v", item.Slash, wantDone, done)
+		}
+	}
+}
+
+// Tests that Enter in the palette executes the selected command through
+// the shared submit path.
+func TestModelPalette_Execute_DispatchesSlashCommand(t *testing.T) {
+	m := NewModel(Config{Mode: "operate", Model: "test-model"})
+	m.width = 80
+	m.commandPalette.Toggle()
+
+	// First item is /quit → Enter must quit via the submit path.
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+
+	if m.commandPalette.Visible() {
+		t.Error("palette should dismiss after execute")
+	}
+	if cmd == nil {
+		t.Fatal("no command returned for /quit")
+	}
+
+	// Process the submitMsg through the shared submit path.
+	updated, cmd = m.Update(cmd())
+	m = updated.(Model)
+
+	if cmd == nil {
+		t.Fatal("submit path did not quit for /quit")
+	}
+	if _, ok := cmd().(tea.QuitMsg); !ok {
+		t.Error("Enter on /quit should quit via the submit path")
+	}
+}
+
+// Tests that Enter with no matching palette item reports an error and
+// keeps the palette open.
+func TestModelPalette_Execute_NoSelection_ShowsError(t *testing.T) {
+	m := NewModel(Config{})
+	m.width = 80
+	m.commandPalette.Toggle()
+	m.commandPalette.SetFilter("zzz")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+
+	if !m.commandPalette.Visible() {
+		t.Error("palette should stay open when nothing is selected")
+	}
+	if len(m.output) == 0 || m.output[len(m.output)-1].kind != "error" {
+		t.Error("expected error output for empty selection")
+	}
+}
+
 // Tests Esc dismisses reverse search.
 func TestModelUpdate_EscDismissesSearch(t *testing.T) {
 	m := NewModel(Config{})
@@ -1421,7 +1516,7 @@ func TestTUI_HelpOverlay_ShowsParams(t *testing.T) {
 		ConfigOverrider: co,
 	})
 	m.width = 80
-	m.height = 24
+	m.height = 30
 	m.showHelp.Show()
 
 	view := m.View()
@@ -1487,6 +1582,66 @@ func TestTUIModelCommand_NoArg(t *testing.T) {
 		t.Errorf(
 			"want provider and model, got %q", last.text,
 		)
+	}
+}
+
+// listerProvider extends fakeProvider with a fixed model list so bare
+// /model can be tested without a live platform.
+type listerProvider struct {
+	fakeProvider
+	models []llm.ModelSummary
+}
+
+// Returns the canned model list.
+func (l *listerProvider) ListModels(
+	_ context.Context, _ string,
+) ([]llm.ModelSummary, error) {
+	return l.models, nil
+}
+
+// TestTUIModelCommand_ListCap verifies a long catalog is capped and
+// the hidden remainder is reported on a trailing line.
+func TestTUIModelCommand_ListCap(t *testing.T) {
+	m := NewModel(Config{
+		Model: "test-model",
+	})
+	m.width = 80
+	m.height = 24
+	m.model = "llama3"
+
+	overflow := 10
+	models := make([]llm.ModelSummary, 0, maxListedModels+overflow)
+	for i := 0; i < maxListedModels+overflow; i++ {
+		models = append(models, llm.ModelSummary{
+			ID: fmt.Sprintf("model-%d", i),
+		})
+	}
+	m.provider = &listerProvider{
+		fakeProvider: fakeProvider{name: "openai"},
+		models:       models,
+	}
+
+	cmd, done, err := m.handleCommand("/model")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !cmd {
+		t.Error("expected command handled")
+	}
+	if done {
+		t.Error("should not quit")
+	}
+
+	// Header line, the capped list, then the trailing count.
+	wantEntries := maxListedModels + 2
+	if len(m.output) != wantEntries {
+		t.Fatalf("want %d output entries, got %d",
+			wantEntries, len(m.output))
+	}
+	last := m.output[len(m.output)-1]
+	wantLine := fmt.Sprintf("  … and %d more", overflow)
+	if last.text != wantLine {
+		t.Errorf("want %q, got %q", wantLine, last.text)
 	}
 }
 
@@ -1773,5 +1928,460 @@ func TestTUI_ApikeyCommand_NilOverrider(t *testing.T) {
 		t.Errorf(
 			"want error, got %q", last.text,
 		)
+	}
+}
+
+// Tests that attachImage stages a pending attachment and the chip
+// renders above the input.
+func TestModel_AttachImage(t *testing.T) {
+	m := NewModel(Config{
+		Mode:      "operate",
+		Model:     "gpt-5.6-sol",
+		ModelInfo: llm.ModelInfo{SupportsVision: true},
+	})
+	m.width = 80
+	m.height = 24
+
+	m.attachImage(testutil.OnePixelPNG())
+	if len(m.pendingImages) != 1 {
+		t.Fatalf("want 1 pending image, got %d", len(m.pendingImages))
+	}
+	if m.pendingImages[0].data.MediaType != "image/png" {
+		t.Errorf("want media type image/png, got %q",
+			m.pendingImages[0].data.MediaType)
+	}
+	if m.pendingImages[0].width != 1 || m.pendingImages[0].height != 1 {
+		t.Errorf("want 1x1 dims, got %dx%d",
+			m.pendingImages[0].width, m.pendingImages[0].height)
+	}
+
+	view := m.View()
+	if !strings.Contains(view, "📎 image 1x1 PNG") {
+		t.Error("view missing pending image chip")
+	}
+}
+
+// Tests that esc clears pending attachments when the input is empty,
+// and that text in the input keeps the attachment.
+func TestModel_EscClearsPendingImages(t *testing.T) {
+	m := NewModel(Config{Mode: "operate", Model: "gpt-5.6-sol"})
+	m.width = 80
+	m.height = 24
+	m.attachImage(testutil.OnePixelPNG())
+
+	// Input has text: attachment stays.
+	m.textarea.SetValue("describe this")
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(Model)
+	if len(m.pendingImages) != 1 {
+		t.Fatalf("attachment cleared with non-empty input")
+	}
+
+	// Empty input: esc removes the attachment.
+	m.textarea.Reset()
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = updated.(Model)
+	if len(m.pendingImages) != 0 {
+		t.Errorf("esc should clear attachment, got %d pending",
+			len(m.pendingImages))
+	}
+}
+
+// Tests that oversized images are rejected with an inline error.
+func TestModel_AttachImage_CapRejection(t *testing.T) {
+	m := NewModel(Config{Mode: "operate", Model: "gpt-5.6-sol"})
+	m.width = 80
+	m.height = 24
+
+	m.attachImage(make([]byte, maxImageBytes+1))
+	if len(m.pendingImages) != 0 {
+		t.Errorf("oversized image attached (%d pending)",
+			len(m.pendingImages))
+	}
+	found := false
+	for _, e := range m.output {
+		if e.kind == "error" && strings.Contains(e.text, "image too large") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("inline error for oversized image not shown")
+	}
+}
+
+// Tests that submitting with a pending image on a vision-capable
+// model attaches it, resets the pending state, and appends the
+// transcript chip.
+func TestModel_Submit_ClearsPendingAndShowsChip(t *testing.T) {
+	m := NewModel(Config{
+		Mode:      "operate",
+		Model:     "gpt-5.6-sol",
+		Session:   session.New(),
+		ModelInfo: llm.ModelInfo{SupportsVision: true},
+	})
+	m.width = 80
+	m.height = 24
+	m.attachImage(testutil.OnePixelPNG())
+	m.textarea.SetValue("describe this")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	// Enter only queues the submitMsg; process it.
+	updated, _ = m.Update(cmd())
+	m = updated.(Model)
+
+	if len(m.pendingImages) != 0 {
+		t.Errorf("pending images not reset on submit (%d)",
+			len(m.pendingImages))
+	}
+	found := false
+	for _, e := range m.output {
+		if e.kind == "image" && strings.Contains(e.text, "📎 image") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("transcript image chip missing")
+	}
+}
+
+// Tests the non-vision gate: the turn is refused with a user-visible
+// message and no agent turn starts.
+func TestModel_Submit_NonVisionModelGate(t *testing.T) {
+	m := NewModel(Config{
+		Mode:      "operate",
+		Model:     "llama3.2",
+		Session:   session.New(),
+		ModelInfo: llm.ModelInfo{SupportsVision: false},
+	})
+	m.width = 80
+	m.height = 24
+	m.attachImage(testutil.OnePixelPNG())
+	m.textarea.SetValue("describe this")
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(Model)
+	updated, _ = m.Update(cmd())
+	m = updated.(Model)
+
+	found := false
+	for _, e := range m.output {
+		if e.kind == "error" &&
+			strings.Contains(e.text, "does not support image input") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("vision gate error not shown")
+	}
+	if m.running {
+		t.Error("agent turn should not start for non-vision model")
+	}
+	// Attachment stays so the user can switch models and resend.
+	if len(m.pendingImages) != 1 {
+		t.Error("attachment dropped on gate refusal")
+	}
+}
+
+// Tests that WindowSizeMsg reflows viewport content to the new pane width.
+func TestModelUpdate_WindowSizeMsg_ReflowsViewport(t *testing.T) {
+	m := NewModel(Config{ThemeName: "catppuccin-mocha"})
+	m.width = 80
+	m.height = 24
+	longText := strings.Repeat("word ", 20)
+	m.output = append(m.output, outputEntry{
+		kind: "agent",
+		text: longText,
+	})
+	m.syncViewport()
+	contentWide := m.viewport.View()
+
+	// Resize to narrow pane.
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 30, Height: 24})
+	m = updated.(Model)
+	contentNarrow := m.viewport.View()
+
+	if contentWide == contentNarrow {
+		t.Error("want viewport content to reflow on WindowSizeMsg")
+	}
+}
+
+// Tests vim navigation keys in viewport selection mode.
+func TestModelUpdate_SelectionMode_VimNavigation(t *testing.T) {
+	m := NewModel(Config{ThemeName: "catppuccin-mocha"})
+	m.width = 80
+	m.height = 10
+	for i := 0; i < 50; i++ {
+		m.output = append(m.output, outputEntry{
+			kind: "agent",
+			text: fmt.Sprintf("line %d", i),
+		})
+	}
+	m.syncViewport()
+	m.selectionMode = true
+
+	// Navigate to top with 'g'.
+	updated, _ := m.Update(tea.KeyMsg{Runes: []rune{'g'}, Type: tea.KeyRunes})
+	m = updated.(Model)
+	if m.viewport.ScrollPercent() != 0.0 {
+		t.Errorf("want scroll percent 0.0 at top, got %f",
+			m.viewport.ScrollPercent())
+	}
+
+	// Scroll down with 'j'.
+	updated, _ = m.Update(tea.KeyMsg{Runes: []rune{'j'}, Type: tea.KeyRunes})
+	m = updated.(Model)
+	if m.viewport.ScrollPercent() <= 0.0 {
+		t.Errorf("want scroll percent > 0.0 on j, got %f",
+			m.viewport.ScrollPercent())
+	}
+
+	// Scroll up with 'k'.
+	updated, _ = m.Update(tea.KeyMsg{Runes: []rune{'k'}, Type: tea.KeyRunes})
+	m = updated.(Model)
+	if m.viewport.ScrollPercent() != 0.0 {
+		t.Errorf("want scroll percent 0.0 on k, got %f",
+			m.viewport.ScrollPercent())
+	}
+
+	// Half-page down with 'd'.
+	updated, _ = m.Update(tea.KeyMsg{Runes: []rune{'d'}, Type: tea.KeyRunes})
+	m = updated.(Model)
+	if m.viewport.ScrollPercent() <= 0.0 {
+		t.Errorf("want scroll percent > 0.0 on d, got %f",
+			m.viewport.ScrollPercent())
+	}
+
+	// Half-page up with 'u'.
+	updated, _ = m.Update(tea.KeyMsg{Runes: []rune{'u'}, Type: tea.KeyRunes})
+	m = updated.(Model)
+	if m.viewport.ScrollPercent() != 0.0 {
+		t.Errorf("want scroll percent 0.0 on u, got %f",
+			m.viewport.ScrollPercent())
+	}
+
+	// Half-page down with ctrl+d.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
+	m = updated.(Model)
+	if m.viewport.ScrollPercent() <= 0.0 {
+		t.Errorf("want scroll percent > 0.0 on ctrl+d, got %f",
+			m.viewport.ScrollPercent())
+	}
+
+	// Half-page up with ctrl+u.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	m = updated.(Model)
+	if m.viewport.ScrollPercent() != 0.0 {
+		t.Errorf("want scroll percent 0.0 on ctrl+u, got %f",
+			m.viewport.ScrollPercent())
+	}
+
+	// Navigate to bottom with 'G'.
+	updated, _ = m.Update(tea.KeyMsg{Runes: []rune{'G'}, Type: tea.KeyRunes})
+	m = updated.(Model)
+	if m.viewport.ScrollPercent() != 1.0 {
+		t.Errorf("want scroll percent 1.0 at bottom, got %f",
+			m.viewport.ScrollPercent())
+	}
+
+	// Navigate to top with Home key.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyHome})
+	m = updated.(Model)
+	if m.viewport.ScrollPercent() != 0.0 {
+		t.Errorf("want scroll percent 0.0 on Home, got %f",
+			m.viewport.ScrollPercent())
+	}
+
+	// Navigate to bottom with End key.
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnd})
+	m = updated.(Model)
+	if m.viewport.ScrollPercent() != 1.0 {
+		t.Errorf("want scroll percent 1.0 on End, got %f",
+			m.viewport.ScrollPercent())
+	}
+}
+
+// Tests that active overlays clamp viewport height across pane sizes.
+func TestModelView_OverlayVerticalClamping(t *testing.T) {
+	inputLinesCases := []struct {
+		name  string
+		input string
+		lines int
+	}{
+		{name: "1-line input", input: "", lines: 1},
+		{name: "3-line input", input: "line 1\nline 2\nline 3", lines: 3},
+	}
+	heights := []int{24, 20, 18, 15, 11, 10, 9}
+
+	for _, tc := range inputLinesCases {
+		for _, h := range heights {
+			m := NewModel(Config{ThemeName: "catppuccin-mocha"})
+			m.width = 60
+			m.height = h
+			if tc.input != "" {
+				m.textarea.SetValue(tc.input)
+			}
+
+			// Minimum non-overlay chrome rows: input lines + 3 status rows.
+			baseChrome := tc.lines + 3
+
+			// Test Command Palette clamping.
+			m.commandPalette.Toggle()
+			viewPalette := m.View()
+			linesPalette := strings.Count(viewPalette, "\n") + 1
+			wantMax := h
+			if baseChrome+4 > wantMax {
+				wantMax = baseChrome + 4
+			}
+			if linesPalette > wantMax {
+				t.Errorf("%s h=%d: want lines <= %d with palette, got %d",
+					tc.name, h, wantMax, linesPalette)
+			}
+			m.commandPalette.Dismiss()
+
+			// Test Permission prompt clamping.
+			m.permission = &PermissionPrompt{
+				Tool:    "shell",
+				Command: "apt-get upgrade",
+				Reason:  "system maintenance",
+			}
+			viewPerm := m.View()
+			linesPerm := strings.Count(viewPerm, "\n") + 1
+			wantMaxPerm := h
+			if baseChrome+6 > wantMaxPerm {
+				wantMaxPerm = baseChrome + 6
+			}
+			if linesPerm > wantMaxPerm {
+				t.Errorf("%s h=%d: want lines <= %d with perm prompt, got %d",
+					tc.name, h, wantMaxPerm, linesPerm)
+			}
+			m.permission = nil
+
+			// Test Halt prompt clamping.
+			m.haltPrompt = true
+			viewHalt := m.View()
+			linesHalt := strings.Count(viewHalt, "\n") + 1
+			wantMaxHalt := h
+			if baseChrome+4 > wantMaxHalt {
+				wantMaxHalt = baseChrome + 4
+			}
+			if linesHalt > wantMaxHalt {
+				t.Errorf("%s h=%d: want lines <= %d with halt prompt, got %d",
+					tc.name, h, wantMaxHalt, linesHalt)
+			}
+			m.haltPrompt = false
+
+			// Test Completion popup clamping.
+			m.showCompletion = true
+			m.complMatches = []tuicompl.Command{
+				{Name: "/help"}, {Name: "/set"}, {Name: "/tools"},
+				{Name: "/theme"}, {Name: "/model"}, {Name: "/clear"},
+				{Name: "/context"}, {Name: "/quit"},
+			}
+			viewCompl := m.View()
+			linesCompl := strings.Count(viewCompl, "\n") + 1
+			wantMaxCompl := h
+			if baseChrome+1 > wantMaxCompl {
+				wantMaxCompl = baseChrome + 1
+			}
+			if linesCompl > wantMaxCompl {
+				t.Errorf("%s h=%d: want lines <= %d with compl, got %d",
+					tc.name, h, wantMaxCompl, linesCompl)
+			}
+			m.showCompletion = false
+			m.complMatches = nil
+
+			// Test Reverse search clamping.
+			for i := 0; i < 10; i++ {
+				m.inputHistory.Add(fmt.Sprintf("cmd %d", i))
+			}
+			m.reverseSearch.Toggle()
+			m.showReverseSearch = true
+			m.reverseSearch.SetQuery("cmd")
+			viewRev := m.View()
+			linesRev := strings.Count(viewRev, "\n") + 1
+			wantMaxRev := h
+			if baseChrome+4 > wantMaxRev {
+				wantMaxRev = baseChrome + 4
+			}
+			if linesRev > wantMaxRev {
+				t.Errorf("%s h=%d: want lines <= %d with rev search, got %d",
+					tc.name, h, wantMaxRev, linesRev)
+			}
+			m.reverseSearch.Dismiss()
+			m.showReverseSearch = false
+		}
+	}
+}
+
+// Tests that WindowSizeMsg does not trigger a false new content indicator.
+func TestModelUpdate_WindowSizeMsg_NoFalseNewContentIndicator(t *testing.T) {
+	m := NewModel(Config{ThemeName: "catppuccin-mocha"})
+	m.width = 80
+	m.height = 24
+	for i := 0; i < 30; i++ {
+		m.output = append(m.output, outputEntry{
+			kind: "agent",
+			text: fmt.Sprintf("message %d", i),
+		})
+	}
+	m.syncViewport()
+
+	// Simulate user scrolling up (follow mode paused).
+	m.viewport.SetFollowMode(false)
+	m.viewport.SetNewContent(false)
+
+	// Window resize event.
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 40, Height: 20})
+	m = updated.(Model)
+
+	if m.viewport.NewContent() {
+		t.Error("want newContent false after WindowSizeMsg")
+	}
+
+	view := m.View()
+	if strings.Contains(view, "↓ new content") {
+		t.Error("view should not show new content indicator after resize")
+	}
+}
+
+// TestTUIModelExecutionsCommand_ShowsDBRows verifies /executions reads
+// durable rows instead of relying on in-memory tool events.
+func TestTUIModelExecutionsCommand_ShowsDBRows(t *testing.T) {
+	st, err := session.NewStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer st.Close()
+
+	mgr := execution.NewManager(st)
+	err = st.CreateExecution(execution.Record{
+		ID:        "exec-tui",
+		SessionID: "sess-tui",
+		Tool:      "shell",
+		Command:   "df -h",
+		Status:    execution.StatusRunning,
+		CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("CreateExecution: %v", err)
+	}
+
+	m := NewModel(Config{
+		Session:    session.NewWithID("sess-tui"),
+		Executions: mgr,
+	})
+	handled, done, err := m.handleCommand("/executions")
+	if err != nil {
+		t.Fatalf("handleCommand: %v", err)
+	}
+	if !handled || done {
+		t.Fatalf("handled = %v, done = %v", handled, done)
+	}
+
+	last := m.output[len(m.output)-1].text
+	if !strings.Contains(last, "exec-tui") ||
+		!strings.Contains(last, "running") {
+		t.Errorf("output = %q, want execution row", last)
 	}
 }

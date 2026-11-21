@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"shmorby/internal/llm"
 	"shmorby/internal/session"
 )
 
@@ -77,11 +78,10 @@ func TestCompressor_Compress_SessionShorter(t *testing.T) {
 		FallbackContextWindow: 100,
 	}, nil, NewEstimator("gpt-4"), nil)
 
-	err := c.Compress(context.Background(), sess, struct {
-		ContextWindow   int
-		MaxOutputTokens int
-		SupportsTools   bool
-	}{ContextWindow: 100, MaxOutputTokens: 4096})
+	err := c.Compress(context.Background(), sess, llm.ModelInfo{
+		ContextWindow:   100,
+		MaxOutputTokens: 4096,
+	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -104,11 +104,10 @@ func TestCompressor_Compress_UnderThreshold(t *testing.T) {
 		FallbackContextWindow: 100,
 	}, nil, NewEstimator("gpt-4"), nil)
 
-	err := c.Compress(context.Background(), sess, struct {
-		ContextWindow   int
-		MaxOutputTokens int
-		SupportsTools   bool
-	}{ContextWindow: 100, MaxOutputTokens: 4096})
+	err := c.Compress(context.Background(), sess, llm.ModelInfo{
+		ContextWindow:   100,
+		MaxOutputTokens: 4096,
+	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

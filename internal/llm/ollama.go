@@ -3,6 +3,7 @@ package llm
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -37,6 +38,7 @@ type ollamaFunction struct {
 type ollamaMessage struct {
 	Role      string           `json:"role"`
 	Content   *string          `json:"content"`
+	Images    []string         `json:"images,omitempty"`
 	ToolCalls []ollamaToolCall `json:"tool_calls,omitempty"`
 	ToolName  string           `json:"tool_name,omitempty"`
 }
@@ -124,6 +126,15 @@ func buildMessages(req ChatRequest) []ollamaMessage {
 		om := ollamaMessage{Role: m.Role}
 		if m.Content != "" {
 			om.Content = &m.Content
+		}
+		// Only user-role messages carry images on the wire.
+		if m.Role == "user" {
+			for _, img := range m.Images {
+				// Ollama expects raw base64 per image, no
+				// data-URI prefix.
+				om.Images = append(om.Images,
+					base64.StdEncoding.EncodeToString(img.Data))
+			}
 		}
 		for _, tc := range m.ToolCalls {
 			args := json.RawMessage(tc.Args)
@@ -291,10 +302,20 @@ func (o *ollamaProvider) fetchModelInfo(
 	}
 
 	var resp struct {
-		ModelInfo map[string]any `json:"model_info"`
+		ModelInfo    map[string]any `json:"model_info"`
+		Capabilities []string       `json:"capabilities"`
 	}
 	if err := json.NewDecoder(httpResp.Body).Decode(&resp); err != nil {
 		return ModelInfo{}, fmt.Errorf("decode response: %w", err)
+	}
+
+	supportsVision := false
+	for _, c := range resp.Capabilities {
+		if c == "vision" {
+			supportsVision = true
+
+			break
+		}
 	}
 
 	// When the /api/show response omits context_length (the common
@@ -318,8 +339,9 @@ func (o *ollamaProvider) fetchModelInfo(
 	}
 
 	return ModelInfo{
-		ContextWindow: int(cw),
-		SupportsTools: true,
+		ContextWindow:  int(cw),
+		SupportsTools:  true,
+		SupportsVision: supportsVision,
 	}, nil
 }
 
@@ -338,4 +360,30 @@ func (o *ollamaProvider) ChatStream(
 	_ context.Context, _ ChatRequest,
 ) (<-chan StreamEvent, error) {
 	return nil, fmt.Errorf("ollama: streaming not yet supported")
+}
+
+// Fetches locally available models from the Ollama /api/tags
+// endpoint. Capability metadata is not available from this endpoint,
+// so only IDs are populated.
+func (o *ollamaProvider) ListModels(
+	ctx context.Context, _ string,
+) ([]ModelSummary, error) {
+	var resp struct {
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+	if err := fetchModelJSON(
+		ctx, o.client, o.baseURL+"/api/tags", "ollama",
+		&resp, http.Header{"Content-Type": {"application/json"}},
+	); err != nil {
+		return nil, err
+	}
+
+	models := make([]ModelSummary, len(resp.Models))
+	for i, m := range resp.Models {
+		models[i] = ModelSummary{ID: m.Name}
+	}
+
+	return models, nil
 }

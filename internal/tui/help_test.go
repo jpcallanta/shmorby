@@ -55,9 +55,6 @@ func TestModelView_HelpOverlay(t *testing.T) {
 	if !strings.Contains(view, "KEYBOARD SHORTCUTS") {
 		t.Error("help overlay should contain KEYBOARD SHORTCUTS section")
 	}
-	if !strings.Contains(view, "LEADER KEY") {
-		t.Error("help overlay should contain LEADER KEY section")
-	}
 	if !strings.Contains(view, "PERMISSIONS") {
 		t.Error("help overlay should contain PERMISSIONS section")
 	}
@@ -135,7 +132,6 @@ func TestHelpContent_AllSections(t *testing.T) {
 		"SLASH COMMANDS",
 		"CONFIG PARAMETERS",
 		"KEYBOARD SHORTCUTS",
-		"LEADER KEY (ctrl+x)",
 		"PERMISSIONS",
 	}
 	for _, expected := range titles {
@@ -222,27 +218,6 @@ func TestHelpOverlay_AllCommands(t *testing.T) {
 	for _, cmd := range commands {
 		if !strings.Contains(view, cmd) {
 			t.Errorf("help overlay missing command %q", cmd)
-		}
-	}
-}
-
-// Tests help overlay renders all leader key bindings.
-// Uses a tall terminal: LEADER KEY sits below the fold at height=24.
-func TestHelpOverlay_LeaderBindings(t *testing.T) {
-	m := NewModel(Config{ThemeName: "catppuccin-mocha"})
-	m.width = 80
-	m.height = 200
-	m.showHelp.Show()
-
-	view := m.View()
-
-	bindings := []string{
-		"ctrl+x c", "ctrl+x n", "ctrl+x l", "ctrl+x m",
-		"ctrl+x q", "ctrl+x h",
-	}
-	for _, b := range bindings {
-		if !strings.Contains(view, b) {
-			t.Errorf("help overlay missing leader binding %q", b)
 		}
 	}
 }

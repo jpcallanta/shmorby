@@ -54,6 +54,12 @@ var auditStatsCmd = &cobra.Command{
 	RunE:  runAuditStats,
 }
 
+var auditVerifyCmd = &cobra.Command{
+	Use:   "verify",
+	Short: "Verify the audit hash chain",
+	RunE:  runAuditVerify,
+}
+
 var (
 	auditSince       string
 	auditTool        string
@@ -62,7 +68,11 @@ var (
 	auditBefore      string
 	auditExitCode    int
 	auditDecision    string
+	auditExecution   string
+	auditApproval    string
 	auditExitCodeSet bool
+	auditVerifyFrom  int64
+	auditVerifyTo    int64
 )
 
 func init() {
@@ -71,12 +81,27 @@ func init() {
 	auditListCmd.Flags().IntVar(&auditLimit, "limit", 20, "max entries to show")
 	auditListCmd.Flags().IntVar(&auditExitCode, "exit-code", 0, "filter by exit code")
 	auditListCmd.Flags().BoolVar(&auditExitCodeSet, "exit-code-set", false, "if set, filter by exit code")
-	auditListCmd.Flags().StringVar(&auditDecision, "decision", "", "filter by permission decision (allow|deny)")
+	auditListCmd.Flags().StringVar(
+		&auditDecision, "decision", "",
+		"filter by permission decision (allow|allow_all|deny)",
+	)
+	auditListCmd.Flags().StringVar(
+		&auditExecution, "execution", "", "filter by execution ID",
+	)
+	auditListCmd.Flags().StringVar(
+		&auditApproval, "approval", "", "filter by approval ID",
+	)
 
 	auditExportCmd.Flags().StringVar(&auditSince, "since", "", "export entries since duration")
 	auditExportCmd.Flags().StringVar(&auditFormat, "format", "json", "export format: json or csv")
 
 	auditVacuumCmd.Flags().StringVar(&auditBefore, "before", "365d", "remove entries older than duration")
+	auditVerifyCmd.Flags().Int64Var(
+		&auditVerifyFrom, "from", 1, "first audit sequence to verify",
+	)
+	auditVerifyCmd.Flags().Int64Var(
+		&auditVerifyTo, "to", 0, "last audit sequence to verify (0 = latest)",
+	)
 
 	auditCmd.AddCommand(auditListCmd)
 	auditCmd.AddCommand(auditGetCmd)
@@ -84,6 +109,7 @@ func init() {
 	auditCmd.AddCommand(auditExportCmd)
 	auditCmd.AddCommand(auditVacuumCmd)
 	auditCmd.AddCommand(auditStatsCmd)
+	auditCmd.AddCommand(auditVerifyCmd)
 }
 
 func openAuditStore() (*audit.AuditStore, error) {
@@ -132,12 +158,14 @@ func runAuditList(cmd *cobra.Command, args []string) error {
 	}
 	defer store.Close()
 
-	// When --decision is set, list permission audit entries instead.
-	if auditDecision != "" {
+	// Permission-specific filters select the permission audit rows.
+	if auditDecision != "" || auditApproval != "" {
 		f := audit.QueryFilter{
-			Tool:     auditTool,
-			Decision: auditDecision,
-			Limit:    auditLimit,
+			Tool:        auditTool,
+			Decision:    auditDecision,
+			ExecutionID: auditExecution,
+			ApprovalID:  auditApproval,
+			Limit:       auditLimit,
 		}
 		if auditSince != "" {
 			dur, err := parseDuration(auditSince)
@@ -156,23 +184,29 @@ func runAuditList(cmd *cobra.Command, args []string) error {
 			return nil
 		}
 
-		fmt.Fprintf(os.Stdout, "%-6s %-36s %-8s %-40s %-15s %-10s %s\n",
-			"ID", "SESSION", "TOOL", "COMMAND", "RULE", "DECISION", "REASON")
+		fmt.Fprintf(os.Stdout,
+			"%-6s %-36s %-36s %-36s %-8s %-40s %-15s %-10s %-10s %-16s %-8s %s\n",
+			"ID", "SESSION", "EXECUTION", "APPROVAL", "TOOL",
+			"COMMAND", "RULE", "DECISION", "BY", "SOURCE", "SCOPE",
+			"REASON")
 		for _, p := range perms {
 			cmd := p.Command
 			if len(cmd) > 40 {
 				cmd = cmd[:37] + "..."
 			}
-			fmt.Fprintf(os.Stdout, "%-6d %-36s %-8s %-40s %-15s %-10s %s\n",
-				p.ID, p.SessionID, p.Tool, cmd,
-				p.RulePattern, p.Decision, p.Reason)
+			fmt.Fprintf(os.Stdout,
+				"%-6d %-36s %-36s %-36s %-8s %-40s %-15s %-10s %-10s %-16s %-8s %s\n",
+				p.ID, p.SessionID, p.ExecutionID, p.ApprovalID,
+				p.Tool, cmd, p.RulePattern, p.Decision, p.DecidedBy,
+				p.DecisionSource, p.Scope, p.Reason)
 		}
 		return nil
 	}
 
 	f := audit.QueryFilter{
-		Tool:  auditTool,
-		Limit: auditLimit,
+		Tool:        auditTool,
+		ExecutionID: auditExecution,
+		Limit:       auditLimit,
 	}
 
 	if auditExitCodeSet {
@@ -197,8 +231,10 @@ func runAuditList(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	fmt.Fprintf(os.Stdout, "%-6s %-36s %-8s %-40s %-10s %-6s %s\n",
-		"ID", "SESSION", "TOOL", "ARGS", "DURATION", "EXIT", "CAPTURED_AT")
+	fmt.Fprintf(os.Stdout,
+		"%-6s %-36s %-36s %-36s %-36s %-8s %-40s %-10s %-6s %s\n",
+		"ID", "SESSION", "MESSAGE", "TOOL_CALL", "EXECUTION",
+		"TOOL", "ARGS", "DURATION", "EXIT", "CAPTURED_AT")
 	for _, e := range entries {
 		args := e.Args
 		if len(args) > 40 {
@@ -208,9 +244,11 @@ func runAuditList(cmd *cobra.Command, args []string) error {
 		if e.ExitCode != nil {
 			exitCode = strconv.Itoa(*e.ExitCode)
 		}
-		fmt.Fprintf(os.Stdout, "%-6d %-36s %-8s %-40s %-10d %-6s %s\n",
-			e.ID, e.SessionID, e.Tool, args,
-			e.DurationMs, exitCode, e.CapturedAt)
+		fmt.Fprintf(os.Stdout,
+			"%-6d %-36s %-36s %-36s %-36s %-8s %-40s %-10d %-6s %s\n",
+			e.ID, e.SessionID, e.MessageID, e.ToolCallID,
+			e.ExecutionID, e.Tool, args, e.DurationMs, exitCode,
+			e.CapturedAt)
 	}
 
 	return nil
@@ -238,6 +276,16 @@ func runAuditGet(cmd *cobra.Command, args []string) error {
 
 	fmt.Fprintf(os.Stdout, "ID:          %d\n", entry.ID)
 	fmt.Fprintf(os.Stdout, "Session:     %s\n", entry.SessionID)
+	if entry.ExecutionID != "" {
+		fmt.Fprintf(os.Stdout, "Execution:   %s\n",
+			entry.ExecutionID)
+	}
+	if entry.MessageID != "" {
+		fmt.Fprintf(os.Stdout, "Message:     %s\n", entry.MessageID)
+	}
+	if entry.ToolCallID != "" {
+		fmt.Fprintf(os.Stdout, "Tool Call:   %s\n", entry.ToolCallID)
+	}
 	fmt.Fprintf(os.Stdout, "Tool:        %s\n", entry.Tool)
 	fmt.Fprintf(os.Stdout, "Args:        %s\n", entry.Args)
 	fmt.Fprintf(os.Stdout, "Duration:    %dms\n", entry.DurationMs)
@@ -300,8 +348,10 @@ func runAuditSession(cmd *cobra.Command, args []string) error {
 		if e.ExitCode != nil {
 			exitCode = *e.ExitCode
 		}
-		fmt.Fprintf(os.Stdout, "  Entry %d: %s: %s [%dms, exit %d]\n",
-			e.ID, e.Tool, e.Args, e.DurationMs, exitCode)
+		fmt.Fprintf(os.Stdout,
+			"  Entry %d: %s: %s [message %s, call %s, execution %s, %dms, exit %d]\n",
+			e.ID, e.Tool, e.Args, e.MessageID, e.ToolCallID,
+			e.ExecutionID, e.DurationMs, exitCode)
 	}
 
 	for _, sa := range subs {
@@ -388,6 +438,29 @@ func runAuditStats(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(os.Stdout, "Output:      %d\n", stats.Output)
 	fmt.Fprintf(os.Stdout, "Subagents:   %d\n", stats.Subagents)
 	fmt.Fprintf(os.Stdout, "DB Size:     %s\n", formatBytes(stats.DBSize))
+
+	return nil
+}
+
+func runAuditVerify(cmd *cobra.Command, args []string) error {
+	store, err := openAuditStore()
+	if err != nil {
+		return fmt.Errorf("open audit db: %w", err)
+	}
+	defer store.Close()
+
+	result, err := store.VerifyChain(auditVerifyFrom, auditVerifyTo)
+	if err != nil {
+		return err
+	}
+	if result.Verified == 0 {
+		fmt.Fprintln(os.Stdout, "Audit chain is empty; nothing to verify.")
+		return nil
+	}
+	fmt.Fprintf(os.Stdout,
+		"Audit chain verified: rows %d-%d (%d records).\n",
+		result.From, result.To, result.Verified,
+	)
 
 	return nil
 }

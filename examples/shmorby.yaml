@@ -39,7 +39,7 @@ scope:
     - ./runbooks/*.md
 
 # ── Tools ──────────────────────
-# Exhaustive migrate backfill (issue #126) injects every
+# Exhaustive migrate backfill injects every
 # `enabled=false` when absent, so the file stays explicit and
 # `migrate --dry-run` is exhaustive. Empty api_key/models/presets
 # stay omitted intentionally.
@@ -74,6 +74,7 @@ permission:
   sudo: ask
   aws: ask
   mcp: ask
+  task: ask                  # parallel subagent dispatch
   find: allow                # code mode: search for files
   file_read: allow           # code mode: read file contents
   file_edit: ask             # code mode: edit file contents
@@ -84,6 +85,14 @@ permission:
   rules: []
 
 # ── Model overrides ────────────
+# Per-model metadata overrides. supports_vision controls whether
+# clipboard-pasted images may be sent to the model; when unset,
+# vision is inferred from the model name (conservative heuristic).
+# Models:
+#   gpt-5.6-sol:
+#     context_window: 1050000
+#     max_output_tokens: 128000
+#     supports_vision: true
 models: {}
 
 # ── Code mode ─────────────────
@@ -94,7 +103,8 @@ models: {}
 code:
   workdir: "."                   # project root; "." = launch CWD
   allowed_patterns: []           # globs permitted outside the root
-  blocked_patterns:              # always rejected (override defaults):
+  blocked_patterns:              # extra globs always rejected; built-in
+                                 # blocked dirs are always enforced
     - "**/.git/**"
     - "**/node_modules/**"
     - "**/vendor/**"
@@ -104,7 +114,13 @@ code:
 # ── TUI ────────────────────────
 tui:
   fullscreen: false
+  mouse: false
   theme: catppuccin-mocha
+  # External theme files: each file defines one or more named themes
+  # (palettes of hex colors, all 25 roles required). The selected
+  # theme name must match a built-in or external theme.
+  # theme_files:
+  #   - ~/.config/shmorby/themes.yaml
   glamour:
     enabled: true
   # Status descriptions for the spinner.
@@ -115,33 +131,9 @@ tui:
   nav:
     follow_mode: true
     scroll_lines_per_tick: 5
-    leader_timeout: 2000
     history_size: 100
-    keybinds:
-      leader: ctrl+x
-      agent_cycle: tab
-      agent_cycle_reverse: shift+tab
-      command_list: ctrl+p
-      history_search: ctrl+r
-      session_new: '<leader>n'
-      session_list: '<leader>l'
-      session_compact: '<leader>c'
-      model_list: '<leader>m'
-      theme_list: '<leader>t'
-      agent_list: '<leader>a'
-      session_undo: '<leader>u'
-      session_redo: '<leader>r'
-      editor_open: '<leader>e'
-      session_export: '<leader>x'
-      app_exit: '<leader>q'
-      status_view: '<leader>s'
-      sidebar_toggle: '<leader>b'
-      tips_toggle: '<leader>h'
-      messages_copy: '<leader>y'
-      session_child_first: '<leader>down'
-      session_parent: up
-      session_child_cycle: right
-      session_child_cycle_reverse: left
+    # TUI keybindings are fixed in code (tab/shift+tab, ctrl+p, ctrl+r);
+    # there is no configurable keybinds section.
     scroll_acceleration:
       enabled: false
     references: []
@@ -162,7 +154,7 @@ memory:
   auto_capture: true
   context_budget: 300      # cap injected memory tokens (0 = unlimited)
   embedding:
-    provider: ollama
+    provider: ollama          # ollama | openai
     model: nomic-embed-text
     base_url: ""
     dimensions: 0            # 0 = model default (768 for nomic-embed-text)
@@ -214,6 +206,7 @@ audit:
   db_path: ~/.local/share/shmorby/audit.db
   output_capture_max_bytes: 65536
   retention_days: 365
+  delivery: best_effort # required fails closed on audit writes
   async_buffer_size: 100
 
 # ── Session persistence ────────

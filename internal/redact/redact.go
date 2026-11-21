@@ -80,6 +80,17 @@ func SecretString(output string) string {
 	return output
 }
 
+// PermissionFields redacts a command payload and its explanatory reason.
+func PermissionFields(command, reason string) (string, string) {
+	if data, err := JSONData([]byte(command)); err == nil {
+		command = string(data)
+	} else {
+		command = SecretString(command)
+	}
+
+	return command, SecretString(reason)
+}
+
 // secretKeyRoots are normalized key fragments that mark an object
 // value as secret. Matching is case-insensitive and punctuation-free,
 // so password, passwd, api_key, api-key, auth token, client_secret,

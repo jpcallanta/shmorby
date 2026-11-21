@@ -8,6 +8,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"shmorby/internal/config"
+	cmdexec "shmorby/internal/exec"
+	"shmorby/internal/execution"
 	"shmorby/internal/session"
 )
 
@@ -38,14 +40,24 @@ var (
 		Short: "Apply retention_days/max_sessions cleanup",
 		RunE:  runSessionPrune,
 	}
+	sessionExecutionsCmd = &cobra.Command{
+		Use:   "executions",
+		Short: "List executions and reconcile stale rows",
+		RunE:  runSessionExecutions,
+	}
 )
 
 var (
-	sessionAllDirs    bool
-	sessionLimit      int
-	sessionMessages   bool
-	sessionForce      bool
-	sessionDBOverride string
+	sessionAllDirs     bool
+	sessionLimit       int
+	sessionMessages    bool
+	sessionForce       bool
+	sessionDBOverride  string
+	sessionExecSession string
+	sessionExecStatus  string
+	sessionExecLimit   int
+	sessionExecFix     bool
+	sessionExecKill    bool
 )
 
 func init() {
@@ -61,8 +73,25 @@ func init() {
 	sessionRmCmd.Flags().BoolVar(
 		&sessionForce, "force", false, "delete rows instead of archiving")
 
+	sessionExecutionsCmd.Flags().StringVar(
+		&sessionExecSession, "session", "",
+		"only executions for this session id")
+	sessionExecutionsCmd.Flags().StringVar(
+		&sessionExecStatus, "status", "",
+		"only executions with this status")
+	sessionExecutionsCmd.Flags().IntVar(
+		&sessionExecLimit, "limit", 20,
+		"max executions to show (0 = all)")
+	sessionExecutionsCmd.Flags().BoolVar(
+		&sessionExecFix, "reconcile", false,
+		"mark executions left running by a previous process")
+	sessionExecutionsCmd.Flags().BoolVar(
+		&sessionExecKill, "kill", false,
+		"with --reconcile, kill orphaned process groups")
+
 	for _, c := range []*cobra.Command{
-		sessionListCmd, sessionShowCmd, sessionRmCmd, sessionPruneCmd,
+		sessionListCmd, sessionShowCmd, sessionRmCmd,
+		sessionPruneCmd, sessionExecutionsCmd,
 	} {
 		c.Flags().StringVar(
 			&sessionDBOverride, "db-path", "",
@@ -243,6 +272,154 @@ func runSessionPrune(cmd *cobra.Command, args []string) error {
 		"Pruned %d session(s) (retention %dd, cap %d).\n",
 		n, cfg.Session.RetentionDays, cfg.Session.MaxSessions)
 	return nil
+}
+
+func runSessionExecutions(
+	cmd *cobra.Command, args []string,
+) error {
+	store, err := openSessionStoreCLI()
+	if err != nil {
+		return fmt.Errorf("open session db: %w", err)
+	}
+	defer store.Close()
+
+	if sessionExecKill {
+		sessionExecFix = true
+	}
+
+	if sessionExecFix {
+		stale, rErr := execution.Reconcile(
+			store, time.Now().UTC(),
+		)
+		if rErr != nil {
+			return fmt.Errorf("reconcile executions: %w", rErr)
+		}
+
+		killed, failed := 0, 0
+		if sessionExecKill {
+			killed, failed = killOrphanedExecutions(store, stale)
+		}
+		fmt.Fprintf(cmd.OutOrStdout(),
+			"Reconciled %d stale execution(s)", len(stale))
+		if sessionExecKill {
+			fmt.Fprintf(cmd.OutOrStdout(),
+				"; killed %d, kill_failed %d", killed, failed)
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), ".")
+	}
+
+	filter := execution.Filter{
+		SessionID: sessionExecSession,
+		Limit:     sessionExecLimit,
+	}
+	if sessionExecStatus != "" {
+		status, ok := execution.ParseStatus(sessionExecStatus)
+		if !ok {
+			return fmt.Errorf(
+				"invalid status %q; valid values: "+
+					"pending_approval, denied, running, "+
+					"succeeded, failed, cancel_requested, "+
+					"cancelled, kill_failed, timed_out, "+
+					"orphaned, unknown",
+				sessionExecStatus,
+			)
+		}
+		filter.Statuses = []execution.Status{status}
+	}
+
+	rows, err := store.ListExecutions(filter)
+	if err != nil {
+		return fmt.Errorf("list executions: %w", err)
+	}
+	if len(rows) == 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), "No executions found.")
+
+		return nil
+	}
+
+	w := cmd.OutOrStdout()
+	fmt.Fprintf(w, "%-38s %-10s %-16s %7s %-12s %s\n",
+		"ID", "TOOL", "STATUS", "PID", "CREATED", "SESSION")
+	for _, r := range rows {
+		fmt.Fprintf(w, "%-38s %-10s %-16s %7d %-12s %s\n",
+			r.ID, truncate(r.Tool, 10), r.Status, r.PID,
+			relativeTime(r.CreatedAt), r.SessionID)
+		if r.Error != "" {
+			fmt.Fprintf(w, "  %s\n", truncate(r.Error, 100))
+		}
+	}
+
+	return nil
+}
+
+// killOrphanedExecutions terminates live orphaned process groups and
+// records whether termination was confirmed.
+func killOrphanedExecutions(
+	store session.Store, rows []execution.Record,
+) (int, int) {
+	killed, failed := 0, 0
+
+	for i := range rows {
+		r := &rows[i]
+		if r.Status != execution.StatusOrphaned || r.PID <= 0 {
+			continue
+		}
+
+		// Never signal a PID whose start identity no longer matches
+		// the recorded execution; the PID may have been recycled.
+		if r.ProcessStart == "" ||
+			execution.ProcessIdentity(r.PID) != r.ProcessStart {
+			r.Status = execution.StatusUnknown
+			r.Error = "reconcile kill refused: process identity " +
+				"unavailable or changed"
+			if err := store.UpdateExecution(*r); err != nil {
+				slog.Warn("reconcile update failed",
+					"execution", r.ID, "err", err)
+			}
+
+			continue
+		}
+		if !execution.ProcessGroupAlive(r.PID) {
+			r.Status = execution.StatusUnknown
+			r.Error = "reconcile: no live process group found"
+			if err := store.UpdateExecution(*r); err != nil {
+				slog.Warn("reconcile update failed",
+					"execution", r.ID, "err", err)
+			}
+
+			continue
+		}
+
+		cmdexec.KillProcessGroup(r.PID)
+		confirmed := false
+		for j := 0; j < 20; j++ {
+			time.Sleep(100 * time.Millisecond)
+			if !execution.ProcessGroupAlive(r.PID) {
+				confirmed = true
+
+				break
+			}
+		}
+
+		if confirmed {
+			r.Status = execution.StatusCancelled
+			r.Error = "reconciled: killed orphaned process group"
+			killed++
+		} else {
+			r.Status = execution.StatusKillFailed
+			r.Error = fmt.Sprintf(
+				"reconcile kill_failed: process group %d "+
+					"still alive", r.PID)
+			failed++
+		}
+
+		if err := store.UpdateExecution(*r); err != nil {
+			slog.Warn("reconcile update failed",
+				"execution", r.ID, "err", err)
+		}
+	}
+
+	return killed, failed
 }
 
 // truncate caps s to n runes for column output.

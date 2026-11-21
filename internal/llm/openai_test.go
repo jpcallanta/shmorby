@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,7 +12,15 @@ import (
 	"time"
 
 	"shmorby/internal/config"
+	"shmorby/internal/testutil"
 )
+
+// stringOf extracts the string form of a decoded message content
+// field (which may hold a string or a content-parts array).
+func stringOf(v any) string {
+	s, _ := v.(string)
+	return s
+}
 
 // Checks factory returns openai provider when key is set.
 func TestNewProvider_OpenAI(t *testing.T) {
@@ -276,7 +285,7 @@ func TestOpenAIChat_SystemPrompt(t *testing.T) {
 			var found bool
 			for _, m := range req.Messages {
 				if m.Role == "system" && m.Content != nil &&
-					*m.Content == "You are a helpful assistant." {
+					stringOf(m.Content) == "You are a helpful assistant." {
 					found = true
 					break
 				}
@@ -411,6 +420,83 @@ func TestOpenAIChat_ToolsInRequest(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("Chat: %v", err)
+	}
+}
+
+// Checks the outbound tool list is capped at OpenAI's 128 limit,
+// keeping the first tools (built-ins registered before MCP tools).
+func TestOpenAIChat_ToolsCappedAtLimit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			var req openaiRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+
+			if len(req.Tools) != maxOpenAITools {
+				t.Fatalf("want %d tools, got %d",
+					maxOpenAITools, len(req.Tools))
+			}
+			last := req.Tools[len(req.Tools)-1].Function.Name
+			if last != "tool_127" {
+				t.Errorf("want last tool tool_127, got %q", last)
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(openaiResponseJSON(t,
+				openaiMessage{
+					Role:    "assistant",
+					Content: strPtr("ok"),
+				},
+				"stop",
+			)))
+		},
+	))
+	defer srv.Close()
+
+	tools := make([]ToolDef, 0, maxOpenAITools+5)
+	for i := 0; i < maxOpenAITools+5; i++ {
+		tools = append(tools, ToolDef{
+			Name:        fmt.Sprintf("tool_%d", i),
+			Description: "test tool",
+			Parameters:  map[string]any{"type": "object"},
+		})
+	}
+
+	p := newOpenAIProvider(srv.URL, "test-key", "", "test-model", 120,
+		config.Config{})
+
+	_, err := p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{{Role: "user", Content: "go"}},
+		Tools:    tools,
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+}
+
+// Checks capOpenAITools leaves lists at or under the limit untouched.
+func TestCapOpenAITools_UnderLimit(t *testing.T) {
+	tools := []ToolDef{{Name: "a"}, {Name: "b"}}
+	got := capOpenAITools(tools)
+	if len(got) != 2 {
+		t.Errorf("want 2 tools, got %d", len(got))
+	}
+}
+
+// Checks capOpenAITools truncates over-limit lists to the cap.
+func TestCapOpenAITools_OverLimit(t *testing.T) {
+	tools := make([]ToolDef, maxOpenAITools+3)
+	for i := range tools {
+		tools[i] = ToolDef{Name: fmt.Sprintf("t%d", i)}
+	}
+
+	got := capOpenAITools(tools)
+	if len(got) != maxOpenAITools {
+		t.Errorf("want %d tools, got %d", maxOpenAITools, len(got))
+	}
+	if got[len(got)-1].Name != "t127" {
+		t.Errorf("want last tool t127, got %q", got[len(got)-1].Name)
 	}
 }
 
@@ -1169,7 +1255,7 @@ func TestOpenAIChat_ReasoningModel_DeveloperRole(t *testing.T) {
 			var found bool
 			for _, m := range req.Messages {
 				if m.Role == "developer" && m.Content != nil &&
-					*m.Content == "You are helpful." {
+					stringOf(m.Content) == "You are helpful." {
 					found = true
 					break
 				}
@@ -1219,7 +1305,7 @@ func TestOpenAIChat_NonReasoningModel_SystemRole(t *testing.T) {
 			var found bool
 			for _, m := range req.Messages {
 				if m.Role == "system" && m.Content != nil &&
-					*m.Content == "You are helpful." {
+					stringOf(m.Content) == "You are helpful." {
 					found = true
 					break
 				}
@@ -1480,4 +1566,160 @@ func messageRoles(msgs []openaiMessage) []string {
 		roles[i] = m.Role
 	}
 	return roles
+}
+
+// Tests that image-bearing user messages emit a content-parts array
+// with the text part first and base64 data-URI image parts after.
+func TestBuildOpenAIMessages_ImageContentParts(t *testing.T) {
+	req := ChatRequest{
+		Messages: []Message{
+			{
+				Role:    "user",
+				Content: "why is the api pod in crashloop",
+				Images: []ImageData{
+					{MediaType: "image/png", Data: testutil.OnePixelPNG()},
+				},
+			},
+		},
+	}
+
+	msgs := buildOpenAIMessages(req)
+	if len(msgs) != 1 {
+		t.Fatalf("want 1 message, got %d", len(msgs))
+	}
+
+	data, err := json.Marshal(msgs[0])
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var decoded struct {
+		Role    string `json:"role"`
+		Content []struct {
+			Type     string `json:"type"`
+			Text     string `json:"text"`
+			ImageURL *struct {
+				URL string `json:"url"`
+			} `json:"image_url"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if decoded.Role != "user" {
+		t.Errorf("want role user, got %q", decoded.Role)
+	}
+	if len(decoded.Content) != 2 {
+		t.Fatalf("want 2 content parts, got %d", len(decoded.Content))
+	}
+	if decoded.Content[0].Type != "text" ||
+		decoded.Content[0].Text != "why is the api pod in crashloop" {
+		t.Errorf("unexpected text part: %+v", decoded.Content[0])
+	}
+	if decoded.Content[1].Type != "image_url" ||
+		decoded.Content[1].ImageURL == nil {
+		t.Fatalf("missing image_url part: %+v", decoded.Content[1])
+	}
+	wantURL := "data:image/png;base64," +
+		base64.StdEncoding.EncodeToString(testutil.OnePixelPNG())
+	if decoded.Content[1].ImageURL.URL != wantURL {
+		t.Errorf(
+			"want url %q, got %q",
+			wantURL, decoded.Content[1].ImageURL.URL,
+		)
+	}
+}
+
+// Tests that an image-only user message (no text) still emits the
+// image parts and no empty text part.
+func TestBuildOpenAIMessages_ImageOnlyContentParts(t *testing.T) {
+	req := ChatRequest{
+		Messages: []Message{
+			{
+				Role: "user",
+				Images: []ImageData{{
+					MediaType: "image/png",
+					Data:      testutil.OnePixelPNG(),
+				}},
+			},
+		},
+	}
+
+	msgs := buildOpenAIMessages(req)
+	data, err := json.Marshal(msgs[0])
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var decoded struct {
+		Content []struct {
+			Type string `json:"type"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(decoded.Content) != 1 || decoded.Content[0].Type != "image_url" {
+		t.Errorf("want single image_url part, got %+v", decoded.Content)
+	}
+}
+
+// Tests conservative token estimation for attached images: known
+// dimensions use the tile formula, unparseable data uses the flat
+// fallback.
+func TestEstimateImageTokens_TileFormulaAndFallback(t *testing.T) {
+	got := EstimateImageTokens([]ImageData{
+		{MediaType: "image/png", Data: testutil.OnePixelPNG()},
+	})
+	// 1x1 image: 1 tile → 85 base + 170 tile tokens.
+	if got != 85+170 {
+		t.Errorf("want %d for 1x1 image, got %d", 85+170, got)
+	}
+
+	got = EstimateImageTokens([]ImageData{
+		{MediaType: "image/png", Data: []byte("not an image")},
+	})
+	if got != unknownImageTokens {
+		t.Errorf("want %d fallback for junk data, got %d",
+			unknownImageTokens, got)
+	}
+
+	if got := EstimateImageTokens(nil); got != 0 {
+		t.Errorf("want 0 for nil images, got %d", got)
+	}
+}
+
+// Tests that assistant content returned as a content-parts array
+// (some OpenAI-compatible providers) is parsed into its text parts
+// instead of being silently dropped.
+func TestParseOpenAIResponse_ContentPartsArray(t *testing.T) {
+	raw := []byte(`{
+		"id": "resp-1",
+		"choices": [{
+			"index": 0,
+			"finish_reason": "stop",
+			"message": {
+				"role": "assistant",
+				"content": [
+					{"type": "text", "text": "part one"},
+					{"type": "image_url",
+					 "image_url": {"url": "data:image/png;base64,AA"}},
+					{"type": "text", "text": "part two"}
+				]
+			}
+		}]
+	}`)
+	var resp openaiResponse
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	cr, err := parseOpenAIResponse(resp)
+	if err != nil {
+		t.Fatalf("parseOpenAIResponse: %v", err)
+	}
+	if cr.Message.Content != "part one\npart two" {
+		t.Errorf("want joined text parts, got %q", cr.Message.Content)
+	}
 }

@@ -7,6 +7,9 @@ monitoring, and diagnostics — like a senior SRE you can talk to.
 > **⚠️ Read [WARNING.md](WARNING.md) before use.** Shmorby can execute arbitrary
 > commands on your systems. The author(s) are not liable for damage, data loss,
 > or security breaches.
+>
+> See [SAFETY.md](SAFETY.md) for durability, approval, audit, and redaction
+> guarantees and limits.
 
 ## Requirements
 
@@ -114,6 +117,12 @@ go build -o shmorby ./cmd/shmorby
 | Recommended | `gpt-5.6-sol`/`terra`/`luna` |
 | Other | `gpt-5.4`, `gpt-5.4-mini`, `gpt-4.1`, `o3`, `o4-mini` |
 | Azure | Set `openai.base_url` to your Azure endpoint |
+| Tools limit | 128 per request (OpenAI hard cap); excess tools are dropped |
+
+> OpenAI's Chat Completions API rejects requests with more than 128
+> tools. When more are registered (e.g. many MCP servers), Shmorby
+> keeps the first 128 (built-in tools before MCP tools) and logs a
+> warning. Disable unused MCP servers for full coverage.
 
 ```yaml
 provider: openai
@@ -199,10 +208,12 @@ Subcommands:
   audit export            Export audit entries (json or csv)
   audit vacuum            Archive and remove old audit entries
   audit stats             Show audit DB statistics
+  audit verify            Verify the audit hash chain
   session list            List persisted sessions (current directory)
   session show <id>       Show session metadata or full transcript
   session rm <id>         Archive a session (--force deletes rows)
   session prune           Apply session retention policy
+  session executions      List executions; --reconcile stale rows
   ledger list             List encrypted environment ledger sections
   ledger get <section>    Print a ledger section as JSON
   ledger set <section>    Replace a ledger section with JSON
@@ -243,8 +254,9 @@ API reachability, web fetch, and aws CLI.
 - `memory-ollama` — Ollama `/api/embed` endpoint probe (independent of the
   generic `/api/tags` provider check). Only runs when `provider == "ollama"`;
   skipped otherwise.
-- `ledger` — Encrypted ledger file presence, permissions (must be `0600`),
-  decryptability, and entry count. No secrets are exposed in output.
+- `ledger` — Encrypted ledger file presence, permissions (must be `0600`
+  on Unix; Windows relies on inherited ACLs), decryptability, and entry
+  count. No secrets are exposed in output.
 - `audit-sqlite` — SQLite audit DB integrity, entry count, file size.
   Skipped (ok) when no path configured or DB not yet created.
 - `config` — Config file parses as valid YAML, required fields present
@@ -282,15 +294,87 @@ See [`examples/shmorby.yaml`](examples/shmorby.yaml) for:
 |---------|---------|
 | `memory` | SQLite + vectors, embedding, auto-capture, tag rules |
 | `context` | Token estimation, compression, offload-to-memory |
-| `models` | Per-model context window + max output overrides |
-| `tui` | Theme, glamour, logging panel, keybinds |
+| `models` | Per-model context window, max output, `supports_vision` overrides |
+| `tui` | Theme, external theme files, glamour, logging panel |
 | `tools.websearch` | Web search via SearXNG/Exa (disabled by default) |
 | `tools.webfetch` | URL fetching for page content (disabled by default) |
 | `mcp` | MCP servers (subprocess or remote HTTP); tools per server |
-| `audit` | SQLite audit store: runs, outputs, perms, subagents |
+| `audit` | SQLite audit records, delivery mode, and integrity chain |
 | `session` | Conversation persistence, resume, retention (see below) |
 | `ledger` | Encrypted environment ledger; agent tools + context injection |
 | `code` | Project root anchoring for code mode file tools |
+
+### Theming
+
+Built-in themes: `catppuccin-mocha` (default), `catppuccin-latte`,
+`catppuccin-frappe`, `catppuccin-macchiato`, `minimal`.
+
+Custom themes come from external theme files listed under
+`tui.theme_files`. Each file can define any number of named themes,
+and `tui.theme` selects one by name:
+
+```yaml
+tui:
+  theme: nord
+  theme_files:
+    - ~/.config/shmorby/themes.yaml
+```
+
+Theme file format — each theme is a palette of hex colors in
+`#rrggbb` form; all 25 palette roles are required (see the `Palette`
+type in `internal/tui/styles/theme.go` for the full role list):
+
+```yaml
+themes:
+  nord:
+    base: "#2e3440"
+    mantle: "#292e39"
+    surface0: "#3b4252"
+    # ... all 25 roles required ...
+    text: "#eceff4"
+    mauve: "#81a1c1"
+    rosewater: "#d8dee9"
+```
+
+Missing or invalid theme files fail at startup with an error naming
+the file and theme; without `theme_files`, behavior is unchanged.
+Paths starting with `~/` are expanded to your home directory; other
+paths (including Windows `%VAR%` forms) are used literally.
+
+### Image paste (clipboard)
+
+`Ctrl+V` pastes an image from the system clipboard into the input
+when one is present (otherwise it pastes text as before). A chip
+above the input shows the staged attachment (`[📎 image 1920x1080
+PNG 412 KiB — ⚠ sent to provider (esc removes)]`); `esc` removes it.
+On send, the image is included in the user turn if the active model
+supports vision; images over 20 MiB are rejected.
+
+Vision support is resolved per model: a `models.<name>.
+supports_vision` config override always wins, otherwise a
+conservative known-model heuristic decides (OpenAI `gpt-4o*`,
+`gpt-4.1*`, `gpt-5*`, `o3`, `o4-mini`, `claude-*`, `gemini-*`,
+Ollama vision models like `llava*`, `qwen2.5vl*`, `qwen3vl*`,
+`minicpm-v*`). Unknown models refuse image input — set the override
+to enable it. Ollama also reads the model's `capabilities` from
+`/api/show`; OpenCode Zen endpoints return no capability metadata, so
+vision there comes from a maintained exact-ID list (`mimo-v2.5`,
+`mimo-v2.5-free`, `deepseek-v4-flash-vision-exp` — note
+`mimo-v2.5-pro` does not accept image input). Sending to a
+non-vision model fails before any request with a message pointing at
+`/model`.
+
+> **Privacy note:** screenshots frequently contain secrets
+> (dashboards, tokens, hostnames). The redaction pipeline only
+> covers text — image pixels are sent verbatim to the provider.
+
+Attached images are persisted per session as content-addressed files
+under `~/.local/share/shmorby/images/<session-id>/` (`0600` files in
+`0700` directories) and re-attached when the session is resumed; the
+database only stores the file path. Platform note: image paste uses
+`golang.design/x/clipboard` — macOS uses cgo, Windows needs no cgo,
+and Linux requires X11 (native Wayland compositors must run
+XWayland).
 
 ### Session persistence
 
@@ -308,6 +392,8 @@ shmorby session list       # root sessions for the current directory
 shmorby session show <id> --messages
 shmorby session rm <id>    # archive; --force deletes rows
 shmorby session prune      # apply retention_days / max_sessions
+shmorby session executions # recent tool executions
+shmorby session executions --reconcile --kill
 ```
 
 Sessions are scoped to their working directory: resuming a session
@@ -322,11 +408,119 @@ error cleanly. Retention cleanup (`session prune`) is manual in v1
 — run it directly or from cron; sessions written in the last 5
 minutes are always skipped as possibly in use.
 
+### Execution safety
+
+Each user submission carries a client-generated input ID. A repeated
+submission with the same ID returns the persisted assistant reply
+instead of appending another user message or assistant turn. The ID
+is stored in the transcript and in the audit chain. Each tool call
+gets a durable execution row before permission evaluation and before
+the command starts. Execution IDs and lifecycle statuses
+(`pending_approval`, `denied`, `running`, `succeeded`, `failed`,
+`cancel_requested`, `cancelled`, `timed_out`, `kill_failed`,
+`orphaned`, `unknown`) live in `sessions.db`.
+
+Cancellation targets an execution ID (`/cancel <id>` in the TUI and
+REPL). A cancellation is recorded as `cancel_requested`, then becomes
+`cancelled` only after the process group is confirmed gone. If the
+group is still alive, the row becomes `kill_failed` with the PID and
+diagnostic instead of pretending the command stopped.
+
+Each row stores redacted arguments, a canonical argument hash, the
+transcript input ID, tool-call ID, and output reference. Tool output
+is written to a separate `execution_output` table in bounded chunks
+(32 KiB pages, 1 MiB total), so large output is paginated instead of
+bloating the execution row. Audit entries include the transcript
+input ID, tool-call ID, and execution ID; permission decisions also
+link any approval ID. Every tool call records a permission decision,
+including policy allows, defaults, and calls covered by allow-all.
+The `decision_source` values include `rule_allow`, `rule_deny`,
+`human_allow`, `human_deny`, `allow_all`, `default_allow`, and
+`timeout_deny`. `shmorby audit list --execution <id>` filters entries;
+`--approval <id>` lists a permission decision by approval. The TUI
+lists durable rows with `/executions` (optionally `all` or a status)
+rather than relying only on in-memory events. Interactive permission
+requests and decisions are stored synchronously in the
+`approvals` table in `sessions.db` and linked to their execution ID.
+A prompt expires after five minutes and denies the execution; pending
+requests from a previous process are marked expired and denied at
+startup. Approval records capture the decision (`once`, `always`, or
+`reject`), scope, local approver, and decision source.
+
+Execution rows record the owning shmorby process and the command's
+process start identity. Parent-death signals are intentionally not
+used because Go can deliver them while shmorby is still alive. The
+startup reconciler turns stale `running` rows into `orphaned` (live,
+identity-verified process group) or `unknown` (no verifiable live
+group), never `succeeded`. It skips rows owned by a live shmorby
+instance and refuses to mark or kill a PID whose identity changed.
+Run `shmorby session executions --reconcile` to inspect and reconcile,
+and add `--kill` to terminate verified orphaned process groups on this
+host.
+
+### Durable audit delivery and integrity
+
+The audit hash chain assigns a monotonic sequence to each persisted audit
+record and hashes its canonical JSON payload together with the previous row's
+hash. Critical approval and execution lifecycle events are written
+synchronously. On SIGINT/SIGTERM, buffered best-effort records are flushed
+before shutdown.
+
+Set `audit.delivery` to `required` to fail closed: Shmorby refuses to start if
+the audit store is unavailable, and an operation does not start if a pre-action
+critical audit write fails. Post-action audit failures are returned as
+errors. `best_effort` (the default) preserves asynchronous output logging;
+when its buffer or store cannot accept a row, that row is counted and
+reported in the log. `audit.async_buffer_size` controls that buffer.
+
+Run `shmorby audit verify` to verify the full chain, or pass `--from <seq>` and
+`--to <seq>` to verify an inclusive range. The command reports the first invalid
+sequence. Existing databases are migrated additively; records created before
+the chain was introduced do not have retroactive integrity protection. Audit
+vacuum removes query-table rows but retains the chain history; captured
+stdout/stderr are represented by hashes in the chain rather than copied there.
+
+**Threat model:** the chain detects accidental or casual changes to chained
+rows, including edits, removals, reordering, and broken links. Source-table
+rows are cross-checked while present, but deletions from those tables are
+not flagged because `audit vacuum` intentionally removes old records; the
+chain rows themselves are retained. The chain does not prevent modification.
+An attacker with write access to the database can rewrite the rows and
+recompute the chain; no external key, signature, or append-only remote copy
+anchors the history. Protect the database and its backups with the same
+access controls as other sensitive operational data.
+
 > **Privacy note:** everything persisted is first run through the
 > same secret redaction as `audit`/`memory` (keys, tokens,
 > passwords), but sessions still contain redacted-but-otherwise-raw
 > operational history: hostnames, paths, and command output.
-> `sessions.db` is created `0600`; treat it as sensitive.
+> `sessions.db` is created `0600`; treat it as sensitive. Attached
+> clipboard images are stored verbatim next to the database (see
+> "Image paste" above) and are never redacted — pixels cannot be.
+
+### Terminal and multiplexer (tmux) compatibility
+
+When running inside terminal multiplexers (`tmux`, GNU Screen) or remote SSH
+sessions:
+- **Multiline input:** `Shift+Enter` inserts newlines in terminals supporting
+  extended keys. In default `tmux` or terminal setups that do not differentiate
+  `Shift+Enter` from `Enter`, use `Ctrl+J` to insert newlines without
+  submitting.
+- **Output navigation:** Use `PgUp`/`PgDn` or mouse scrolling to inspect
+  output. In viewport selection mode (entered via mouse click or drag), single
+  keys `g`/`G` scroll to top/bottom, `j`/`k` scroll line-by-line, and `d`/`u`
+  (or `Ctrl+D`/`Ctrl+U`) scroll half-page down/up.
+- **OSC-52 clipboard:** Headless clipboard copying emits OSC-52 escape
+  sequences. Under `tmux` (≥ 3.2), sequences are automatically wrapped with
+  DCS passthrough envelopes (`\033Ptmux;\033...`) to reach the host terminal.
+  Note that tmux requires `set -g allow-passthrough on` in `~/.tmux.conf` for
+  DCS passthrough.
+- **Mouse tracking:** Disabled by default (`tui.mouse: false`). Set `tui.mouse:
+  true` in config to enable mouse wheel scrolling and click-drag text
+  selection inside the TUI viewport. When enabled, terminal mouse events are
+  captured by the TUI, which bypasses native terminal / tmux copy-mode
+  selection unless holding `Shift` (supported by many terminal emulators,
+  e.g. Windows Terminal, iTerm2, kitty, xterm, and tmux mouse mode).
 
 ### Web search and fetch configuration
 
@@ -389,6 +583,7 @@ tools:
 | `/set <param> <value>` | Override a config parameter at runtime |
 | `/quit` | Exit shmorby |
 | `/reset` | Clear conversation history |
+| `/model` | Show current model and list available models |
 | `/model <name>` | Switch LLM model |
 | `/platform <name>` | Switch LLM provider |
 | `/apikey` | Set API key for current provider (input masked) |
@@ -396,8 +591,13 @@ tools:
 | `/scope` | Show loaded scope context and size |
 | `/memory` | Memory management (search, forget, clear, stats) |
 | `/context` | Token usage and compression stats |
+| `/executions [all\|status]` | List durable executions from the session DB |
+| `/cancel <id>` | Cancel a running execution by ID |
 | `/log <level>` | Set log verbosity (debug, info, warn, error) |
 | `/tui` | Toggle fullscreen mode |
+
+In the TUI, `Ctrl+Z` safely suspends shmorby and restores the terminal to the
+shell. Run `fg` to resume it.
 
 ## Agent modes
 
@@ -507,10 +707,13 @@ level show an inline y/n/a prompt:
 
 - **y** — allow this tool call
 - **n** — deny this tool call
-- **a** — allow all subsequent calls for this tool in the current message
+- **a** — allow subsequent calls for this tool in the current turn
 
 Prompts appear in the TUI (inline) or REPL (stdin). When `interactive` is
 `false`, `ask` tools default to allow (v1 backward-compatible behavior).
+Interactive decisions are persisted with their execution link; timeout
+and restart recovery deny rather than allow. The audit trail records
+who made each decision, its source, and any scope grant.
 
 ### Permission presets
 
@@ -556,6 +759,26 @@ always wins regardless of rules.
   smoke-tested via `install.ps1`.
 - **aws** — uses the AWS CLI. Credentials from env/credentials file.
 
+## Known limitations
+
+Shmorby is a single-user, single-process local tool. See
+[SAFETY.md](SAFETY.md) for the full guarantees and failure behavior.
+
+- There is no daemon, HTTP API, multi-user support, or remote approval.
+  The backend event stream is in-process and is lost on restart.
+- A crash or `SIGKILL` can leave child process groups running. Startup
+  reconciliation marks them `orphaned` or `unknown`; use
+  `shmorby session executions --reconcile --kill` to terminate verified
+  orphans.
+- Best-effort audit is the default and can drop buffered records. The
+  local hash chain detects casual tampering but is unkeyed and has no
+  external anchor; it is not compliance-grade.
+- Redaction is best-effort. Terminal output, session titles, memory
+  commands/args, images, config files, and prompts sent to the provider
+  are not covered. Only the ledger is encrypted at rest.
+- Concurrent writers to one session are last-writer-wins; there is no
+  cross-process session lock. Session cleanup is manual.
+
 ## Building on Windows
 
 ```powershell
@@ -586,4 +809,3 @@ uses `powershell -NoProfile -NonInteractive -Command`,
 `cmd /d /c`, or `bash -c` derived from
 `agent.shell`. Empty `agent.shell` prefers `pwsh` over
 `powershell` when in `PATH`, else `%ComSpec%`.
-

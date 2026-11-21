@@ -12,6 +12,7 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+	"shmorby/internal/execution"
 	"shmorby/internal/llm"
 	"shmorby/internal/redact"
 	"shmorby/internal/util"
@@ -25,7 +26,7 @@ var ErrNotFound = errors.New("session not found")
 // schemaVersion is the sessions.db schema version tracked via
 // PRAGMA user_version. Bump when the schema changes and add a
 // migration step in migrate().
-const schemaVersion = 1
+const schemaVersion = 6
 
 // activeGuardWindow is how recently a session must have been
 // written for Prune to consider it in use by a live process and
@@ -84,6 +85,49 @@ type Store interface {
 	// session and the store (AC6).
 	Load(id string) (*Session, Meta, error)
 
+	// FindInput returns a persisted user input by idempotency key.
+	FindInput(sessionID, inputID string) (Message, bool, error)
+
+	// FindInputReply returns the assistant reply persisted after a
+	// user input, ignoring tool-call scaffolding.
+	FindInputReply(sessionID, inputID string) (Message, bool, error)
+
+	// CreateExecution inserts a durable execution record.
+	CreateExecution(r execution.Record) error
+
+	// UpdateExecution updates an existing execution record.
+	UpdateExecution(r execution.Record) error
+
+	// GetExecution returns a single execution record by id.
+	GetExecution(id string) (execution.Record, error)
+
+	// ListExecutions returns executions matching f, newest first.
+	ListExecutions(f execution.Filter) ([]execution.Record, error)
+
+	// CreateApproval inserts a durable pending approval and links it
+	// to its execution.
+	CreateApproval(a ApprovalRecord) error
+
+	// ResolveApproval writes a decision and updates the execution.
+	ResolveApproval(a ApprovalRecord) error
+
+	// ExpireApproval denies one pending approval after timeout.
+	ExpireApproval(id, source string, at time.Time) error
+
+	// ExpirePendingApprovals denies pending approvals after restart.
+	ExpirePendingApprovals(at time.Time) error
+
+	// GetApproval returns one durable approval by ID.
+	GetApproval(id string) (ApprovalRecord, error)
+
+	// AppendExecutionOutput replaces the output chunks for an
+	// execution.
+	AppendExecutionOutput(id string, chunks []string) error
+
+	// ReadExecutionOutput returns one output chunk and whether it is
+	// the last chunk.
+	ReadExecutionOutput(id string, cursor int) (string, bool, error)
+
 	// Latest returns the most recently updated root session for
 	// dir. The bool is false when none exists.
 	Latest(dir string) (Meta, bool)
@@ -98,8 +142,8 @@ type Store interface {
 	// List by default).
 	Archive(id string) error
 
-	// Delete hard-deletes a session and cascades to child
-	// sessions and all message rows.
+	// Delete hard-deletes a session and cascades to child sessions,
+	// their messages, approvals, and executions.
 	Delete(id string) error
 
 	// Prune removes archived/inactive sessions older than
@@ -142,6 +186,97 @@ CREATE TABLE IF NOT EXISTS session_messages (
     created_at   INTEGER NOT NULL,
     PRIMARY KEY (session_id, seq)
 );
+`
+
+// schemaV2 adds the images column: a JSON array of ImageRef
+// (media_type + data-dir-relative path). Image bytes live on disk,
+// not in the DB.
+const schemaV2 = `
+ALTER TABLE session_messages ADD COLUMN images TEXT;
+`
+
+// schemaV3 adds input idempotency keys and durable execution rows.
+const schemaV3 = `
+ALTER TABLE session_messages ADD COLUMN input_id TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_input
+    ON session_messages(session_id, input_id)
+    WHERE input_id IS NOT NULL AND input_id <> '';
+
+CREATE TABLE IF NOT EXISTS executions (
+    id           TEXT PRIMARY KEY,
+    session_id   TEXT NOT NULL,
+    tool_call_id TEXT NOT NULL DEFAULT '',
+    tool         TEXT NOT NULL,
+    command      TEXT NOT NULL DEFAULT '',
+    args_hash    TEXT NOT NULL DEFAULT '',
+    status       TEXT NOT NULL,
+    pid          INTEGER NOT NULL DEFAULT 0,
+    created_at   INTEGER NOT NULL,
+    started_at   INTEGER,
+    ended_at     INTEGER,
+    exit_code    INTEGER,
+    error        TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_executions_session
+    ON executions(session_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_executions_status
+    ON executions(status, created_at DESC);
+`
+
+// schemaV4 adds process ownership and identity tokens so
+// reconciliation can avoid recycled PIDs and live sibling instances.
+const schemaV4 = `
+ALTER TABLE executions ADD COLUMN owner_pid INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE executions ADD COLUMN owner_start TEXT NOT NULL DEFAULT '';
+ALTER TABLE executions ADD COLUMN process_start TEXT NOT NULL DEFAULT '';
+`
+
+// schemaV5 adds execution correlation, output references, and
+// paginated output storage.
+const schemaV5 = `
+ALTER TABLE executions ADD COLUMN message_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE executions ADD COLUMN args_redacted TEXT NOT NULL DEFAULT '';
+ALTER TABLE executions ADD COLUMN output_ref TEXT NOT NULL DEFAULT '';
+ALTER TABLE executions ADD COLUMN approval_id TEXT NOT NULL DEFAULT '';
+
+CREATE TABLE IF NOT EXISTS execution_output (
+    execution_id TEXT NOT NULL,
+    chunk        INTEGER NOT NULL,
+    data         TEXT NOT NULL,
+    PRIMARY KEY (execution_id, chunk)
+);
+`
+
+// schemaV6 adds durable approval requests and decisions.
+const schemaV6 = `
+CREATE TABLE IF NOT EXISTS approvals (
+    id               TEXT PRIMARY KEY,
+    session_id       TEXT NOT NULL,
+    execution_id     TEXT NOT NULL DEFAULT '',
+    tool             TEXT NOT NULL,
+    command_redacted TEXT NOT NULL DEFAULT '',
+    rule_pattern     TEXT NOT NULL DEFAULT '',
+    rule_action      TEXT NOT NULL DEFAULT '',
+    reason           TEXT NOT NULL DEFAULT '',
+    status           TEXT NOT NULL CHECK(status IN
+                       ('pending', 'approved', 'denied', 'expired')),
+    decision         TEXT NOT NULL DEFAULT '',
+    scope            TEXT NOT NULL DEFAULT '',
+    decided_by       TEXT NOT NULL DEFAULT '',
+    decision_source  TEXT NOT NULL DEFAULT '',
+    requested_at     INTEGER NOT NULL,
+    decided_at       INTEGER,
+    expires_at       INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_approvals_session
+    ON approvals(session_id, requested_at DESC);
+CREATE INDEX IF NOT EXISTS idx_approvals_status
+    ON approvals(status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_approvals_execution
+    ON approvals(execution_id);
 `
 
 // sqliteStore is the SQLite-backed Store.
@@ -205,7 +340,10 @@ func migrate(db *sql.DB) error {
 			version, schemaVersion,
 		)
 	}
-	steps := map[int]string{1: schemaV1}
+	steps := map[int]string{
+		1: schemaV1, 2: schemaV2, 3: schemaV3, 4: schemaV4,
+		5: schemaV5, 6: schemaV6,
+	}
 	for v := version + 1; v <= schemaVersion; v++ {
 		step, ok := steps[v]
 		if !ok {
@@ -321,8 +459,8 @@ func (s *sqliteStore) replaceFrom(
 	stmt, err := tx.Prepare(
 		`INSERT INTO session_messages
 		 (session_id, seq, role, content, tool_name,
-		  tool_call_id, tool_calls, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		  tool_call_id, tool_calls, images, input_id, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	)
 	if err != nil {
 		return fmt.Errorf("prepare insert message: %w", err)
@@ -335,16 +473,23 @@ func (s *sqliteStore) replaceFrom(
 		if err != nil {
 			return err
 		}
-		var toolName, toolCallID any
+		images, err := encodeImages(m.Images)
+		if err != nil {
+			return err
+		}
+		var toolName, toolCallID, inputID any
 		if m.ToolName != "" {
 			toolName = m.ToolName
 		}
 		if m.ToolCallID != "" {
 			toolCallID = m.ToolCallID
 		}
+		if m.InputID != "" {
+			inputID = m.InputID
+		}
 		if _, err := stmt.Exec(
 			id, i, m.Role, redact.SecretString(m.Content),
-			toolName, toolCallID, toolCalls, now,
+			toolName, toolCallID, toolCalls, images, inputID, now,
 		); err != nil {
 			return fmt.Errorf("insert message: %w", err)
 		}
@@ -417,7 +562,8 @@ func (s *sqliteStore) metaByID(id string) (Meta, bool, error) {
 func (s *sqliteStore) messages(id string) ([]Message, error) {
 	rows, err := s.db.Query(
 		`SELECT role, content, COALESCE(tool_name, ''),
-		        COALESCE(tool_call_id, ''), COALESCE(tool_calls, '')
+		        COALESCE(tool_call_id, ''), COALESCE(tool_calls, ''),
+		        COALESCE(images, ''), COALESCE(input_id, '')
 		 FROM session_messages WHERE session_id = ?
 		 ORDER BY seq ASC`, id,
 	)
@@ -431,10 +577,11 @@ func (s *sqliteStore) messages(id string) ([]Message, error) {
 		var (
 			m         Message
 			toolCalls string
+			images    string
 		)
 		if err := rows.Scan(
 			&m.Role, &m.Content, &m.ToolName, &m.ToolCallID,
-			&toolCalls,
+			&toolCalls, &images, &m.InputID,
 		); err != nil {
 			return nil, fmt.Errorf("scan message: %w", err)
 		}
@@ -445,6 +592,18 @@ func (s *sqliteStore) messages(id string) ([]Message, error) {
 				return nil, fmt.Errorf(
 					"decode tool_calls for %s: %w", m.Role, err,
 				)
+			}
+		}
+		if images != "" {
+			if err := json.Unmarshal(
+				[]byte(images), &m.Images,
+			); err != nil {
+				// One corrupt row must not fail the whole
+				// session resume; the refs are unusable
+				// anyway and LoadImages skips missing ones.
+				slog.Warn("decode images failed; skipping",
+					"session", id, "role", m.Role,
+					"err", err)
 			}
 		}
 		msgs = append(msgs, m)
@@ -549,8 +708,8 @@ func (s *sqliteStore) Archive(id string) error {
 	return nil
 }
 
-// Hard-deletes a session and cascades to child session rows and
-// their message rows in one transaction.
+// Hard-deletes a session and cascades to child session rows, their
+// message rows, and execution rows in one transaction.
 func (s *sqliteStore) Delete(id string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -558,6 +717,28 @@ func (s *sqliteStore) Delete(id string) error {
 	}
 	defer tx.Rollback()
 
+	if _, err := tx.Exec(
+		`DELETE FROM execution_output WHERE execution_id IN
+		 (SELECT id FROM executions WHERE session_id IN
+		  (SELECT id FROM sessions
+		   WHERE id = ? OR parent_id = ?))`, id, id,
+	); err != nil {
+		return fmt.Errorf("delete execution output: %w", err)
+	}
+	if _, err := tx.Exec(
+		`DELETE FROM approvals WHERE session_id IN
+		 (SELECT id FROM sessions
+		  WHERE id = ? OR parent_id = ?)`, id, id,
+	); err != nil {
+		return fmt.Errorf("delete approvals: %w", err)
+	}
+	if _, err := tx.Exec(
+		`DELETE FROM executions WHERE session_id IN
+		 (SELECT id FROM sessions
+		  WHERE id = ? OR parent_id = ?)`, id, id,
+	); err != nil {
+		return fmt.Errorf("delete executions: %w", err)
+	}
 	if _, err := tx.Exec(
 		`DELETE FROM session_messages WHERE session_id IN
 		 (SELECT id FROM sessions
@@ -668,10 +849,11 @@ func (s *sqliteStore) queryIDs(query string, args ...any) (
 	return ids, rows.Err()
 }
 
-// deleteIDs removes the given session rows and their messages in
-// one transaction. Ids are deleted in chunks of parameterized IN
-// lists (bounded well under SQLite's variable limit) so neither a
-// huge sweep nor the SQLite parameter cap can break the batch.
+// deleteIDs removes the given session rows, their messages,
+// approvals, and execution rows in one transaction. Ids are deleted
+// in chunks of parameterized IN lists (bounded well under SQLite's limit)
+// so neither a huge sweep nor the SQLite parameter cap can break the
+// batch.
 func (s *sqliteStore) deleteIDs(ids []string) error {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -690,6 +872,25 @@ func (s *sqliteStore) deleteIDs(ids []string) error {
 		}
 		ph := strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")
 
+		if _, err := tx.Exec(
+			`DELETE FROM execution_output WHERE execution_id IN
+			 (SELECT id FROM executions
+			  WHERE session_id IN (`+ph+`))`, args...,
+		); err != nil {
+			return fmt.Errorf("prune execution output: %w", err)
+		}
+		if _, err := tx.Exec(
+			`DELETE FROM approvals
+			 WHERE session_id IN (`+ph+`)`, args...,
+		); err != nil {
+			return fmt.Errorf("prune approvals: %w", err)
+		}
+		if _, err := tx.Exec(
+			`DELETE FROM executions
+			 WHERE session_id IN (`+ph+`)`, args...,
+		); err != nil {
+			return fmt.Errorf("prune executions: %w", err)
+		}
 		if _, err := tx.Exec(
 			`DELETE FROM session_messages
 			 WHERE session_id IN (`+ph+`)`, args...,
@@ -749,6 +950,19 @@ func encodeToolCalls(calls []llm.ToolCall) (string, error) {
 	b, err := json.Marshal(cp)
 	if err != nil {
 		return "", fmt.Errorf("encode tool calls: %w", err)
+	}
+	return string(b), nil
+}
+
+// Encodes image refs for persistence as a JSON array. Returns "" for
+// an empty slice so the column stays NULL.
+func encodeImages(refs []ImageRef) (string, error) {
+	if len(refs) == 0 {
+		return "", nil
+	}
+	b, err := json.Marshal(refs)
+	if err != nil {
+		return "", fmt.Errorf("encode image refs: %w", err)
 	}
 	return string(b), nil
 }

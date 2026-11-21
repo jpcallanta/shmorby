@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -14,6 +15,12 @@ import (
 	"shmorby/internal/config"
 	"shmorby/internal/redact"
 )
+
+// maxOpenAITools is OpenAI's hard limit on the number of tools per
+// Chat Completions request ("Expected an array with maximum length
+// 128"). Other OpenAI-compatible providers do not impose this cap, so
+// it is enforced only by the OpenAI provider.
+const maxOpenAITools = 128
 
 // openaiProvider sends requests to the OpenAI API.
 type openaiProvider struct {
@@ -55,6 +62,23 @@ func (p *openaiProvider) Name() string {
 	return "openai"
 }
 
+// Truncates the tool list to OpenAI's 128-tool cap, logging when tools
+// are dropped. Callers register built-in tools before MCP tools, so
+// excess (typically MCP) tools at the tail are dropped first.
+func capOpenAITools(tools []ToolDef) []ToolDef {
+	if len(tools) <= maxOpenAITools {
+		return tools
+	}
+
+	slog.Warn("openai tool limit exceeded, dropping excess tools",
+		"limit", maxOpenAITools,
+		"requested", len(tools),
+		"dropped", len(tools)-maxOpenAITools,
+	)
+
+	return tools[:maxOpenAITools]
+}
+
 // Sends a chat request to OpenAI and returns the parsed response.
 func (p *openaiProvider) Chat(
 	ctx context.Context, req ChatRequest,
@@ -67,7 +91,7 @@ func (p *openaiProvider) Chat(
 	body := openaiRequest{
 		Model:    model,
 		Messages: buildOpenAIMessages(req),
-		Tools:    buildOpenAITools(req.Tools),
+		Tools:    buildOpenAITools(capOpenAITools(req.Tools)),
 	}
 
 	// Reasoning models (o-series, gpt-5.x) require
@@ -104,7 +128,7 @@ func (p *openaiProvider) ChatStream(
 	body := openaiRequest{
 		Model:    model,
 		Messages: buildOpenAIMessages(req),
-		Tools:    buildOpenAITools(req.Tools),
+		Tools:    buildOpenAITools(capOpenAITools(req.Tools)),
 		Stream:   true,
 		// Request usage in the final streaming chunk for cost/audit.
 		StreamOptions: &streamOptions{IncludeUsage: true},
@@ -258,31 +282,6 @@ func (p *openaiProvider) readSSEStream(
 func (p *openaiProvider) fetchModelInfo(
 	ctx context.Context, model string,
 ) (ModelInfo, error) {
-	req, err := http.NewRequestWithContext(
-		ctx, http.MethodGet,
-		p.baseURL+"/v1/models/"+model, nil,
-	)
-	if err != nil {
-		return ModelInfo{}, fmt.Errorf("create request: %w", err)
-	}
-	p.setHeaders(req)
-
-	httpResp, err := p.client.Do(req)
-	if err != nil {
-		return ModelInfo{}, fmt.Errorf("http request: %w", err)
-	}
-	defer func() { _ = httpResp.Body.Close() }()
-
-	if httpResp.StatusCode >= 400 {
-		// Limit and redact error body to prevent API key
-		// echo-back from leaking into logs.
-		bodyBytes, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1024))
-		return ModelInfo{}, fmt.Errorf(
-			"openai returned status %d: %s",
-			httpResp.StatusCode, redact.SecretString(string(bodyBytes)),
-		)
-	}
-
 	// The real OpenAI /v1/models/{model} endpoint does NOT return
 	// context_length or max_context_length. The struct fields will
 	// always decode to 0. We check them for forward-compat with
@@ -293,8 +292,11 @@ func (p *openaiProvider) fetchModelInfo(
 			MaxContextLength int `json:"max_context_length"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(httpResp.Body).Decode(&resp); err != nil {
-		return ModelInfo{}, fmt.Errorf("decode response: %w", err)
+	if err := fetchModelJSON(
+		ctx, p.client, p.baseURL+"/v1/models/"+model, "openai",
+		&resp, p.requestHeaders(),
+	); err != nil {
+		return ModelInfo{}, err
 	}
 
 	cw := resp.Data.ContextLength
@@ -332,6 +334,31 @@ func (p *openaiProvider) ModelInfo(
 		model = p.model
 	}
 	return FetchModelInfo(ctx, p, model, p.cfg)
+}
+
+// Fetches available models from the OpenAI /v1/models endpoint. The
+// list API returns no capability metadata, so only IDs are populated.
+func (p *openaiProvider) ListModels(
+	ctx context.Context, _ string,
+) ([]ModelSummary, error) {
+	var resp struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := fetchModelJSON(
+		ctx, p.client, p.baseURL+"/v1/models", "openai",
+		&resp, p.requestHeaders(),
+	); err != nil {
+		return nil, err
+	}
+
+	models := make([]ModelSummary, len(resp.Data))
+	for i, m := range resp.Data {
+		models[i] = ModelSummary{ID: m.ID}
+	}
+
+	return models, nil
 }
 
 // Known context windows for OpenAI models.
@@ -581,12 +608,25 @@ func (p *openaiProvider) doRequest(
 		fmt.Errorf("openai request failed after retries: %w", lastErr)
 }
 
-// Sets Authorization, Content-Type, and optional OpenAI-Organization headers.
-func (p *openaiProvider) setHeaders(req *http.Request) {
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+p.apiKey)
+// Returns the headers every OpenAI request carries: content type,
+// bearer token, and the optional organization ID.
+func (p *openaiProvider) requestHeaders() http.Header {
+	h := http.Header{}
+	h.Set("Content-Type", "application/json")
+	h.Set("Authorization", "Bearer "+p.apiKey)
 	if p.orgID != "" {
-		req.Header.Set("OpenAI-Organization", p.orgID)
+		h.Set("OpenAI-Organization", p.orgID)
+	}
+
+	return h
+}
+
+// Applies the standard headers to a request.
+func (p *openaiProvider) setHeaders(req *http.Request) {
+	for k, v := range p.requestHeaders() {
+		for _, val := range v {
+			req.Header.Set(k, val)
+		}
 	}
 }
 

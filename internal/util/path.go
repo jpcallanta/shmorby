@@ -2,6 +2,7 @@
 package util
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,4 +19,20 @@ func ExpandPath(path string) string {
 	}
 
 	return path
+}
+
+// Detects PNG and JPEG data by magic bytes. Returns the media type
+// ("image/png", "image/jpeg") and file extension (".png", ".jpg");
+// both empty when data is not a recognized image format.
+func SniffImageType(data []byte) (mediaType, ext string) {
+	switch {
+	case bytes.HasPrefix(data, []byte("\x89PNG\r\n\x1a\n")):
+
+		return "image/png", ".png"
+	case bytes.HasPrefix(data, []byte("\xff\xd8\xff")):
+
+		return "image/jpeg", ".jpg"
+	}
+
+	return "", ""
 }

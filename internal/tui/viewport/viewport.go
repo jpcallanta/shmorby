@@ -158,6 +158,11 @@ func (m *Model) NotifyContentAdded() {
 	}
 }
 
+// Sets the new content indicator state.
+func (m *Model) SetNewContent(hasNew bool) {
+	m.newContent = hasNew
+}
+
 // Reports whether output selection is active.
 func (m Model) SelectionMode() bool {
 	return m.selectionMode

@@ -22,6 +22,9 @@ Correctness > clarity > least disruption. State the choice when tradeoffs confli
 - Functions: small, testable units; break only when needed for correctness
 - Errors: return on fatal; wrap `fmt.Errorf("ctx: %w", err)`
 - Tests: `TestFuncName_Scenario[_ExpectedOutcome]`; errors "want X, got Y"
+- Approval changes must keep request/decision persistence synchronous,
+  link decisions to executions, fail closed on timeout/storage errors,
+  and cover timeout/restart behavior in tests.
 - Structure: Cobra `RunE` for failing commands; flags in package `var ()`;
   register in `init()`
 - Imports: stdlib, blank line, third-party (`goimports`)

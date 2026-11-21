@@ -16,3 +16,9 @@ type Provider interface {
 type SessionProvider interface {
 	SetSessionID(id string)
 }
+
+// ModelLister is an optional interface that providers may implement
+// to list available models from the platform.
+type ModelLister interface {
+	ListModels(ctx context.Context, model string) ([]ModelSummary, error)
+}

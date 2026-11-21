@@ -3,6 +3,36 @@ package styles
 
 import "github.com/charmbracelet/lipgloss"
 
+// Palette holds the named color roles a Theme is built from. All
+// roles are required; external theme files must define every one.
+type Palette struct {
+	Base      lipgloss.Color
+	Mantle    lipgloss.Color
+	Surface0  lipgloss.Color
+	Surface1  lipgloss.Color
+	Surface2  lipgloss.Color
+	Overlay0  lipgloss.Color
+	Overlay1  lipgloss.Color
+	Overlay2  lipgloss.Color
+	Subtext0  lipgloss.Color
+	Subtext1  lipgloss.Color
+	Text      lipgloss.Color
+	Lavender  lipgloss.Color
+	Blue      lipgloss.Color
+	Sapphire  lipgloss.Color
+	Sky       lipgloss.Color
+	Teal      lipgloss.Color
+	Green     lipgloss.Color
+	Yellow    lipgloss.Color
+	Peach     lipgloss.Color
+	Red       lipgloss.Color
+	Maroon    lipgloss.Color
+	Pink      lipgloss.Color
+	Mauve     lipgloss.Color
+	Flamingo  lipgloss.Color
+	Rosewater lipgloss.Color
+}
+
 // Theme holds all lipgloss styles for the TUI.
 type Theme struct {
 	PromptNormal lipgloss.Style
@@ -33,368 +63,231 @@ type Theme struct {
 	ModeOperate lipgloss.Style
 	ModeDiag    lipgloss.Style
 	ModeChat    lipgloss.Style
-	WhichKey    lipgloss.Style
 	FilterBox   lipgloss.Style
 }
 
-// Catppuccin Mocha palette.
-var (
-	Base      = lipgloss.Color("#1e1e2e")
-	Mantle    = lipgloss.Color("#181825")
-	Surface0  = lipgloss.Color("#313244")
-	Surface1  = lipgloss.Color("#45475a")
-	Surface2  = lipgloss.Color("#585b70")
-	Overlay0  = lipgloss.Color("#6c7086")
-	Overlay1  = lipgloss.Color("#7f849c")
-	Overlay2  = lipgloss.Color("#9399b2")
-	Subtext0  = lipgloss.Color("#a6adc8")
-	Subtext1  = lipgloss.Color("#bac2de")
-	Text      = lipgloss.Color("#cdd6f4")
-	Lavender  = lipgloss.Color("#b4befe")
-	Blue      = lipgloss.Color("#89b4fa")
-	Sapphire  = lipgloss.Color("#74c7ec")
-	Sky       = lipgloss.Color("#89dceb")
-	Teal      = lipgloss.Color("#94e2d5")
-	Green     = lipgloss.Color("#a6e3a1")
-	Yellow    = lipgloss.Color("#f9e2af")
-	Peach     = lipgloss.Color("#fab387")
-	Red       = lipgloss.Color("#f38ba8")
-	Maroon    = lipgloss.Color("#eba0ac")
-	Pink      = lipgloss.Color("#f5c2e7")
-	Mauve     = lipgloss.Color("#cba6f7")
-	Flamingo  = lipgloss.Color("#f2cdcd")
-	Rosewater = lipgloss.Color("#f5e0dc")
-)
+// Mocha palette (default).
+var MochaPalette = Palette{
+	Base:      "#1e1e2e",
+	Mantle:    "#181825",
+	Surface0:  "#313244",
+	Surface1:  "#45475a",
+	Surface2:  "#585b70",
+	Overlay0:  "#6c7086",
+	Overlay1:  "#7f849c",
+	Overlay2:  "#9399b2",
+	Subtext0:  "#a6adc8",
+	Subtext1:  "#bac2de",
+	Text:      "#cdd6f4",
+	Lavender:  "#b4befe",
+	Blue:      "#89b4fa",
+	Sapphire:  "#74c7ec",
+	Sky:       "#89dceb",
+	Teal:      "#94e2d5",
+	Green:     "#a6e3a1",
+	Yellow:    "#f9e2af",
+	Peach:     "#fab387",
+	Red:       "#f38ba8",
+	Maroon:    "#eba0ac",
+	Pink:      "#f5c2e7",
+	Mauve:     "#cba6f7",
+	Flamingo:  "#f2cdcd",
+	Rosewater: "#f5e0dc",
+}
 
 // Latte palette (light theme).
-var (
-	LatteBase      = lipgloss.Color("#eff1f5")
-	LatteMantle    = lipgloss.Color("#e6e9ef")
-	LatteSurface0  = lipgloss.Color("#ccd0da")
-	LatteSurface1  = lipgloss.Color("#bcc0cc")
-	LatteSurface2  = lipgloss.Color("#acb0be")
-	LatteOverlay0  = lipgloss.Color("#9ca0b0")
-	LatteOverlay1  = lipgloss.Color("#8c8fa1")
-	LatteOverlay2  = lipgloss.Color("#7c7f93")
-	LatteSubtext0  = lipgloss.Color("#6c6f85")
-	LatteSubtext1  = lipgloss.Color("#5c5f77")
-	LatteText      = lipgloss.Color("#4c4f69")
-	LatteLavender  = lipgloss.Color("#7287fd")
-	LatteBlue      = lipgloss.Color("#1e66f5")
-	LatteSapphire  = lipgloss.Color("#209fb5")
-	LatteSky       = lipgloss.Color("#04a5e5")
-	LatteTeal      = lipgloss.Color("#179299")
-	LatteGreen     = lipgloss.Color("#40a02b")
-	LatteYellow    = lipgloss.Color("#df8e1d")
-	LattePeach     = lipgloss.Color("#fe640b")
-	LatteRed       = lipgloss.Color("#d20f39")
-	LatteMaroon    = lipgloss.Color("#e64553")
-	LattePink      = lipgloss.Color("#ea76cb")
-	LatteMauve     = lipgloss.Color("#8839ef")
-	LatteFlamingo  = lipgloss.Color("#dd7878")
-	LatteRosewater = lipgloss.Color("#dc8a78")
-)
+var LattePalette = Palette{
+	Base:      "#eff1f5",
+	Mantle:    "#e6e9ef",
+	Surface0:  "#ccd0da",
+	Surface1:  "#bcc0cc",
+	Surface2:  "#acb0be",
+	Overlay0:  "#9ca0b0",
+	Overlay1:  "#8c8fa1",
+	Overlay2:  "#7c7f93",
+	Subtext0:  "#6c6f85",
+	Subtext1:  "#5c5f77",
+	Text:      "#4c4f69",
+	Lavender:  "#7287fd",
+	Blue:      "#1e66f5",
+	Sapphire:  "#209fb5",
+	Sky:       "#04a5e5",
+	Teal:      "#179299",
+	Green:     "#40a02b",
+	Yellow:    "#df8e1d",
+	Peach:     "#fe640b",
+	Red:       "#d20f39",
+	Maroon:    "#e64553",
+	Pink:      "#ea76cb",
+	Mauve:     "#8839ef",
+	Flamingo:  "#dd7878",
+	Rosewater: "#dc8a78",
+}
 
 // Frappe palette.
-var (
-	FrappeBase      = lipgloss.Color("#303446")
-	FrappeMantle    = lipgloss.Color("#292c3c")
-	FrappeSurface0  = lipgloss.Color("#414559")
-	FrappeSurface1  = lipgloss.Color("#51576d")
-	FrappeSurface2  = lipgloss.Color("#626880")
-	FrappeOverlay0  = lipgloss.Color("#737994")
-	FrappeOverlay1  = lipgloss.Color("#838ba7")
-	FrappeOverlay2  = lipgloss.Color("#949cba")
-	FrappeSubtext0  = lipgloss.Color("#a5adce")
-	FrappeSubtext1  = lipgloss.Color("#b5bfe2")
-	FrappeText      = lipgloss.Color("#c6d0f5")
-	FrappeLavender  = lipgloss.Color("#babbf1")
-	FrappeBlue      = lipgloss.Color("#8caaee")
-	FrappeSapphire  = lipgloss.Color("#85c1dc")
-	FrappeSky       = lipgloss.Color("#99d1db")
-	FrappeTeal      = lipgloss.Color("#81c8be")
-	FrappeGreen     = lipgloss.Color("#a6d189")
-	FrappeYellow    = lipgloss.Color("#e5c890")
-	FrappePeach     = lipgloss.Color("#ef9f76")
-	FrappeRed       = lipgloss.Color("#e78284")
-	FrappeMaroon    = lipgloss.Color("#ea999c")
-	FrappePink      = lipgloss.Color("#f4b8e4")
-	FrappeMauve     = lipgloss.Color("#ca9ee6")
-	FrappeFlamingo  = lipgloss.Color("#eebebe")
-	FrappeRosewater = lipgloss.Color("#f2d5cf")
-)
+var FrappePalette = Palette{
+	Base:      "#303446",
+	Mantle:    "#292c3c",
+	Surface0:  "#414559",
+	Surface1:  "#51576d",
+	Surface2:  "#626880",
+	Overlay0:  "#737994",
+	Overlay1:  "#838ba7",
+	Overlay2:  "#949cba",
+	Subtext0:  "#a5adce",
+	Subtext1:  "#b5bfe2",
+	Text:      "#c6d0f5",
+	Lavender:  "#babbf1",
+	Blue:      "#8caaee",
+	Sapphire:  "#85c1dc",
+	Sky:       "#99d1db",
+	Teal:      "#81c8be",
+	Green:     "#a6d189",
+	Yellow:    "#e5c890",
+	Peach:     "#ef9f76",
+	Red:       "#e78284",
+	Maroon:    "#ea999c",
+	Pink:      "#f4b8e4",
+	Mauve:     "#ca9ee6",
+	Flamingo:  "#eebebe",
+	Rosewater: "#f2d5cf",
+}
 
 // Macchiato palette.
+var MacchiatoPalette = Palette{
+	Base:      "#24273a",
+	Mantle:    "#1e2030",
+	Surface0:  "#363a4f",
+	Surface1:  "#494d64",
+	Surface2:  "#5b6078",
+	Overlay0:  "#6e738d",
+	Overlay1:  "#8087a2",
+	Overlay2:  "#939ab7",
+	Subtext0:  "#a5adcb",
+	Subtext1:  "#b8c0e0",
+	Text:      "#cad3f5",
+	Lavender:  "#b7bdf8",
+	Blue:      "#8aadf4",
+	Sapphire:  "#7dc4e4",
+	Sky:       "#91d7e3",
+	Teal:      "#8bd5ca",
+	Green:     "#a6da95",
+	Yellow:    "#eed49f",
+	Peach:     "#f5a97f",
+	Red:       "#ed8796",
+	Maroon:    "#ee99a0",
+	Pink:      "#f5bde6",
+	Mauve:     "#c6a0f6",
+	Flamingo:  "#f0c6c6",
+	Rosewater: "#f4dbd6",
+}
+
+// Package-level color roles for styles built outside Theme.
 var (
-	MacchiatoBase      = lipgloss.Color("#24273a")
-	MacchiatoMantle    = lipgloss.Color("#1e2030")
-	MacchiatoSurface0  = lipgloss.Color("#363a4f")
-	MacchiatoSurface1  = lipgloss.Color("#494d64")
-	MacchiatoSurface2  = lipgloss.Color("#5b6078")
-	MacchiatoOverlay0  = lipgloss.Color("#6e738d")
-	MacchiatoOverlay1  = lipgloss.Color("#8087a2")
-	MacchiatoOverlay2  = lipgloss.Color("#939ab7")
-	MacchiatoSubtext0  = lipgloss.Color("#a5adcb")
-	MacchiatoSubtext1  = lipgloss.Color("#b8c0e0")
-	MacchiatoText      = lipgloss.Color("#cad3f5")
-	MacchiatoLavender  = lipgloss.Color("#b7bdf8")
-	MacchiatoBlue      = lipgloss.Color("#8aadf4")
-	MacchiatoSapphire  = lipgloss.Color("#7dc4e4")
-	MacchiatoSky       = lipgloss.Color("#91d7e3")
-	MacchiatoTeal      = lipgloss.Color("#8bd5ca")
-	MacchiatoGreen     = lipgloss.Color("#a6da95")
-	MacchiatoYellow    = lipgloss.Color("#eed49f")
-	MacchiatoPeach     = lipgloss.Color("#f5a97f")
-	MacchiatoRed       = lipgloss.Color("#ed8796")
-	MacchiatoMaroon    = lipgloss.Color("#ee99a0")
-	MacchiatoPink      = lipgloss.Color("#f5bde6")
-	MacchiatoMauve     = lipgloss.Color("#c6a0f6")
-	MacchiatoFlamingo  = lipgloss.Color("#f0c6c6")
-	MacchiatoRosewater = lipgloss.Color("#f4dbd6")
+	Base      = MochaPalette.Base
+	Mantle    = MochaPalette.Mantle
+	Surface0  = MochaPalette.Surface0
+	Surface1  = MochaPalette.Surface1
+	Surface2  = MochaPalette.Surface2
+	Overlay0  = MochaPalette.Overlay0
+	Overlay1  = MochaPalette.Overlay1
+	Overlay2  = MochaPalette.Overlay2
+	Subtext0  = MochaPalette.Subtext0
+	Subtext1  = MochaPalette.Subtext1
+	Text      = MochaPalette.Text
+	Lavender  = MochaPalette.Lavender
+	Blue      = MochaPalette.Blue
+	Sapphire  = MochaPalette.Sapphire
+	Sky       = MochaPalette.Sky
+	Teal      = MochaPalette.Teal
+	Green     = MochaPalette.Green
+	Yellow    = MochaPalette.Yellow
+	Peach     = MochaPalette.Peach
+	Red       = MochaPalette.Red
+	Maroon    = MochaPalette.Maroon
+	Pink      = MochaPalette.Pink
+	Mauve     = MochaPalette.Mauve
+	Flamingo  = MochaPalette.Flamingo
+	Rosewater = MochaPalette.Rosewater
 )
+
+// newTheme builds a Theme from a palette using the role-to-style
+// mapping shared by built-in and external themes.
+func newTheme(p Palette) Theme {
+	return Theme{
+		PromptNormal: lipgloss.NewStyle().Foreground(p.Overlay2),
+		PromptActive: lipgloss.NewStyle().Foreground(p.Mauve),
+		Separator:    lipgloss.NewStyle().Foreground(p.Surface2),
+		Spinner:      lipgloss.NewStyle().Foreground(p.Yellow),
+		StatusKey:    lipgloss.NewStyle().Foreground(p.Overlay1),
+		StatusValue:  lipgloss.NewStyle().Foreground(p.Text),
+		UserInput:    lipgloss.NewStyle().Foreground(p.Subtext0),
+		AgentReply:   lipgloss.NewStyle().Foreground(p.Text),
+		ToolRunning:  lipgloss.NewStyle().Foreground(p.Sky),
+		ToolSuccess:  lipgloss.NewStyle().Foreground(p.Green),
+		ToolError:    lipgloss.NewStyle().Foreground(p.Red),
+		Error:        lipgloss.NewStyle().Foreground(p.Red),
+		PermPrompt:   lipgloss.NewStyle().Foreground(p.Peach),
+		PermAllow:    lipgloss.NewStyle().Foreground(p.Green),
+		PermDeny:     lipgloss.NewStyle().Foreground(p.Red),
+		Selection: lipgloss.NewStyle().
+			Background(p.Surface2).
+			Foreground(p.Text),
+		PopupTitle: lipgloss.NewStyle().
+			Foreground(p.Mauve).
+			Bold(true),
+		PopupItem: lipgloss.NewStyle().
+			Foreground(p.Text),
+		PopupSelect: lipgloss.NewStyle().
+			Foreground(p.Base).
+			Background(p.Mauve),
+		PopupDesc: lipgloss.NewStyle().
+			Foreground(p.Overlay1),
+		TabActive: lipgloss.NewStyle().
+			Foreground(p.Base).
+			Background(p.Blue).
+			Bold(true),
+		TabInactive: lipgloss.NewStyle().
+			Foreground(p.Overlay1).
+			Background(p.Surface0),
+		TabSpin: lipgloss.NewStyle().
+			Foreground(p.Yellow).
+			Background(p.Surface0),
+		TabOverflow: lipgloss.NewStyle().
+			Foreground(p.Overlay1),
+		ModeOperate: lipgloss.NewStyle().
+			Foreground(p.Green).
+			Bold(true),
+		ModeDiag: lipgloss.NewStyle().
+			Foreground(p.Peach).
+			Bold(true),
+		ModeChat: lipgloss.NewStyle().
+			Foreground(p.Teal).
+			Bold(true),
+		FilterBox: lipgloss.NewStyle().
+			Foreground(p.Text).
+			Background(p.Surface0),
+	}
+}
 
 // DefaultTheme returns the Catppuccin Mocha theme.
 func DefaultTheme() Theme {
-	return Theme{
-		PromptNormal: lipgloss.NewStyle().Foreground(Overlay2),
-		PromptActive: lipgloss.NewStyle().Foreground(Mauve),
-		Separator:    lipgloss.NewStyle().Foreground(Surface2),
-		Spinner:      lipgloss.NewStyle().Foreground(Yellow),
-		StatusKey:    lipgloss.NewStyle().Foreground(Overlay1),
-		StatusValue:  lipgloss.NewStyle().Foreground(Text),
-		UserInput:    lipgloss.NewStyle().Foreground(Subtext0),
-		AgentReply:   lipgloss.NewStyle().Foreground(Text),
-		ToolRunning:  lipgloss.NewStyle().Foreground(Sky),
-		ToolSuccess:  lipgloss.NewStyle().Foreground(Green),
-		ToolError:    lipgloss.NewStyle().Foreground(Red),
-		Error:        lipgloss.NewStyle().Foreground(Red),
-		PermPrompt:   lipgloss.NewStyle().Foreground(Peach),
-		PermAllow:    lipgloss.NewStyle().Foreground(Green),
-		PermDeny:     lipgloss.NewStyle().Foreground(Red),
-		Selection: lipgloss.NewStyle().
-			Background(Surface2).
-			Foreground(Text),
-		PopupTitle: lipgloss.NewStyle().
-			Foreground(Mauve).
-			Bold(true),
-		PopupItem: lipgloss.NewStyle().
-			Foreground(Text),
-		PopupSelect: lipgloss.NewStyle().
-			Foreground(Base).
-			Background(Mauve),
-		PopupDesc: lipgloss.NewStyle().
-			Foreground(Overlay1),
-		TabActive: lipgloss.NewStyle().
-			Foreground(Base).
-			Background(Blue).
-			Bold(true),
-		TabInactive: lipgloss.NewStyle().
-			Foreground(Overlay1).
-			Background(Surface0),
-		TabSpin: lipgloss.NewStyle().
-			Foreground(Yellow).
-			Background(Surface0),
-		TabOverflow: lipgloss.NewStyle().
-			Foreground(Overlay1),
-		ModeOperate: lipgloss.NewStyle().
-			Foreground(Green).
-			Bold(true),
-		ModeDiag: lipgloss.NewStyle().
-			Foreground(Peach).
-			Bold(true),
-		ModeChat: lipgloss.NewStyle().
-			Foreground(Teal).
-			Bold(true),
-		WhichKey: lipgloss.NewStyle().
-			Foreground(Overlay2).
-			Background(Surface0),
-		FilterBox: lipgloss.NewStyle().
-			Foreground(Text).
-			Background(Surface0),
-	}
+	return newTheme(MochaPalette)
 }
 
 // LatteTheme returns the Catppuccin Latte (light) theme.
 func LatteTheme() Theme {
-	return Theme{
-		PromptNormal: lipgloss.NewStyle().Foreground(LatteOverlay2),
-		PromptActive: lipgloss.NewStyle().Foreground(LatteMauve),
-		Separator:    lipgloss.NewStyle().Foreground(LatteSurface2),
-		Spinner:      lipgloss.NewStyle().Foreground(LatteYellow),
-		StatusKey:    lipgloss.NewStyle().Foreground(LatteOverlay1),
-		StatusValue:  lipgloss.NewStyle().Foreground(LatteText),
-		UserInput:    lipgloss.NewStyle().Foreground(LatteSubtext0),
-		AgentReply:   lipgloss.NewStyle().Foreground(LatteText),
-		ToolRunning:  lipgloss.NewStyle().Foreground(LatteSky),
-		ToolSuccess:  lipgloss.NewStyle().Foreground(LatteGreen),
-		ToolError:    lipgloss.NewStyle().Foreground(LatteRed),
-		Error:        lipgloss.NewStyle().Foreground(LatteRed),
-		PermPrompt:   lipgloss.NewStyle().Foreground(LattePeach),
-		PermAllow:    lipgloss.NewStyle().Foreground(LatteGreen),
-		PermDeny:     lipgloss.NewStyle().Foreground(LatteRed),
-		Selection: lipgloss.NewStyle().
-			Background(LatteSurface2).
-			Foreground(LatteText),
-		PopupTitle: lipgloss.NewStyle().
-			Foreground(LatteMauve).
-			Bold(true),
-		PopupItem: lipgloss.NewStyle().
-			Foreground(LatteText),
-		PopupSelect: lipgloss.NewStyle().
-			Foreground(LatteBase).
-			Background(LatteMauve),
-		PopupDesc: lipgloss.NewStyle().
-			Foreground(LatteOverlay1),
-		TabActive: lipgloss.NewStyle().
-			Foreground(LatteBase).
-			Background(LatteBlue).
-			Bold(true),
-		TabInactive: lipgloss.NewStyle().
-			Foreground(LatteOverlay1).
-			Background(LatteSurface0),
-		TabSpin: lipgloss.NewStyle().
-			Foreground(LatteYellow).
-			Background(LatteSurface0),
-		TabOverflow: lipgloss.NewStyle().
-			Foreground(LatteOverlay1),
-		ModeOperate: lipgloss.NewStyle().
-			Foreground(LatteGreen).
-			Bold(true),
-		ModeDiag: lipgloss.NewStyle().
-			Foreground(LattePeach).
-			Bold(true),
-		ModeChat: lipgloss.NewStyle().
-			Foreground(LatteTeal).
-			Bold(true),
-		WhichKey: lipgloss.NewStyle().
-			Foreground(LatteOverlay2).
-			Background(LatteSurface0),
-		FilterBox: lipgloss.NewStyle().
-			Foreground(LatteText).
-			Background(LatteSurface0),
-	}
+	return newTheme(LattePalette)
 }
 
 // FrappeTheme returns the Catppuccin Frappe theme.
 func FrappeTheme() Theme {
-	return Theme{
-		PromptNormal: lipgloss.NewStyle().Foreground(FrappeOverlay2),
-		PromptActive: lipgloss.NewStyle().Foreground(FrappeMauve),
-		Separator:    lipgloss.NewStyle().Foreground(FrappeSurface2),
-		Spinner:      lipgloss.NewStyle().Foreground(FrappeYellow),
-		StatusKey:    lipgloss.NewStyle().Foreground(FrappeOverlay1),
-		StatusValue:  lipgloss.NewStyle().Foreground(FrappeText),
-		UserInput:    lipgloss.NewStyle().Foreground(FrappeSubtext0),
-		AgentReply:   lipgloss.NewStyle().Foreground(FrappeText),
-		ToolRunning:  lipgloss.NewStyle().Foreground(FrappeSky),
-		ToolSuccess:  lipgloss.NewStyle().Foreground(FrappeGreen),
-		ToolError:    lipgloss.NewStyle().Foreground(FrappeRed),
-		Error:        lipgloss.NewStyle().Foreground(FrappeRed),
-		PermPrompt:   lipgloss.NewStyle().Foreground(FrappePeach),
-		PermAllow:    lipgloss.NewStyle().Foreground(FrappeGreen),
-		PermDeny:     lipgloss.NewStyle().Foreground(FrappeRed),
-		Selection: lipgloss.NewStyle().
-			Background(FrappeSurface2).
-			Foreground(FrappeText),
-		PopupTitle: lipgloss.NewStyle().
-			Foreground(FrappeMauve).
-			Bold(true),
-		PopupItem: lipgloss.NewStyle().
-			Foreground(FrappeText),
-		PopupSelect: lipgloss.NewStyle().
-			Foreground(FrappeBase).
-			Background(FrappeMauve),
-		PopupDesc: lipgloss.NewStyle().
-			Foreground(FrappeOverlay1),
-		TabActive: lipgloss.NewStyle().
-			Foreground(FrappeBase).
-			Background(FrappeBlue).
-			Bold(true),
-		TabInactive: lipgloss.NewStyle().
-			Foreground(FrappeOverlay1).
-			Background(FrappeSurface0),
-		TabSpin: lipgloss.NewStyle().
-			Foreground(FrappeYellow).
-			Background(FrappeSurface0),
-		TabOverflow: lipgloss.NewStyle().
-			Foreground(FrappeOverlay1),
-		ModeOperate: lipgloss.NewStyle().
-			Foreground(FrappeGreen).
-			Bold(true),
-		ModeDiag: lipgloss.NewStyle().
-			Foreground(FrappePeach).
-			Bold(true),
-		ModeChat: lipgloss.NewStyle().
-			Foreground(FrappeTeal).
-			Bold(true),
-		WhichKey: lipgloss.NewStyle().
-			Foreground(FrappeOverlay2).
-			Background(FrappeSurface0),
-		FilterBox: lipgloss.NewStyle().
-			Foreground(FrappeText).
-			Background(FrappeSurface0),
-	}
+	return newTheme(FrappePalette)
 }
 
 // MacchiatoTheme returns the Catppuccin Macchiato theme.
 func MacchiatoTheme() Theme {
-	return Theme{
-		PromptNormal: lipgloss.NewStyle().Foreground(MacchiatoOverlay2),
-		PromptActive: lipgloss.NewStyle().Foreground(MacchiatoMauve),
-		Separator:    lipgloss.NewStyle().Foreground(MacchiatoSurface2),
-		Spinner:      lipgloss.NewStyle().Foreground(MacchiatoYellow),
-		StatusKey:    lipgloss.NewStyle().Foreground(MacchiatoOverlay1),
-		StatusValue:  lipgloss.NewStyle().Foreground(MacchiatoText),
-		UserInput:    lipgloss.NewStyle().Foreground(MacchiatoSubtext0),
-		AgentReply:   lipgloss.NewStyle().Foreground(MacchiatoText),
-		ToolRunning:  lipgloss.NewStyle().Foreground(MacchiatoSky),
-		ToolSuccess:  lipgloss.NewStyle().Foreground(MacchiatoGreen),
-		ToolError:    lipgloss.NewStyle().Foreground(MacchiatoRed),
-		Error:        lipgloss.NewStyle().Foreground(MacchiatoRed),
-		PermPrompt:   lipgloss.NewStyle().Foreground(MacchiatoPeach),
-		PermAllow:    lipgloss.NewStyle().Foreground(MacchiatoGreen),
-		PermDeny:     lipgloss.NewStyle().Foreground(MacchiatoRed),
-		Selection: lipgloss.NewStyle().
-			Background(MacchiatoSurface2).
-			Foreground(MacchiatoText),
-		PopupTitle: lipgloss.NewStyle().
-			Foreground(MacchiatoMauve).
-			Bold(true),
-		PopupItem: lipgloss.NewStyle().
-			Foreground(MacchiatoText),
-		PopupSelect: lipgloss.NewStyle().
-			Foreground(MacchiatoBase).
-			Background(MacchiatoMauve),
-		PopupDesc: lipgloss.NewStyle().
-			Foreground(MacchiatoOverlay1),
-		TabActive: lipgloss.NewStyle().
-			Foreground(MacchiatoBase).
-			Background(MacchiatoBlue).
-			Bold(true),
-		TabInactive: lipgloss.NewStyle().
-			Foreground(MacchiatoOverlay1).
-			Background(MacchiatoSurface0),
-		TabSpin: lipgloss.NewStyle().
-			Foreground(MacchiatoYellow).
-			Background(MacchiatoSurface0),
-		TabOverflow: lipgloss.NewStyle().
-			Foreground(MacchiatoOverlay1),
-		ModeOperate: lipgloss.NewStyle().
-			Foreground(MacchiatoGreen).
-			Bold(true),
-		ModeDiag: lipgloss.NewStyle().
-			Foreground(MacchiatoPeach).
-			Bold(true),
-		ModeChat: lipgloss.NewStyle().
-			Foreground(MacchiatoTeal).
-			Bold(true),
-		WhichKey: lipgloss.NewStyle().
-			Foreground(MacchiatoOverlay2).
-			Background(MacchiatoSurface0),
-		FilterBox: lipgloss.NewStyle().
-			Foreground(MacchiatoText).
-			Background(MacchiatoSurface0),
-	}
+	return newTheme(MacchiatoPalette)
 }
 
 // MinimalTheme returns a monochrome theme with no color.
@@ -427,7 +320,6 @@ func MinimalTheme() Theme {
 		ModeOperate:  lipgloss.NewStyle().Bold(true),
 		ModeDiag:     lipgloss.NewStyle().Bold(true),
 		ModeChat:     lipgloss.NewStyle().Bold(true),
-		WhichKey:     lipgloss.NewStyle(),
 		FilterBox:    lipgloss.NewStyle(),
 	}
 }

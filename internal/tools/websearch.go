@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"shmorby/internal/audit"
+	"shmorby/internal/execution"
 	"shmorby/internal/health"
 )
 
@@ -182,13 +183,21 @@ func (w *WebSearchTool) Run(
 	)
 
 	errMsg := ""
+	var runErr error
 	if err != nil {
 		errMsg = err.Error()
+		runErr = health.Wrap("websearch", elapsed, err)
 	}
-	w.logAudit(string(args), elapsed, errMsg)
+	if auditErr := w.logAudit(
+		ctx, string(args), elapsed, errMsg,
+	); auditErr != nil {
+		auditErr = fmt.Errorf("websearch audit: %w", auditErr)
 
-	if err != nil {
-		return result, health.Wrap("websearch", elapsed, err)
+		return result, joinAuditErr(runErr, auditErr)
+	}
+
+	if runErr != nil {
+		return result, runErr
 	}
 
 	return string(TruncateOutput([]byte(result))), nil
@@ -351,20 +360,26 @@ func formatResults(results []searchResult) string {
 
 // Sends a tool-run entry to the audit logger if configured.
 func (w *WebSearchTool) logAudit(
-	args string, duration time.Duration, errMsg string,
-) {
+	ctx context.Context, args string, duration time.Duration,
+	errMsg string,
+) error {
 	if w.auditLogger == nil {
-		return
+		return nil
 	}
 	// Redact args before audit logging to prevent secrets embedded
 	// in search URLs from persisting in plaintext in the SQLite
 	// audit database.
-	w.auditLogger.LogToolRun(
+	return w.auditLogger.LogToolRun(
 		audit.AuditEntry{
-			Tool:       "websearch",
-			Args:       string(RedactArgs([]byte(args))),
-			DurationMs: duration.Milliseconds(),
-			Error:      errMsg,
+			SessionID:   SessionIDFrom(ctx),
+			InputID:     InputIDFrom(ctx),
+			ExecutionID: executionIDFromContext(ctx),
+			MessageID:   execution.MessageIDFrom(ctx),
+			ToolCallID:  execution.ToolCallIDFrom(ctx),
+			Tool:        "websearch",
+			Args:        string(RedactArgs([]byte(args))),
+			DurationMs:  duration.Milliseconds(),
+			Error:       errMsg,
 		},
 		nil,
 	)

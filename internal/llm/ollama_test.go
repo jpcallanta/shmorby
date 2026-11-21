@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -630,5 +631,146 @@ func TestNewProvider_UnknownError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unknown provider") {
 		t.Errorf("want 'unknown provider' in error, got: %v", err)
+	}
+}
+
+// Tests that image-bearing user messages populate the images array
+// with raw base64 and text-only messages omit the field entirely.
+func TestOllamaChat_ImagesRequest(t *testing.T) {
+	var gotImages []string
+
+	srv := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			var req ollamaRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			for _, m := range req.Messages {
+				if m.Role == "user" {
+					gotImages = m.Images
+				}
+			}
+
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(ollamaResponseJSON(t,
+				ollamaMessage{
+					Role:    "assistant",
+					Content: strPtr("ok"),
+				},
+				"stop",
+			)))
+		},
+	))
+	defer srv.Close()
+
+	p := newOllamaProvider(srv.URL, "test-model", config.Config{})
+
+	_, err := p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{
+			{
+				Role:    "user",
+				Content: "describe this",
+				Images: []ImageData{
+					{MediaType: "image/png", Data: []byte("\x89PNG-fake")},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	want := []string{
+		base64.StdEncoding.EncodeToString([]byte("\x89PNG-fake")),
+	}
+	if len(gotImages) != 1 || gotImages[0] != want[0] {
+		t.Errorf("want images %v, got %v", want, gotImages)
+	}
+
+	// Text-only messages must not carry an images field.
+	gotImages = nil
+	if _, err := p.Chat(context.Background(), ChatRequest{
+		Messages: []Message{{Role: "user", Content: "plain text"}},
+	}); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if gotImages != nil {
+		t.Errorf("want no images field for text-only, got %v", gotImages)
+	}
+}
+
+// Tests the /api/show capabilities parse: presence of "vision" sets
+// SupportsVision.
+func TestOllamaFetchModelInfo_VisionCapability(t *testing.T) {
+	cases := []struct {
+		name         string
+		capabilities []string
+		wantVision   bool
+	}{
+		{
+			name:         "with vision",
+			capabilities: []string{"vision", "tools"},
+			wantVision:   true,
+		},
+		{name: "without vision", capabilities: []string{"tools"}, wantVision: false},
+		{name: "no capabilities", capabilities: nil, wantVision: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(
+				func(w http.ResponseWriter, r *http.Request) {
+					if !strings.HasSuffix(r.URL.Path, "/api/show") {
+						t.Errorf("want /api/show, got %s", r.URL.Path)
+					}
+					body := map[string]any{
+						"model_info": map[string]any{
+							"context_length": 8192,
+						},
+					}
+					if tc.capabilities != nil {
+						body["capabilities"] = tc.capabilities
+					}
+					w.Header().Set("Content-Type", "application/json")
+					_ = json.NewEncoder(w).Encode(body)
+				},
+			))
+			defer srv.Close()
+
+			p := newOllamaProvider(srv.URL, "llava", config.Config{})
+			info, err := p.fetchModelInfo(context.Background(), "llava")
+			if err != nil {
+				t.Fatalf("fetchModelInfo: %v", err)
+			}
+			if info.SupportsVision != tc.wantVision {
+				t.Errorf("want SupportsVision %v, got %v",
+					tc.wantVision, info.SupportsVision)
+			}
+		})
+	}
+}
+
+// Tests that only user-role messages carry images on the wire;
+// assistant or tool messages with an Images field emit none.
+func TestBuildMessages_ImagesUserOnly(t *testing.T) {
+	img := ImageData{MediaType: "image/png", Data: []byte("\x89PNG-fake")}
+	req := ChatRequest{
+		Messages: []Message{
+			{Role: "user", Content: "look", Images: []ImageData{img}},
+			{Role: "assistant", Content: "seen", Images: []ImageData{img}},
+			{Role: "tool", Content: "result", Images: []ImageData{img}},
+		},
+	}
+
+	msgs := buildMessages(req)
+	if len(msgs) != 3 {
+		t.Fatalf("want 3 messages, got %d", len(msgs))
+	}
+	if len(msgs[0].Images) != 1 {
+		t.Errorf("user message should carry images, got %v", msgs[0].Images)
+	}
+	for i, role := range []string{"assistant", "tool"} {
+		if msgs[i+1].Images != nil {
+			t.Errorf("%s message should not carry images, got %v",
+				role, msgs[i+1].Images)
+		}
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"shmorby/internal/audit"
+	"shmorby/internal/execution"
 	"shmorby/internal/ledger"
 	"shmorby/internal/redact"
 )
@@ -126,20 +127,26 @@ func (t *LedgerGetTool) Run(
 
 	if t.auditLogger != nil {
 		exitCode := 0
-		t.auditLogger.LogToolRun(
+		if err := t.auditLogger.LogToolRun(
 			audit.AuditEntry{
-				SessionID:  SessionIDFrom(ctx),
-				Tool:       "ledger_get",
-				Args:       a.Section,
-				DurationMs: time.Since(start).Milliseconds(),
-				ExitCode:   &exitCode,
+				SessionID:   SessionIDFrom(ctx),
+				InputID:     InputIDFrom(ctx),
+				ExecutionID: executionIDFromContext(ctx),
+				MessageID:   execution.MessageIDFrom(ctx),
+				ToolCallID:  execution.ToolCallIDFrom(ctx),
+				Tool:        "ledger_get",
+				Args:        a.Section,
+				DurationMs:  time.Since(start).Milliseconds(),
+				ExitCode:    &exitCode,
 			},
 			&audit.OutputCapture{
 				SessionID:  SessionIDFrom(ctx),
 				Stdout:     string(out),
 				StdoutSize: len(out),
 			},
-		)
+		); err != nil {
+			return "", fmt.Errorf("ledger_get audit: %w", err)
+		}
 	}
 
 	return string(out), nil
@@ -294,16 +301,22 @@ func (t *LedgerSetTool) Run(
 	// so no plaintext secret reaches the audit store.
 	if t.auditLogger != nil {
 		exitCode := 0
-		t.auditLogger.LogToolRun(
+		if err := t.auditLogger.LogToolRun(
 			audit.AuditEntry{
-				SessionID:  SessionIDFrom(ctx),
-				Tool:       "ledger_set",
-				Args:       fmt.Sprintf("section=%s data=%s", a.Section, redacted),
-				DurationMs: time.Since(start).Milliseconds(),
-				ExitCode:   &exitCode,
+				SessionID:   SessionIDFrom(ctx),
+				InputID:     InputIDFrom(ctx),
+				ExecutionID: executionIDFromContext(ctx),
+				MessageID:   execution.MessageIDFrom(ctx),
+				ToolCallID:  execution.ToolCallIDFrom(ctx),
+				Tool:        "ledger_set",
+				Args:        fmt.Sprintf("section=%s data=%s", a.Section, redacted),
+				DurationMs:  time.Since(start).Milliseconds(),
+				ExitCode:    &exitCode,
 			},
 			nil,
-		)
+		); err != nil {
+			return "", fmt.Errorf("ledger_set audit: %w", err)
+		}
 	}
 
 	return fmt.Sprintf(

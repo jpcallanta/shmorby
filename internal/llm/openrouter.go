@@ -2,14 +2,11 @@ package llm
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"time"
 
 	"shmorby/internal/config"
-	"shmorby/internal/redact"
 )
 
 // openRouterProvider sends requests to the OpenRouter API.
@@ -88,39 +85,17 @@ func (o *openRouterProvider) Chat(
 func (o *openRouterProvider) fetchModelInfo(
 	ctx context.Context, model string,
 ) (ModelInfo, error) {
-	req, err := http.NewRequestWithContext(
-		ctx, http.MethodGet,
-		o.baseURL+"/v1/models", nil,
-	)
-	if err != nil {
-		return ModelInfo{}, fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+o.apiKey)
-
-	httpResp, err := o.client.Do(req)
-	if err != nil {
-		return ModelInfo{}, fmt.Errorf("http request: %w", err)
-	}
-	defer func() { _ = httpResp.Body.Close() }()
-
-	if httpResp.StatusCode >= 400 {
-		// Limit and redact error body to prevent API key
-		// echo-back from leaking into logs.
-		bodyBytes, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1024))
-		return ModelInfo{}, fmt.Errorf(
-			"openrouter returned status %d: %s",
-			httpResp.StatusCode, redact.SecretString(string(bodyBytes)),
-		)
-	}
-
 	var resp struct {
 		Data []struct {
 			ID            string `json:"id"`
 			ContextLength int    `json:"context_length"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(httpResp.Body).Decode(&resp); err != nil {
-		return ModelInfo{}, fmt.Errorf("decode response: %w", err)
+	if err := fetchModelJSON(
+		ctx, o.client, o.baseURL+"/v1/models", "openrouter",
+		&resp, http.Header{"Authorization": {"Bearer " + o.apiKey}},
+	); err != nil {
+		return ModelInfo{}, err
 	}
 
 	for _, m := range resp.Data {
@@ -154,4 +129,33 @@ func (o *openRouterProvider) ChatStream(
 	_ context.Context, _ ChatRequest,
 ) (<-chan StreamEvent, error) {
 	return nil, fmt.Errorf("openrouter: streaming not yet supported")
+}
+
+// Fetches available models from the OpenRouter /v1/models endpoint,
+// including context_length when the platform supplies it.
+func (o *openRouterProvider) ListModels(
+	ctx context.Context, _ string,
+) ([]ModelSummary, error) {
+	var resp struct {
+		Data []struct {
+			ID            string `json:"id"`
+			ContextLength int    `json:"context_length"`
+		} `json:"data"`
+	}
+	if err := fetchModelJSON(
+		ctx, o.client, o.baseURL+"/v1/models", "openrouter",
+		&resp, http.Header{"Authorization": {"Bearer " + o.apiKey}},
+	); err != nil {
+		return nil, err
+	}
+
+	models := make([]ModelSummary, len(resp.Data))
+	for i, m := range resp.Data {
+		models[i] = ModelSummary{
+			ID:            m.ID,
+			ContextWindow: m.ContextLength,
+		}
+	}
+
+	return models, nil
 }

@@ -10,9 +10,12 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"shmorby/internal/agent"
+	"shmorby/internal/approval"
 	"shmorby/internal/audit"
+	"shmorby/internal/backend"
 	"shmorby/internal/config"
 	ctxcomp "shmorby/internal/context"
+	"shmorby/internal/execution"
 	"shmorby/internal/ledger"
 	"shmorby/internal/llm"
 	"shmorby/internal/memory"
@@ -21,6 +24,7 @@ import (
 	"shmorby/internal/tools"
 	"shmorby/internal/tui"
 	tuicl "shmorby/internal/tui/clipboard"
+	"shmorby/internal/tui/styles"
 )
 
 // Wires all configured tools onto the registry and returns the
@@ -163,28 +167,38 @@ func registerTools(
 }
 
 // Creates the audit store and logger, then wires the logger into
-// every auditable tool in the registry. Returns nil when audit is
-// disabled or the store is unavailable.
+// every auditable tool in the registry. Returns nil when best-effort
+// audit is disabled or unavailable.
 func initAuditLogger(
 	cfg *config.Config,
 	reg *tools.Registry,
-) *audit.Logger {
+) (*audit.Logger, error) {
 	if !cfg.Audit.Enabled {
-		return nil
+		if cfg.Audit.Delivery == "required" {
+			return nil, fmt.Errorf(
+				"audit.delivery required but audit.enabled is false",
+			)
+		}
+		return nil, nil
 	}
 
 	auditStore, err := audit.NewAuditStore(cfg.Audit.DBPath)
 	if err != nil {
+		if cfg.Audit.Delivery == "required" {
+			return nil, fmt.Errorf("open required audit store: %w", err)
+		}
 		slog.Warn("audit store unavailable, continuing without audit",
 			"err", err)
-		return nil
+		return nil, nil
 	}
 
-	auditLogger := audit.NewLogger(
+	bufferSize := cfg.Audit.AsyncBufferSize
+	auditLogger := audit.NewLoggerWithDelivery(
 		auditStore,
-		cfg.Audit.AsyncBufferSize,
+		bufferSize,
 		500*time.Millisecond,
 		cfg.Audit.OutputCaptureMaxBytes,
+		cfg.Audit.Delivery,
 	)
 
 	// Wire audit logger into every tool that accepts one.
@@ -203,7 +217,48 @@ func initAuditLogger(
 		}
 	}
 
-	return auditLogger
+	return auditLogger, nil
+}
+
+func reportIncompleteAudit(
+	store session.Store, logger *audit.Logger,
+) {
+	// Only in-flight executions are expected to have a terminal audit
+	// record; pre-chain historical rows legitimately lack one.
+	rows, err := store.ListExecutions(execution.Filter{
+		Statuses: []execution.Status{
+			execution.StatusPendingApproval,
+			execution.StatusRunning,
+			execution.StatusCancelRequested,
+		},
+	})
+	if err != nil {
+		slog.Warn("audit startup consistency check failed", "err", err)
+		return
+	}
+
+	for _, row := range rows {
+		finished, err := logger.HasLifecycleEvent(
+			row.ID, "execution_finished",
+		)
+		if err != nil {
+			slog.Warn("audit execution consistency check failed",
+				"execution", row.ID, "err", err)
+			continue
+		}
+		cancelled, err := logger.HasLifecycleEvent(
+			row.ID, "execution_cancelled",
+		)
+		if err != nil {
+			slog.Warn("audit execution consistency check failed",
+				"execution", row.ID, "err", err)
+			continue
+		}
+		if !finished && !cancelled {
+			slog.Warn("execution has no terminal audit record",
+				"execution", row.ID, "status", row.Status)
+		}
+	}
 }
 
 // Creates the memory store and retriever based on the embedding
@@ -479,16 +534,20 @@ func runTUIOrREPL(
 	statusGen *agent.StatusGenerator,
 	ledgerCtx string,
 	projectRoot string,
+	execMgr *execution.Manager,
+	approvals *approval.Service,
 	subagentEventChan chan tools.SubagentEvent,
+	appBackend backend.Backend,
 ) error {
 	if !noTuiFlag && agent.IsStdoutTerminal() {
 		return runTUI(
-			cfg, provider, sess, reg,
+			ctx, cfg, provider, sess,
 			compressor, modelInfo, sr,
 			memStore, memRetriever, toolRules,
 			overrider, orch,
 			statusGen, ledgerCtx, projectRoot,
-			subagentEventChan,
+			execMgr, approvals, subagentEventChan,
+			appBackend,
 		)
 	}
 
@@ -498,16 +557,18 @@ func runTUIOrREPL(
 		memStore, memRetriever, toolRules,
 		overrider, orch, statusGen, ledgerCtx,
 		projectRoot,
+		approvals,
+		appBackend,
 	)
 }
 
 // Initializes and runs the Bubbletea TUI with all required
 // configuration, logging, and subagent event wiring.
 func runTUI(
+	ctx context.Context,
 	cfg *config.Config,
 	provider llm.Provider,
 	sess *session.Session,
-	reg *tools.Registry,
 	compressor *ctxcomp.Compressor,
 	modelInfo llm.ModelInfo,
 	sr scope.LoadResult,
@@ -519,7 +580,10 @@ func runTUI(
 	statusGen *agent.StatusGenerator,
 	ledgerCtx string,
 	projectRoot string,
+	execMgr *execution.Manager,
+	approvals *approval.Service,
 	subagentEventChan chan tools.SubagentEvent,
+	appBackend backend.Backend,
 ) error {
 	if err := tuicl.Init(); err != nil {
 		slog.Warn("clipboard unavailable, copy/paste disabled",
@@ -529,6 +593,13 @@ func runTUI(
 	scrollLines := cfg.TUI.Nav.ScrollLinesPerTick
 	if scrollLines <= 0 {
 		scrollLines = 5
+	}
+
+	// Register external themes so tui.theme can select them.
+	for _, path := range cfg.TUI.ThemeFiles {
+		if err := styles.LoadThemeFile(path); err != nil {
+			return fmt.Errorf("load theme file: %w", err)
+		}
 	}
 
 	// Wire TUI log handler when logging is enabled.
@@ -546,16 +617,24 @@ func runTUI(
 		slog.SetDefault(slog.New(logHandler))
 	}
 
+	eventCtx, eventCancel := context.WithCancel(ctx)
+	defer eventCancel()
+	events, err := appBackend.Subscribe(eventCtx, backend.EventFilter{
+		SessionID: sess.ID(),
+	})
+	if err != nil {
+		return fmt.Errorf("subscribe backend events: %w", err)
+	}
+
 	m := tui.NewModel(tui.Config{
+		Backend:        appBackend,
+		BackendEvents:  events,
 		Provider:       provider,
 		Session:        sess,
 		Mode:           cfg.Agent.Default,
 		Scope:          sr.Content,
 		Model:          cfg.Model,
 		Override:       systemPrompt,
-		Registry:       reg,
-		MaxToolIter:    cfg.Agent.MaxToolIterations,
-		ShellEnabled:   cfg.Tools.Shell.Enabled,
 		Fullscreen:     cfg.TUI.Fullscreen,
 		ThemeName:      cfg.TUI.Theme,
 		GlamourEnabled: cfg.TUI.Glamour.Enabled,
@@ -583,18 +662,23 @@ func runTUI(
 		ConfigOverrider:      overrider,
 		SubagentEventChan:    subagentEventChan,
 		Orchestrator:         orch,
+		Executions:           execMgr,
+		Approvals:            approvals,
 		StatusGen:            statusGen,
 		LedgerCtx:            ledgerCtx,
 		ProjectRoot:          projectRoot,
 	})
 
 	opts := []tea.ProgramOption{}
+	if cfg.TUI.Mouse {
+		opts = append(opts, tea.WithMouseCellMotion())
+	}
 	if cfg.TUI.Fullscreen {
 		opts = append(opts, tea.WithAltScreen())
 	}
 
 	p := tea.NewProgram(m, opts...)
-	_, err := p.Run()
+	_, err = p.Run()
 	if err != nil {
 		return fmt.Errorf("run TUI: %w", err)
 	}
@@ -619,8 +703,11 @@ func runREPL(
 	statusGen *agent.StatusGenerator,
 	ledgerCtx string,
 	projectRoot string,
+	approvals *approval.Service,
+	appBackend backend.Backend,
 ) error {
 	repl := &agent.REPL{
+		Backend:      appBackend,
 		NoTUI:        noTuiFlag,
 		Provider:     provider,
 		Session:      sess,
@@ -643,6 +730,7 @@ func runREPL(
 		Compressor:      compressor,
 		ModelInfo:       modelInfo,
 		ToolRules:       toolRules,
+		Approvals:       approvals,
 		ConfigOverrider: overrider,
 		Orchestrator:    orch,
 		StatusGen:       statusGen,

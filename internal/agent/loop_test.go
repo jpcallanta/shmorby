@@ -1,16 +1,20 @@
 package agent
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"shmorby/internal/approval"
+	"shmorby/internal/audit"
 	"shmorby/internal/config"
 	ctxcomp "shmorby/internal/context"
+	"shmorby/internal/execution"
 	"shmorby/internal/llm"
 	"shmorby/internal/session"
 	"shmorby/internal/tools"
@@ -1257,12 +1261,14 @@ func TestREPL_ChatTurn_WithToolsPath(t *testing.T) {
 // PermAllow for "y" input.
 func TestREPL_PermissionPrompt_Allow(t *testing.T) {
 	r := &REPL{
-		In:      strings.NewReader("y\n"),
-		Out:     &strings.Builder{},
-		scanner: bufio.NewScanner(strings.NewReader("y\n")),
+		In:  strings.NewReader("y\n"),
+		Out: &strings.Builder{},
 	}
 
-	result := r.toolPermissionFunc("shell", "reboot", "restart")
+	result := r.toolPermissionFunc(ToolPermissionRequest{
+		Context: context.Background(), Tool: "shell",
+		Command: "reboot", CommandRedacted: "reboot", Reason: "restart",
+	})
 	if result != PermAllow {
 		t.Errorf("want PermAllow, got %v", result)
 	}
@@ -1272,14 +1278,81 @@ func TestREPL_PermissionPrompt_Allow(t *testing.T) {
 // PermDeny for "n" input.
 func TestREPL_PermissionPrompt_Deny(t *testing.T) {
 	r := &REPL{
-		In:      strings.NewReader("n\n"),
-		Out:     &strings.Builder{},
-		scanner: bufio.NewScanner(strings.NewReader("n\n")),
+		In:  strings.NewReader("n\n"),
+		Out: &strings.Builder{},
 	}
 
-	result := r.toolPermissionFunc("shell", "reboot", "restart")
+	result := r.toolPermissionFunc(ToolPermissionRequest{
+		Context: context.Background(), Tool: "shell",
+		Command: "reboot", CommandRedacted: "reboot", Reason: "restart",
+	})
 	if result != PermDeny {
 		t.Errorf("want PermDeny, got %v", result)
+	}
+}
+
+type signaledReader struct {
+	io.Reader
+	started chan struct{}
+	once    sync.Once
+}
+
+// Signals when the wrapped reader first receives a read.
+func (r *signaledReader) Read(p []byte) (int, error) {
+	r.once.Do(func() { close(r.started) })
+
+	return r.Reader.Read(p)
+}
+
+// TestREPL_PermissionPrompt_CanceledInputReturnedToREPL verifies canceled
+// prompts return later input to the normal REPL reader.
+func TestREPL_PermissionPrompt_CanceledInputReturnedToREPL(t *testing.T) {
+	in, inputWriter := io.Pipe()
+	defer in.Close()
+	defer inputWriter.Close()
+
+	out := &strings.Builder{}
+	reader := &signaledReader{Reader: in, started: make(chan struct{})}
+	r := &REPL{In: reader, Out: out}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan approval.Decision, 1)
+	go func() {
+		result <- r.readPermission(ToolPermissionRequest{
+			Tool: "shell", Command: "reboot",
+		}, ctx)
+	}()
+
+	select {
+	case <-reader.started:
+	case <-time.After(time.Second):
+		t.Fatal("permission reader did not start reading")
+	}
+	cancel()
+	writeDone := make(chan struct{})
+	go func() {
+		_, _ = inputWriter.Write([]byte("next command\n"))
+		close(writeDone)
+	}()
+	select {
+	case got := <-result:
+		if got != approval.DecisionReject {
+			t.Fatalf("decision = %q, want reject", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("permission reader did not stop after cancellation")
+	}
+
+	line, err := r.readLine()
+	if err != nil {
+		t.Fatalf("readLine: %v", err)
+	}
+	if line != "next command" {
+		t.Errorf("line = %q, want next command", line)
+	}
+	select {
+	case <-writeDone:
+	case <-time.After(time.Second):
+		t.Fatal("input writer did not finish")
 	}
 }
 
@@ -1287,12 +1360,14 @@ func TestREPL_PermissionPrompt_Deny(t *testing.T) {
 // PermAllowAll for "a" input.
 func TestREPL_PermissionPrompt_AllowAll(t *testing.T) {
 	r := &REPL{
-		In:      strings.NewReader("a\n"),
-		Out:     &strings.Builder{},
-		scanner: bufio.NewScanner(strings.NewReader("a\n")),
+		In:  strings.NewReader("a\n"),
+		Out: &strings.Builder{},
 	}
 
-	result := r.toolPermissionFunc("shell", "reboot", "restart")
+	result := r.toolPermissionFunc(ToolPermissionRequest{
+		Context: context.Background(), Tool: "shell",
+		Command: "reboot", CommandRedacted: "reboot", Reason: "restart",
+	})
 	if result != PermAllowAll {
 		t.Errorf("want PermAllowAll, got %v", result)
 	}
@@ -2226,7 +2301,7 @@ func TestRunTurnWithTools_PermissionAsk_DeniedByPermFunc(t *testing.T) {
 		name: "shell", result: "should-not-run", perm: "ask",
 	})
 
-	permFunc := func(toolName, command, reason string) ToolPermissionResponse {
+	permFunc := func(ToolPermissionRequest) ToolPermissionResponse {
 		return PermDeny
 	}
 
@@ -3246,8 +3321,8 @@ func TestRunTurnWithToolsStream_PermissionAllowAll_SkipsSubsequent(t *testing.T)
 		name: "shell", result: "executed", perm: "ask",
 	})
 
-	permFunc := func(toolName, command, reason string) ToolPermissionResponse {
-		permFuncCalls = append(permFuncCalls, command)
+	permFunc := func(request ToolPermissionRequest) ToolPermissionResponse {
+		permFuncCalls = append(permFuncCalls, request.Command)
 		return PermAllowAll
 	}
 
@@ -3305,6 +3380,17 @@ func TestRunTurnWithToolsStream_EmptyStream(t *testing.T) {
 // PermAllowAll adds tool to overrides so subsequent same-tool calls
 // skip permission check.
 func TestRunTurnWithTools_PermissionAllowAll_SkipsSubsequent(t *testing.T) {
+	auditStore, err := audit.NewAuditStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewAuditStore: %v", err)
+	}
+	defer auditStore.Close()
+	logger := audit.NewLogger(auditStore, 10, time.Hour, 0)
+	defer logger.Close()
+	ctx := tools.WithAuditLogger(
+		tools.WithSessionID(context.Background(), "session-1"), logger,
+	)
+
 	// LLM returns two tool calls for the same tool in one response,
 	// then a final text response.
 	toolResp := llm.ChatResponse{
@@ -3329,13 +3415,13 @@ func TestRunTurnWithTools_PermissionAllowAll_SkipsSubsequent(t *testing.T) {
 	})
 
 	var permFuncCalls []string
-	permFunc := func(toolName, command, reason string) ToolPermissionResponse {
-		permFuncCalls = append(permFuncCalls, command)
+	permFunc := func(request ToolPermissionRequest) ToolPermissionResponse {
+		permFuncCalls = append(permFuncCalls, request.Command)
 		return PermAllowAll
 	}
 
 	reply, err := RunTurnWithTools(
-		context.Background(), p, s,
+		ctx, p, s,
 		"operate", "", "", "m", "run two commands",
 		reg, 5, true,
 		nil, nil, nil, llm.ModelInfo{},
@@ -3375,6 +3461,26 @@ func TestRunTurnWithTools_PermissionAllowAll_SkipsSubsequent(t *testing.T) {
 	}
 	if msgs[3].Content != "executed" {
 		t.Errorf("tool 2: want 'executed', got %q", msgs[3].Content)
+	}
+
+	logger.Close()
+	permissions, err := auditStore.QueryPermissions(
+		audit.QueryFilter{SessionID: "session-1"},
+	)
+	if err != nil {
+		t.Fatalf("QueryPermissions: %v", err)
+	}
+	if len(permissions) != 2 {
+		t.Fatalf("permissions = %d, want 2", len(permissions))
+	}
+	if permissions[1].DecisionSource != "allow_all" ||
+		permissions[1].Decision != "allow_all" {
+		t.Errorf("initial decision = %+v, want allow_all", permissions[1])
+	}
+	if permissions[0].DecisionSource != "allow_all" ||
+		permissions[0].Decision != "allow" ||
+		permissions[0].Scope != "turn" {
+		t.Errorf("covered decision = %+v, want allow_all", permissions[0])
 	}
 }
 
@@ -3813,5 +3919,335 @@ func TestREPL_ApikeyCommand_InlineArg(t *testing.T) {
 	}
 	if cfg.OpenAI.APIKey == "sk-inline" {
 		t.Error("inline key must not be used")
+	}
+}
+
+func TestProcessToolCall_PermissionAuditSources(t *testing.T) {
+	interactive := func(
+		response ToolPermissionResponse,
+	) ToolPermissionFunc {
+		return func(request ToolPermissionRequest) ToolPermissionResponse {
+			if request.Resolution != nil {
+				request.Resolution.ApprovalID = "approval-1"
+				request.Resolution.DecidedBy = "sheila"
+				request.Resolution.DecisionSource = "interactive"
+			}
+
+			return response
+		}
+	}
+	denyOnTimeout := func(
+		request ToolPermissionRequest,
+	) ToolPermissionResponse {
+		result := approval.NewService(nil, time.Millisecond).Request(
+			request.Context,
+			session.ApprovalRecord{
+				SessionID:   request.SessionID,
+				ExecutionID: request.ExecutionID,
+				Tool:        request.Tool,
+			},
+			func(session.ApprovalRecord) approval.Prompt {
+				return approval.Prompt{
+					Decisions: make(chan approval.Decision),
+				}
+			},
+		)
+		if request.Resolution != nil {
+			request.Resolution.ApprovalID = result.ApprovalID
+			request.Resolution.DecidedBy = result.DecidedBy
+			request.Resolution.DecisionSource = result.DecisionSource
+			request.Resolution.Scope = result.Scope
+		}
+
+		return PermDeny
+	}
+
+	tests := []struct {
+		name         string
+		permission   string
+		rules        *tools.RuleSet
+		permFunc     ToolPermissionFunc
+		wantDecision string
+		wantSource   string
+		wantApproval string
+	}{
+		{
+			name: "rule allow", permission: "ask",
+			rules: &tools.RuleSet{Rules: []tools.PermissionRule{{
+				Match: "*", Action: "allow",
+			}}},
+			wantDecision: "allow", wantSource: "rule_allow",
+		},
+		{
+			name: "rule deny", permission: "ask",
+			rules: &tools.RuleSet{Rules: []tools.PermissionRule{{
+				Match: "*", Action: "deny",
+			}}},
+			wantDecision: "deny", wantSource: "rule_deny",
+		},
+		{
+			name: "human allow", permission: "ask",
+			permFunc:     interactive(PermAllow),
+			wantDecision: "allow", wantSource: "human_allow",
+			wantApproval: "approval-1",
+		},
+		{
+			name: "human deny", permission: "ask",
+			permFunc:     interactive(PermDeny),
+			wantDecision: "deny", wantSource: "human_deny",
+			wantApproval: "approval-1",
+		},
+		{
+			name: "allow all", permission: "ask",
+			permFunc:     interactive(PermAllowAll),
+			wantDecision: "allow_all", wantSource: "allow_all",
+			wantApproval: "approval-1",
+		},
+		{
+			name: "default allow", permission: "ask",
+			wantDecision: "allow", wantSource: "default_allow",
+		},
+		{
+			name: "timeout deny", permission: "ask",
+			permFunc:     denyOnTimeout,
+			wantDecision: "deny", wantSource: "timeout_deny",
+			wantApproval: "*",
+		},
+		{
+			name: "tool allow", permission: "allow",
+			wantDecision: "allow", wantSource: "tool_allow",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store, err := audit.NewAuditStore(":memory:")
+			if err != nil {
+				t.Fatalf("NewAuditStore: %v", err)
+			}
+			defer store.Close()
+			logger := audit.NewLogger(store, 10, time.Hour, 0)
+			defer logger.Close()
+
+			ctx := tools.WithSessionID(
+				context.Background(), "session-1",
+			)
+			ctx = tools.WithInputID(ctx, "input-1")
+			ctx = tools.WithAuditLogger(ctx, logger)
+			registry := tools.NewRegistry()
+			if err := registry.Register(&fakeTool{
+				name: "shell", result: "ok", perm: tt.permission,
+			}); err != nil {
+				t.Fatalf("Register: %v", err)
+			}
+
+			rules := map[string]*tools.RuleSet{}
+			if tt.rules != nil {
+				rules["shell"] = tt.rules
+			}
+			processToolCall(
+				ctx,
+				llm.ToolCall{
+					ID: "call-1", Name: "shell",
+					Args: `{"command":"echo hi"}`,
+				},
+				registry, map[string]ToolPermissionResolution{},
+				rules, tt.permFunc, true, "operate",
+				nil, nil, nil, nil, nil,
+			)
+
+			perms, err := store.QueryPermissions(
+				audit.QueryFilter{SessionID: "session-1"},
+			)
+			if err != nil {
+				t.Fatalf("QueryPermissions: %v", err)
+			}
+			if len(perms) != 1 {
+				t.Fatalf("permissions = %d, want 1", len(perms))
+			}
+			if perms[0].Decision != tt.wantDecision ||
+				perms[0].DecisionSource != tt.wantSource {
+				t.Errorf("permission = %+v, want %s/%s",
+					perms[0], tt.wantDecision, tt.wantSource)
+			}
+			if tt.wantApproval == "*" {
+				if perms[0].ApprovalID == "" {
+					t.Error("approval_id is empty, want generated approval ID")
+				}
+			} else if perms[0].ApprovalID != tt.wantApproval {
+				t.Errorf("approval_id = %q, want %q",
+					perms[0].ApprovalID, tt.wantApproval)
+			}
+		})
+	}
+}
+
+func TestProcessToolCall_RequiredAuditFailureBlocksExecution(t *testing.T) {
+	store, err := audit.NewAuditStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewAuditStore: %v", err)
+	}
+	logger := audit.NewLoggerWithDelivery(
+		store, 1, time.Hour, 0, "required",
+	)
+	defer logger.Close()
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close store: %v", err)
+	}
+
+	ctx := tools.WithAuditLogger(context.Background(), logger)
+	reg := tools.NewRegistry()
+	_ = reg.Register(&fakeTool{
+		name: "shell", result: "executed", perm: "allow",
+	})
+	result := processToolCall(
+		ctx,
+		llm.ToolCall{ID: "call-1", Name: "shell", Args: `{"command":"true"}`},
+		reg, map[string]ToolPermissionResolution{}, nil,
+		nil, true, "operate", nil, nil, nil, nil, nil,
+	)
+	if result == "executed" || !strings.Contains(result, "audit") {
+		t.Errorf("result = %q, want audit failure without execution", result)
+	}
+}
+
+// TestProcessToolCall_PersistsExecution verifies every tool call has
+// a durable execution row with a stable ID.
+func TestProcessToolCall_PersistsExecution(t *testing.T) {
+	st, err := session.NewStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	defer st.Close()
+
+	auditStore, err := audit.NewAuditStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewAuditStore: %v", err)
+	}
+	defer auditStore.Close()
+	logger := audit.NewLogger(auditStore, 10, time.Hour, 0)
+	defer logger.Close()
+
+	mgr := execution.NewManager(st)
+	ctx := tools.WithSessionID(
+		execution.WithManager(context.Background(), mgr), "session-1",
+	)
+	ctx = tools.WithInputID(ctx, "input-1")
+	ctx = tools.WithAuditLogger(ctx, logger)
+	approvalService := approval.NewService(st, time.Second)
+	permFunc := func(request ToolPermissionRequest) ToolPermissionResponse {
+		result := approvalService.Request(
+			request.Context,
+			session.ApprovalRecord{
+				SessionID:       request.SessionID,
+				ExecutionID:     request.ExecutionID,
+				Tool:            request.Tool,
+				CommandRedacted: request.CommandRedacted,
+			},
+			func(session.ApprovalRecord) approval.Prompt {
+				decisions := make(chan approval.Decision, 1)
+				decisions <- approval.DecisionOnce
+				return approval.Prompt{Decisions: decisions}
+			},
+		)
+		if request.Resolution != nil {
+			request.Resolution.ApprovalID = result.ApprovalID
+			request.Resolution.DecidedBy = result.DecidedBy
+			request.Resolution.DecisionSource = result.DecisionSource
+			request.Resolution.Scope = result.Scope
+		}
+		switch result.Decision {
+		case approval.DecisionOnce:
+			return PermAllow
+		case approval.DecisionAlways:
+			return PermAllowAll
+		default:
+			return PermDeny
+		}
+	}
+
+	reg := tools.NewRegistry()
+	_ = reg.Register(&fakeTool{
+		name: "shell", result: "ok", perm: "ask",
+	})
+
+	result := processToolCall(
+		ctx,
+		llm.ToolCall{
+			ID:   "call-1",
+			Name: "shell",
+			Args: `{"command":"echo hi"}`,
+		},
+		reg, map[string]ToolPermissionResolution{}, nil,
+		permFunc, true, "operate",
+		nil, nil, nil, nil, nil,
+	)
+	if result != "ok" {
+		t.Fatalf("result = %q, want %q", result, "ok")
+	}
+
+	rows, err := st.ListExecutions(execution.Filter{})
+	if err != nil {
+		t.Fatalf("ListExecutions: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("executions = %d, want 1", len(rows))
+	}
+	if rows[0].Status != execution.StatusSucceeded {
+		t.Errorf("status = %q, want %q",
+			rows[0].Status, execution.StatusSucceeded)
+	}
+	if rows[0].ToolCallID != "call-1" {
+		t.Errorf("tool_call_id = %q, want %q",
+			rows[0].ToolCallID, "call-1")
+	}
+	if rows[0].MessageID != "input-1" {
+		t.Errorf("message_id = %q, want input-1", rows[0].MessageID)
+	}
+	if rows[0].ApprovalID == "" {
+		t.Fatal("execution has no approval link")
+	}
+	permissions, err := auditStore.QueryPermissions(
+		audit.QueryFilter{ExecutionID: rows[0].ID},
+	)
+	if err != nil {
+		t.Fatalf("QueryPermissions: %v", err)
+	}
+	if len(permissions) != 1 ||
+		permissions[0].ApprovalID != rows[0].ApprovalID {
+		t.Errorf("permissions = %+v, want approval %s",
+			permissions, rows[0].ApprovalID)
+	}
+
+	approvalRecord, err := st.GetApproval(rows[0].ApprovalID)
+	if err != nil {
+		t.Fatalf("GetApproval: %v", err)
+	}
+	if approvalRecord.Status != "approved" ||
+		approvalRecord.Decision != string(approval.DecisionOnce) {
+		t.Errorf("approval = %+v, want one-time approval", approvalRecord)
+	}
+	if rows[0].ArgsRedacted == "" || rows[0].OutputRef == "" {
+		t.Errorf("record missing args/output: %+v", rows[0])
+	}
+	for _, eventType := range []string{
+		"approval_requested", "approval_decided",
+		"execution_started", "execution_finished",
+	} {
+		found, err := auditStore.HasLifecycleEvent(rows[0].ID, eventType)
+		if err != nil || !found {
+			t.Errorf("HasLifecycleEvent(%q) = %v, %v; want true, nil",
+				eventType, found, err)
+		}
+	}
+
+	chunk, err := mgr.Output(
+		context.Background(), rows[0].ID, "",
+	)
+	if err != nil {
+		t.Fatalf("Output: %v", err)
+	}
+	if chunk.Data != "ok" {
+		t.Errorf("output = %q, want %q", chunk.Data, "ok")
 	}
 }

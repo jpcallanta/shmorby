@@ -1,10 +1,13 @@
 package session
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"shmorby/internal/llm"
+	"shmorby/internal/testutil"
+	"shmorby/internal/xdg"
 )
 
 // boundSession returns a session bound to a fresh in-memory store
@@ -304,5 +307,165 @@ func TestWriteThrough_RedactsPersistedContent(t *testing.T) {
 			strings.Contains(m.Content, "sk-abcdefghijklmnopqrstuvwxyz012345") {
 			t.Errorf("secret persisted: %q", m.Content)
 		}
+	}
+}
+
+// imageTestEnv redirects the XDG data dir to a temp directory.
+func imageTestEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+}
+
+// Tests SaveImages writes content-addressed 0600 files and that a
+// session append with image refs round-trips through the store.
+func TestSession_ImageRefsRoundTrip(t *testing.T) {
+	imageTestEnv(t)
+	st := newTestStore(t)
+	sess := NewWithID("sess-img")
+	sess.BindStore(st, Meta{
+		ID:        sess.ID(),
+		Directory: "/work",
+		AgentMode: "operate",
+		Provider:  "ollama",
+		Model:     "llava",
+	})
+
+	refs := SaveImages(sess.ID(), []llm.ImageData{
+		{MediaType: "image/png", Data: testutil.OnePixelPNG()},
+	})
+	if len(refs) != 1 {
+		t.Fatalf("want 1 ref, got %d", len(refs))
+	}
+	if refs[0].MediaType != "image/png" {
+		t.Errorf("want media_type image/png, got %q", refs[0].MediaType)
+	}
+	if !strings.Contains(refs[0].Path, "images/sess-img/") {
+		t.Errorf("want path under images/sess-img/, got %q", refs[0].Path)
+	}
+
+	// The file exists and holds the original bytes.
+	data, err := LoadImage(refs[0])
+	if err != nil {
+		t.Fatalf("LoadImage: %v", err)
+	}
+	if string(data) != string(testutil.OnePixelPNG()) {
+		t.Error("image bytes do not round-trip")
+	}
+
+	// Append with refs and reload from the store.
+	sess.AppendMessages([]Message{
+		{Role: "user", Content: "look", Images: refs},
+		{Role: "assistant", Content: "seen"},
+	})
+
+	loaded, _, err := st.Load(sess.ID())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	msgs := loaded.Messages()
+	if len(msgs) != 2 {
+		t.Fatalf("want 2 messages, got %d", len(msgs))
+	}
+	if len(msgs[0].Images) != 1 || msgs[0].Images[0] != refs[0] {
+		t.Errorf("want refs %v restored, got %v", refs, msgs[0].Images)
+	}
+
+	// Reloaded bytes match the originals.
+	data, err = LoadImage(msgs[0].Images[0])
+	if err != nil {
+		t.Fatalf("LoadImage after resume: %v", err)
+	}
+	if string(data) != string(testutil.OnePixelPNG()) {
+		t.Error("image bytes do not round-trip after resume")
+	}
+}
+
+// Tests that identical bytes map to one file and unrecognized data
+// is dropped.
+func TestSaveImages_DedupeAndReject(t *testing.T) {
+	imageTestEnv(t)
+
+	refs := SaveImages("sid", []llm.ImageData{
+		{MediaType: "image/png", Data: testutil.OnePixelPNG()},
+		{MediaType: "image/png", Data: testutil.OnePixelPNG()},
+		{MediaType: "image/png", Data: []byte("junk")},
+	})
+	if len(refs) != 2 {
+		t.Fatalf("want 2 refs (junk dropped), got %d", len(refs))
+	}
+	if refs[0].Path != refs[1].Path {
+		t.Errorf("identical bytes should share one file: %q vs %q",
+			refs[0].Path, refs[1].Path)
+	}
+
+	// Only one file exists for the duplicated image.
+	matches, err := filepath.Glob(filepath.Join(
+		xdg.UserDataDir(), "images", "sid", "*",
+	))
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	if len(matches) != 1 {
+		t.Errorf("want 1 file on disk, got %d", len(matches))
+	}
+}
+
+// Tests that unreadable image refs are skipped gracefully by
+// LoadImages rather than failing the request.
+func TestLoadImages_MissingFileSkipped(t *testing.T) {
+	imageTestEnv(t)
+
+	got := LoadImages([]ImageRef{
+		{MediaType: "image/png", Path: "images/nope/missing.png"},
+	})
+	if len(got) != 0 {
+		t.Errorf("want 0 images for missing file, got %d", len(got))
+	}
+}
+
+// Tests that an image ref whose path escapes the data dir is
+// rejected (defense against corrupted DB rows).
+func TestLoadImage_PathTraversalRejected(t *testing.T) {
+	imageTestEnv(t)
+
+	if _, err := LoadImage(ImageRef{
+		MediaType: "image/png",
+		Path:      "../../etc/passwd",
+	}); err == nil {
+		t.Error("want error for path escaping data dir, got nil")
+	}
+}
+
+// Tests that oversized images and images past the per-message total
+// cap are dropped rather than persisted.
+func TestSaveImages_EnforcesSizeCaps(t *testing.T) {
+	imageTestEnv(t)
+
+	halfCap := func() []byte {
+		return append(
+			[]byte("\x89PNG\r\n\x1a\n"), make([]byte, MaxImageBytes/2)...,
+		)
+	}
+
+	refs := SaveImages("sid-caps", []llm.ImageData{
+		{MediaType: "image/png", Data: make([]byte, MaxImageBytes+1)},
+		{MediaType: "image/png", Data: halfCap()},
+	})
+	if len(refs) != 1 {
+		t.Fatalf("want 1 ref (oversize dropped), got %d", len(refs))
+	}
+
+	// Each image is half the per-image cap plus header bytes, so
+	// three fit under the total cap and the rest are dropped.
+	var many []llm.ImageData
+	for i := 0; i < 5; i++ {
+		many = append(many, llm.ImageData{
+			MediaType: "image/png",
+			Data:      halfCap(),
+		})
+	}
+	refs = SaveImages("sid-caps", many)
+	if len(refs) != 3 {
+		t.Errorf("want 3 refs (total cap), got %d", len(refs))
 	}
 }

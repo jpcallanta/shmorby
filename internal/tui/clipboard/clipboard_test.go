@@ -49,6 +49,18 @@ func TestPaste_BeforeInit(t *testing.T) {
 	}
 }
 
+func TestPasteImage_BeforeInit(t *testing.T) {
+	// Force uninitialized state.
+	once = sync.Once{}
+	initErr = fmt.Errorf("clipboard unavailable")
+
+	data, ok := PasteImage()
+	if ok || data != nil {
+		t.Errorf("want (nil, false) before init, got (%d bytes, %v)",
+			len(data), ok)
+	}
+}
+
 func TestCopy_BeforeInit(t *testing.T) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -98,4 +110,26 @@ func TestCopy_DelegatesToOsc52WhenInitFails(t *testing.T) {
 
 	// Should not panic; will attempt OSC-52 fallback.
 	Copy("fallback test")
+}
+
+func TestOsc52Sequence_Standard(t *testing.T) {
+	text := "hello world"
+	encoded := base64.StdEncoding.EncodeToString([]byte(text))
+	want := fmt.Sprintf("\033]52;c;%s\007", encoded)
+
+	got := osc52Sequence(text, false)
+	if got != want {
+		t.Errorf("want %q, got %q", want, got)
+	}
+}
+
+func TestOsc52Sequence_Tmux(t *testing.T) {
+	text := "hello world"
+	encoded := base64.StdEncoding.EncodeToString([]byte(text))
+	want := fmt.Sprintf("\033Ptmux;\033\033]52;c;%s\007\033\\", encoded)
+
+	got := osc52Sequence(text, true)
+	if got != want {
+		t.Errorf("want %q, got %q", want, got)
+	}
 }

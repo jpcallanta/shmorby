@@ -113,7 +113,8 @@ func (s *SudoTool) Run(
 		"args", string(RedactArgs(args)),
 	)
 
-	logAuditEvent(s.auditLogger, ctx, ToolSudo, args, elapsed, err, out,
+	auditErr := logAuditEvent(
+		s.auditLogger, ctx, ToolSudo, args, elapsed, err, out,
 		&audit.OutputCapture{
 			SessionID:  SessionIDFrom(ctx),
 			Stdout:     string(out),
@@ -124,9 +125,14 @@ func (s *SudoTool) Run(
 
 	result := string(TruncateOutput(out))
 
+	var runErr error
 	if err != nil {
-		return exitCodeResult(result, err, elapsed, ToolSudo)
+		result, runErr = exitCodeResult(result, err, elapsed, ToolSudo)
 	}
 
-	return result, nil
+	if auditErr != nil {
+		auditErr = fmt.Errorf("sudo audit: %w", auditErr)
+	}
+
+	return result, joinAuditErr(runErr, auditErr)
 }

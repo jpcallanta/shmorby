@@ -5,13 +5,13 @@ import (
 	"strings"
 )
 
-// CommandItem is a single command in the palette.
+// CommandItem is a single command in the palette. Slash is dispatched
+// through the shared slash-command path on execute.
 type CommandItem struct {
 	Name        string
 	Slash       string
 	Description string
 	Shortcut    string
-	Action      func()
 }
 
 // CommandPalette provides a fuzzy-searchable command list.
@@ -103,16 +103,16 @@ func (p *CommandPalette) SelectedIndex() int {
 	return p.selected
 }
 
-// Execute runs the selected command's action. Returns true if executed.
-func (p *CommandPalette) Execute() bool {
+// Execute dismisses the palette and returns the selected command's
+// slash string, or "" when no item is selected.
+func (p *CommandPalette) Execute() string {
 	item := p.Selected()
-	if item == nil || item.Action == nil {
-		return false
+	if item == nil {
+		return ""
 	}
 	p.visible = false
 	p.filter = ""
-	item.Action()
-	return true
+	return item.Slash
 }
 
 // Filtered returns items matching the current filter.

@@ -5,24 +5,26 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"shmorby/internal/approval"
 )
 
 // PermissionChoice is the user's response to a permission prompt.
-type PermissionChoice int
+type PermissionChoice = approval.Decision
 
 const (
-	PermissionAllow PermissionChoice = iota
-	PermissionDeny
-	PermissionAllowAll
+	PermissionAllow    PermissionChoice = approval.DecisionOnce
+	PermissionDeny     PermissionChoice = approval.DecisionReject
+	PermissionAllowAll PermissionChoice = approval.DecisionAlways
 )
 
 // PermissionPrompt models an inline permission prompt shown to the user.
 type PermissionPrompt struct {
-	Tool    string
-	Command string
-	Reason  string
-	Rule    string
-	Choice  chan PermissionChoice
+	ApprovalID string
+	Tool       string
+	Command    string
+	Reason     string
+	Rule       string
+	Choice     chan PermissionChoice
 }
 
 // NewPermissionPrompt creates a prompt ready for display.

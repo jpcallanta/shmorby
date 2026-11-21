@@ -765,7 +765,20 @@ func TestValidateConfig_NegativeTimeout_ReturnsError(t *testing.T) {
 	}
 }
 
-// TestValidateConfig_ValidConfig_ReturnsNil checks valid config passes validation.
+// TestValidateAuditDelivery_ModesAcceptedOrRejected checks known modes
+// pass and an unknown mode fails.
+func TestValidateAuditDelivery_ModesAcceptedOrRejected(t *testing.T) {
+	for _, delivery := range []string{"", "required", "best_effort"} {
+		if err := ValidateAuditDelivery(delivery); err != nil {
+			t.Errorf("ValidateAuditDelivery(%q): %v", delivery, err)
+		}
+	}
+	if err := ValidateAuditDelivery("discard"); err == nil {
+		t.Fatal("ValidateAuditDelivery(discard) = nil, want error")
+	}
+}
+
+// TestValidateConfig_ValidConfig_ReturnsNil checks a valid config.
 func TestValidateConfig_ValidConfig_ReturnsNil(t *testing.T) {
 	cfg := defaultConfig()
 	if err := validateConfig(cfg); err != nil {

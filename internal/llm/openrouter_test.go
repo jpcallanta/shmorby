@@ -190,7 +190,7 @@ func TestOpenRouterChat_SystemPrompt(t *testing.T) {
 			var found bool
 			for _, m := range req.Messages {
 				if m.Role == "system" && m.Content != nil &&
-					*m.Content == "You are a helpful assistant." {
+					stringOf(m.Content) == "You are a helpful assistant." {
 					found = true
 					break
 				}
@@ -385,9 +385,9 @@ func TestOpenRouterChat_RoundTripToolCalls(t *testing.T) {
 				}
 				if req.Messages[2].Content == nil {
 					t.Errorf("want non-nil content on tool message, got nil")
-				} else if *req.Messages[2].Content != "72F and sunny" {
+				} else if stringOf(req.Messages[2].Content) != "72F and sunny" {
 					t.Errorf("want content '72F and sunny', got %q",
-						*req.Messages[2].Content)
+						stringOf(req.Messages[2].Content))
 				}
 			}
 

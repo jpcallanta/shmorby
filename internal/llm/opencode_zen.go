@@ -2,15 +2,12 @@ package llm
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
 
 	"shmorby/internal/config"
-	"shmorby/internal/redact"
 )
 
 const (
@@ -220,44 +217,24 @@ var zenModelContextWindows = map[string]int{
 	"nemotron-3-ultra-free": 128000,
 }
 
+// Vision capability for Zen models. The /v1/models API returns no
+// capability metadata, so this map is our source of truth, keyed by
+// exact model ID — name-prefix rules must not be used here: mimo-v2.5
+// accepts image input while mimo-v2.5-pro does not. Models absent
+// from the map are not vision-capable.
+var zenModelVision = map[string]bool{
+	"mimo-v2.5":                    true,
+	"mimo-v2.5-free":               true,
+	"mimo-v2.5-pro":                false,
+	"deepseek-v4-flash-vision-exp": true,
+}
+
 // Fetches model info from the appropriate /v1/models endpoint based on
 // the model prefix (opencode-go/ → Go, opencode/ or bare → Zen).
 func (o *opencodeZenProvider) fetchModelInfo(
 	ctx context.Context, model string,
 ) (ModelInfo, error) {
 	baseURL, effectiveModel := o.resolveModel(model)
-	req, err := http.NewRequestWithContext(
-		ctx, http.MethodGet,
-		baseURL+"/v1/models", nil,
-	)
-	if err != nil {
-		return ModelInfo{}, fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+o.apiKey)
-	// Include session header for Zen API compliance.
-	if h := o.zenSessionHeader(); h != nil {
-		for k, v := range h {
-			for _, val := range v {
-				req.Header.Set(k, val)
-			}
-		}
-	}
-
-	httpResp, err := o.client.Do(req)
-	if err != nil {
-		return ModelInfo{}, fmt.Errorf("http request: %w", err)
-	}
-	defer func() { _ = httpResp.Body.Close() }()
-
-	if httpResp.StatusCode >= 400 {
-		// Limit and redact error body to prevent API key
-		// echo-back from leaking into logs.
-		bodyBytes, _ := io.ReadAll(io.LimitReader(httpResp.Body, 1024))
-		return ModelInfo{}, fmt.Errorf(
-			"opencode_zen returned status %d: %s",
-			httpResp.StatusCode, redact.SecretString(string(bodyBytes)),
-		)
-	}
 
 	var resp struct {
 		Data []struct {
@@ -265,8 +242,14 @@ func (o *opencodeZenProvider) fetchModelInfo(
 			ContextLength int    `json:"context_length"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(httpResp.Body).Decode(&resp); err != nil {
-		return ModelInfo{}, fmt.Errorf("decode response: %w", err)
+	// Include session header for Zen API compliance.
+	if err := fetchModelJSON(
+		ctx, o.client, baseURL+"/v1/models", "opencode_zen",
+		&resp,
+		http.Header{"Authorization": {"Bearer " + o.apiKey}},
+		o.zenSessionHeader(),
+	); err != nil {
+		return ModelInfo{}, err
 	}
 
 	for _, m := range resp.Data {
@@ -279,8 +262,9 @@ func (o *opencodeZenProvider) fetchModelInfo(
 				return ModelInfo{}, fmt.Errorf("model %q context length unknown", effectiveModel)
 			}
 			return ModelInfo{
-				ContextWindow: cw,
-				SupportsTools: true,
+				ContextWindow:  cw,
+				SupportsTools:  true,
+				SupportsVision: zenModelVision[effectiveModel],
 			}, nil
 		}
 	}
@@ -303,4 +287,50 @@ func (o *opencodeZenProvider) ChatStream(
 	_ context.Context, _ ChatRequest,
 ) (<-chan StreamEvent, error) {
 	return nil, fmt.Errorf("opencode_zen: streaming not yet supported")
+}
+
+// Fetches available models from the catalog the given model
+// resolves to — the Go subscription endpoint for opencode-go/ models,
+// the pay-as-you-go endpoint otherwise — so the list always contains
+// the model named on the line above it.
+func (o *opencodeZenProvider) ListModels(
+	ctx context.Context, model string,
+) ([]ModelSummary, error) {
+	if model == "" {
+		model = o.model
+	}
+
+	baseURL, _ := o.resolveModel(model)
+
+	var resp struct {
+		Data []struct {
+			ID            string `json:"id"`
+			ContextLength int    `json:"context_length"`
+		} `json:"data"`
+	}
+	// Include session header for Zen API compliance.
+	if err := fetchModelJSON(
+		ctx, o.client, baseURL+"/v1/models", "opencode_zen",
+		&resp,
+		http.Header{"Authorization": {"Bearer " + o.apiKey}},
+		o.zenSessionHeader(),
+	); err != nil {
+		return nil, err
+	}
+
+	models := make([]ModelSummary, len(resp.Data))
+	for i, m := range resp.Data {
+		cw := m.ContextLength
+		if cw == 0 {
+			// The API omits context_length; the registry is the
+			// source of truth (same fallback as fetchModelInfo).
+			cw = zenModelContextWindows[m.ID]
+		}
+		models[i] = ModelSummary{
+			ID:            m.ID,
+			ContextWindow: cw,
+		}
+	}
+
+	return models, nil
 }

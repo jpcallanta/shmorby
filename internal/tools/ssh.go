@@ -152,7 +152,8 @@ func (s *SSHTool) Run(
 		"args", string(RedactArgs(args)),
 	)
 
-	logAuditEvent(s.auditLogger, ctx, ToolSSH, args, elapsed, err, out,
+	auditErr := logAuditEvent(
+		s.auditLogger, ctx, ToolSSH, args, elapsed, err, out,
 		&audit.OutputCapture{
 			SessionID:  SessionIDFrom(ctx),
 			Stdout:     string(out),
@@ -163,9 +164,14 @@ func (s *SSHTool) Run(
 
 	result := string(TruncateOutput(out))
 
+	var runErr error
 	if err != nil {
-		return exitCodeResult(result, err, elapsed, ToolSSH)
+		result, runErr = exitCodeResult(result, err, elapsed, ToolSSH)
 	}
 
-	return result, nil
+	if auditErr != nil {
+		auditErr = fmt.Errorf("ssh audit: %w", auditErr)
+	}
+
+	return result, joinAuditErr(runErr, auditErr)
 }

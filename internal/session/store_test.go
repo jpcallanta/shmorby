@@ -1,12 +1,14 @@
 package session
 
 import (
+	"database/sql"
 	"errors"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
 
+	"shmorby/internal/execution"
 	"shmorby/internal/llm"
 )
 
@@ -589,5 +591,123 @@ func TestDeriveTitle(t *testing.T) {
 	}
 	if got := DeriveTitle("   \n  "); got != "New session" {
 		t.Errorf("blank = %q", got)
+	}
+}
+
+// Tests that a row with corrupt images JSON is skipped on Load with
+// a warning instead of failing the whole session resume.
+func TestStore_Load_CorruptImagesSkipped(t *testing.T) {
+	st := newTestStore(t)
+	mustSave(t, st, "s1")
+
+	if err := st.Append("s1", []Message{
+		{Role: "user", Content: "look"},
+		{Role: "assistant", Content: "seen"},
+	}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	sqlite := st.(*sqliteStore)
+	if _, err := sqlite.db.Exec(
+		`UPDATE session_messages SET images = 'not json'
+		 WHERE session_id = 's1' AND seq = 0`,
+	); err != nil {
+		t.Fatalf("corrupt images: %v", err)
+	}
+
+	sess, m, err := st.Load("s1")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got := sess.Messages()
+	if len(got) != 2 {
+		t.Fatalf("len(messages) = %d, want 2", len(got))
+	}
+	if got[0].Images != nil {
+		t.Errorf("corrupt images should be dropped, got %v", got[0].Images)
+	}
+	if m.MessageCount != 2 {
+		t.Errorf("MessageCount = %d, want 2", m.MessageCount)
+	}
+}
+
+// Returns a minimal execution record for migration tests.
+func executionRecordForTest() execution.Record {
+	return execution.Record{
+		ID:        "exec-migration",
+		SessionID: "s1",
+		Tool:      "shell",
+		Status:    execution.StatusRunning,
+		CreatedAt: time.Now().UTC(),
+	}
+}
+
+// TestStore_MigrateV2ToV3 verifies an existing v2 database gains the
+// input_id column and executions table without losing data.
+func TestStore_MigrateV2ToV3(t *testing.T) {
+	path := t.TempDir() + "/sessions.db"
+
+	db, err := sql.Open("sqlite3", path)
+	if err != nil {
+		t.Fatalf("open v2 db: %v", err)
+	}
+	if _, err := db.Exec(schemaV1); err != nil {
+		t.Fatalf("schema v1: %v", err)
+	}
+	if _, err := db.Exec(schemaV2); err != nil {
+		t.Fatalf("schema v2: %v", err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 2`); err != nil {
+		t.Fatalf("set v2: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO sessions
+		 (id, title, directory, agent_mode, provider, model,
+		  created_at, updated_at, last_seq)
+		 VALUES ('s1', 'old', '/tmp', 'operate', 'ollama',
+		  'llama3.2', 1, 1, 0)`,
+	); err != nil {
+		t.Fatalf("insert session: %v", err)
+	}
+	db.Close()
+
+	st, err := NewStore(path)
+	if err != nil {
+		t.Fatalf("NewStore v2: %v", err)
+	}
+	defer st.Close()
+
+	if err := st.Append("s1", []Message{
+		{Role: "user", Content: "after migration",
+			InputID: "input-v3"},
+	}); err != nil {
+		t.Fatalf("Append after migration: %v", err)
+	}
+
+	got, ok, err := st.FindInput("s1", "input-v3")
+	if err != nil {
+		t.Fatalf("FindInput after migration: %v", err)
+	}
+	if !ok || got.Content != "after migration" {
+		t.Errorf("migrated input = %+v, ok = %v", got, ok)
+	}
+
+	if err := st.CreateExecution(executionRecordForTest()); err != nil {
+		t.Fatalf("CreateExecution after migration: %v", err)
+	}
+	if err := st.CreateApproval(ApprovalRecord{
+		ID: "approval-migration", SessionID: "s1",
+		ExecutionID: "exec-migration", Tool: "shell",
+		CommandRedacted: "reboot", Status: "pending",
+		RequestedAt: time.Now().UTC(),
+		ExpiresAt:   time.Now().Add(time.Minute).UTC(),
+	}); err != nil {
+		t.Fatalf("CreateApproval after migration: %v", err)
+	}
+	a, err := st.GetApproval("approval-migration")
+	if err != nil {
+		t.Fatalf("GetApproval after migration: %v", err)
+	}
+	if a.Status != "pending" {
+		t.Errorf("approval status = %q, want pending", a.Status)
 	}
 }

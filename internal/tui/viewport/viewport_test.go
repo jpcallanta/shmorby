@@ -66,6 +66,21 @@ func TestNewContentIndicator_ClearedOnGotoBottom(t *testing.T) {
 	}
 }
 
+// Verifies setting and clearing the new-content flag directly.
+func TestSetNewContent(t *testing.T) {
+	vp := New(80, 20)
+
+	vp.SetNewContent(true)
+	if !vp.NewContent() {
+		t.Error("want newContent true")
+	}
+
+	vp.SetNewContent(false)
+	if vp.NewContent() {
+		t.Error("want newContent false")
+	}
+}
+
 func TestSelectionMode(t *testing.T) {
 	vp := New(80, 20)
 	if vp.SelectionMode() {

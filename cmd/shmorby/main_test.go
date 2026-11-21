@@ -3,12 +3,17 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"shmorby/internal/audit"
+	"shmorby/internal/execution"
 	"shmorby/internal/ledger"
+	"shmorby/internal/session"
 )
 
 // Tests that --help output contains all expected sections.
@@ -285,5 +290,68 @@ func TestLedgerSetCLI_RedactionAndCaps(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "cap") {
 		t.Errorf("error should mention cap: %v", err)
+	}
+}
+
+// TestReportIncompleteAudit_WarnsInFlightOnly checks the startup
+// consistency check warns for in-flight executions missing a terminal
+// audit record and ignores finished or historical rows.
+func TestReportIncompleteAudit_WarnsInFlightOnly(t *testing.T) {
+	store, err := session.NewStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	auditStore, err := audit.NewAuditStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewAuditStore: %v", err)
+	}
+	t.Cleanup(func() { _ = auditStore.Close() })
+	logger := audit.NewLogger(auditStore, 1, time.Millisecond, 0)
+	t.Cleanup(logger.Close)
+
+	now := time.Now().UTC()
+	for _, rec := range []execution.Record{
+		{
+			ID: "exec-missing", SessionID: "s1", Tool: "shell",
+			Status: execution.StatusRunning, CreatedAt: now,
+		},
+		{
+			ID: "exec-done", SessionID: "s1", Tool: "shell",
+			Status: execution.StatusRunning, CreatedAt: now,
+		},
+		{
+			ID: "exec-historic", SessionID: "s1", Tool: "shell",
+			Status: execution.StatusSucceeded, CreatedAt: now,
+		},
+	} {
+		if err := store.CreateExecution(rec); err != nil {
+			t.Fatalf("CreateExecution %s: %v", rec.ID, err)
+		}
+	}
+	if err := logger.LogLifecycleSync(audit.LifecycleEvent{
+		Type: "execution_finished", ExecutionID: "exec-done",
+		Status: "succeeded",
+	}); err != nil {
+		t.Fatalf("LogLifecycleSync: %v", err)
+	}
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	reportIncompleteAudit(store, logger)
+
+	log := buf.String()
+	if !strings.Contains(log, "exec-missing") {
+		t.Errorf("no warning for exec-missing, log: %s", log)
+	}
+	if strings.Contains(log, "exec-done") {
+		t.Errorf("unexpected warning for exec-done, log: %s", log)
+	}
+	if strings.Contains(log, "exec-historic") {
+		t.Errorf("unexpected warning for historical row, log: %s", log)
 	}
 }

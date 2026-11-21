@@ -62,19 +62,15 @@ func TestCommandPalette_Filter_NoMatch(t *testing.T) {
 	}
 }
 
-func TestCommandPalette_Execute(t *testing.T) {
+func TestCommandPalette_Execute_ReturnsSlash(t *testing.T) {
 	p := New()
-	executed := false
 	p.AddItem(CommandItem{
-		Name:   "compact",
-		Action: func() { executed = true },
+		Name:  "compact",
+		Slash: "/context compact",
 	})
 	p.Toggle()
-	if !p.Execute() {
-		t.Error("Execute should return true")
-	}
-	if !executed {
-		t.Error("action should have been called")
+	if got := p.Execute(); got != "/context compact" {
+		t.Errorf("want /context compact, got %q", got)
 	}
 	if p.Visible() {
 		t.Error("palette should dismiss after execute")
@@ -83,8 +79,8 @@ func TestCommandPalette_Execute(t *testing.T) {
 
 func TestCommandPalette_Execute_NoSelection(t *testing.T) {
 	p := New()
-	if p.Execute() {
-		t.Error("Execute with no items should return false")
+	if got := p.Execute(); got != "" {
+		t.Errorf("want empty slash, got %q", got)
 	}
 }
 

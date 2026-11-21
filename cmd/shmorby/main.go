@@ -13,7 +13,10 @@ import (
 
 	"github.com/spf13/cobra"
 	"shmorby/internal/agent"
+	"shmorby/internal/app"
+	"shmorby/internal/approval"
 	"shmorby/internal/config"
+	"shmorby/internal/execution"
 	"shmorby/internal/llm"
 	"shmorby/internal/scope"
 	"shmorby/internal/session"
@@ -151,10 +154,17 @@ var (
 			ledgerCtx := registerTools(reg, &cfg, workdir, projectRoot)
 
 			// Wire audit logger into tools when enabled.
-			auditLogger := initAuditLogger(&cfg, reg)
+			auditLogger, err := initAuditLogger(&cfg, reg)
+			if err != nil {
+				return err
+			}
 			defer func() {
 				if auditLogger != nil {
 					auditLogger.Close()
+					if dropped := auditLogger.Dropped(); dropped > 0 {
+						slog.Warn("audit records were dropped",
+							"count", dropped)
+					}
 				}
 			}()
 
@@ -350,6 +360,39 @@ var (
 			rootCtx, rootCancel := context.WithCancel(cmd.Context())
 			defer rootCancel()
 
+			// Reconcile executions left running by a previous
+			// process and wire the manager for new tool calls.
+			var (
+				execMgr   *execution.Manager
+				approvals *approval.Service
+			)
+			if sessStore != nil {
+				approvals = approval.NewService(sessStore, 0)
+				if err := sessStore.ExpirePendingApprovals(
+					time.Now().UTC(),
+				); err != nil {
+					return fmt.Errorf("recover pending approvals: %w", err)
+				}
+				execMgr = execution.NewManager(sessStore)
+				stale, rErr := execution.Reconcile(
+					sessStore, time.Now().UTC(),
+				)
+				if rErr != nil {
+					slog.Warn("execution reconcile failed",
+						"err", rErr)
+				} else if len(stale) > 0 {
+					slog.Warn("reconciled stale executions",
+						"count", len(stale))
+				}
+				if auditLogger != nil {
+					reportIncompleteAudit(sessStore, auditLogger)
+				}
+				rootCtx = execution.WithManager(rootCtx, execMgr)
+			}
+			if approvals == nil {
+				approvals = approval.NewService(nil, 0)
+			}
+
 			// Inject session ID and audit logger into context.
 			rootCtx = tools.WithSessionID(rootCtx, sess.ID())
 			if auditLogger != nil {
@@ -382,6 +425,32 @@ var (
 			}()
 
 			// Use TUI when terminal and --no-tui not set.
+			appBackend := app.NewBackend(app.Config{
+				Provider:      provider,
+				ProviderRef:   &provider,
+				ProviderName:  cfg.Provider,
+				Directory:     session.NormalizeDir("."),
+				SessionStore:  sessStore,
+				Session:       sess,
+				Registry:      reg,
+				Mode:          cfg.Agent.Default,
+				Scope:         scopeResult.Content,
+				Model:         cfg.Model,
+				Override:      systemPrompt,
+				MaxIterations: cfg.Agent.MaxToolIterations,
+				ShellEnabled:  cfg.Tools.Shell.Enabled,
+				MemoryStore:   memStore,
+				Retriever:     memRetriever,
+				Compressor:    compressor,
+				ModelInfo:     modelInfo,
+				ToolRules:     toolRules,
+				StatusGen:     statusGen,
+				LedgerCtx:     ledgerCtx,
+				ProjectRoot:   projectRoot.Root,
+				Executions:    execMgr,
+				Approvals:     approvals,
+			})
+
 			return runTUIOrREPL(
 				rootCtx, &cfg, provider, sess, reg,
 				compressor, modelInfo, scopeResult,
@@ -389,7 +458,10 @@ var (
 				overrider, orch,
 				statusGen, ledgerCtx,
 				projectRoot.Root,
+				execMgr,
+				approvals,
 				subagentEventChan,
+				appBackend,
 			)
 		},
 	}
@@ -521,6 +593,7 @@ Subcommands:
   audit export            Export audit entries (json or csv)
   audit vacuum            Archive and remove old audit entries
   audit stats             Show audit DB statistics
+  audit verify            Verify the audit hash chain
   session list            List persisted sessions (current directory)
   session show <id>       Show session metadata or full transcript
   session rm <id>         Archive a session (--force deletes rows)

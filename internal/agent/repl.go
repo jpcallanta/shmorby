@@ -1,27 +1,32 @@
 package agent
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	"golang.org/x/term"
 
+	"shmorby/internal/approval"
+	"shmorby/internal/backend"
 	ctxcomp "shmorby/internal/context"
+	"shmorby/internal/execution"
 	"shmorby/internal/llm"
 	"shmorby/internal/memory"
 	"shmorby/internal/session"
 	"shmorby/internal/tools"
 	"shmorby/internal/tui/history"
+	"shmorby/internal/xuuid"
 )
 
 // Holds scope metadata for the /scope command.
@@ -33,6 +38,7 @@ type ScopeInfo struct {
 
 // Holds state for the interactive chat loop.
 type REPL struct {
+	Backend      backend.Backend
 	Provider     llm.Provider
 	Session      *session.Session
 	Mode         string
@@ -50,8 +56,10 @@ type REPL struct {
 	Compressor   *ctxcomp.Compressor
 	ModelInfo    llm.ModelInfo
 	ToolPermFunc ToolPermissionFunc
+	Approvals    *approval.Service
 	ToolRules    map[string]*tools.RuleSet
-	scanner      *bufio.Scanner
+	inputMu      sync.Mutex
+	pendingInput []byte
 	history      *history.History
 	oldState     *term.State
 	inRaw        bool
@@ -140,10 +148,6 @@ func (r *REPL) Run(ctx context.Context) error {
 		}
 	}()
 
-	if !r.inRaw {
-		r.scanner = bufio.NewScanner(r.In)
-	}
-
 	for {
 		if err := ctx.Err(); err != nil {
 
@@ -169,7 +173,7 @@ func (r *REPL) Run(ctx context.Context) error {
 		}
 
 		// Check for slash commands.
-		if cmd, done, err := r.handleCommand(line); done {
+		if cmd, done, err := r.handleCommand(ctx, line); done {
 			return nil
 		} else if err != nil {
 			fmt.Fprintf(r.Out, "Error: %v\n", err)
@@ -184,12 +188,18 @@ func (r *REPL) Run(ctx context.Context) error {
 
 		// Normal chat turn.
 		var reply string
+		turnCtx := ctx
+		if id, idErr := xuuid.New(); idErr == nil {
+			turnCtx = WithInputID(ctx, id)
+		} else {
+			slog.Warn("generate input id failed", "err", idErr)
+		}
 
 		if !r.streamEnabled {
 			// Plain output: no spinners, no streaming, no ANSI.
-			reply, err = r.runPlainTurn(ctx, line)
+			reply, err = r.runPlainTurn(turnCtx, line)
 		} else {
-			reply, err = r.runStreamTurn(ctx, line)
+			reply, err = r.runStreamTurn(turnCtx, line)
 		}
 
 		if err != nil {
@@ -392,40 +402,7 @@ func (r *REPL) runPlainTurn(ctx context.Context, line string) (string, error) {
 		}
 	}
 
-	permFunc := r.ToolPermFunc
-	if permFunc == nil && r.ToolRules != nil {
-		permFunc = r.toolPermissionFunc
-	}
-
-	// Propagate permission callback to subagent orchestrator so
-	// subagents respect the same permission constraints.
-	if r.Orchestrator != nil {
-		r.Orchestrator.PermFunc = permFunc
-	}
-
-	var reply string
-	var err error
-	if r.Registry != nil {
-		reply, err = RunTurnWithTools(
-			ctx, r.Provider, r.Session,
-			r.Mode, r.Scope, r.Override, r.Model, line,
-			r.Registry, r.MaxToolIter, r.ShellEnabled,
-			r.Store, r.Retriever,
-			r.Compressor, r.ModelInfo,
-			onEvent, permFunc, r.ToolRules,
-			r.StatusGen, r.LedgerCtx,
-			r.ProjectRoot,
-		)
-	} else {
-		reply, err = RunTurn(
-			ctx, r.Provider, r.Session,
-			r.Mode, r.Scope, r.Override, r.Model, line,
-			r.Store, r.Retriever,
-			r.Compressor, r.ModelInfo,
-			r.LedgerCtx,
-			r.ProjectRoot,
-		)
-	}
+	reply, err := r.runBackendTurn(ctx, line, onEvent, nil)
 
 	if stdoutIsTerminal.Load() {
 		select {
@@ -514,52 +491,14 @@ func (r *REPL) runStreamTurn(
 		}
 	}
 
-	permFunc := r.ToolPermFunc
-	if permFunc == nil && r.ToolRules != nil {
-		permFunc = r.toolPermissionFunc
-	}
-
-	if r.Registry != nil {
-		onDelta := func(delta string) {
-			if r.thinkingDone != nil {
-				close(r.thinkingDone)
-				r.thinkingDone = nil
-			}
-			fmt.Fprint(r.Out, delta)
+	onDelta := func(delta string) {
+		if r.thinkingDone != nil {
+			close(r.thinkingDone)
+			r.thinkingDone = nil
 		}
-		reply, err = RunTurnWithToolsStream(
-			ctx, r.Provider, r.Session,
-			r.Mode, r.Scope, r.Override, r.Model, line,
-			r.Registry, r.MaxToolIter, r.ShellEnabled,
-			r.Store, r.Retriever,
-			r.Compressor, r.ModelInfo,
-			onEvent, onDelta, permFunc, r.ToolRules,
-			r.StatusGen, r.LedgerCtx,
-			r.ProjectRoot,
-		)
-
-		if err != nil && strings.Contains(err.Error(), "streaming not") {
-			reply, err = RunTurnWithTools(
-				ctx, r.Provider, r.Session,
-				r.Mode, r.Scope, r.Override, r.Model, line,
-				r.Registry, r.MaxToolIter, r.ShellEnabled,
-				r.Store, r.Retriever,
-				r.Compressor, r.ModelInfo,
-				onEvent, permFunc, r.ToolRules,
-				r.StatusGen, r.LedgerCtx,
-				r.ProjectRoot,
-			)
-		}
-	} else {
-		reply, err = RunTurn(
-			ctx, r.Provider, r.Session,
-			r.Mode, r.Scope, r.Override, r.Model, line,
-			r.Store, r.Retriever,
-			r.Compressor, r.ModelInfo,
-			r.LedgerCtx,
-			r.ProjectRoot,
-		)
+		fmt.Fprint(r.Out, delta)
 	}
+	reply, err = r.runBackendTurn(ctx, line, onEvent, onDelta)
 
 	// Ensure spinners are killed and drained.
 	if r.thinkingDone != nil {
@@ -583,29 +522,36 @@ func (r *REPL) runStreamTurn(
 }
 
 // maxLineBytes bounds the raw-mode input line so a multi-megabyte
-// paste cannot grow the line buffer without limit. Non-raw
-// mode is already bounded by bufio.Scanner's 64 KiB token limit.
+// paste cannot grow the line buffer without limit.
 const maxLineBytes = 1 << 20
 
-// readLine reads one line of input. In raw mode (terminal) it reads
-// character-by-character with history navigation via up/down arrows.
-// In non-raw mode (piped stdin) it falls back to bufio.Scanner.
+// maxListedModels caps how many models bare /model prints; longer
+// catalogs end with an explicit "… and N more" line.
+const maxListedModels = 50
+
+// readLine reads one line of input, preserving raw-mode editing.
 func (r *REPL) readLine() (string, error) {
 	if !r.inRaw {
-		if r.scanner.Scan() {
-
-			return r.scanner.Text(), nil
+		line := make([]byte, 0, 256)
+		for {
+			c, err := r.readInputByte(nil)
+			if err != nil {
+				if err == io.EOF && len(line) > 0 {
+					return strings.TrimSuffix(string(line), "\r"), nil
+				}
+				return "", err
+			}
+			if c == '\n' {
+				return strings.TrimSuffix(string(line), "\r"), nil
+			}
+			if len(line) >= 64*1024 {
+				return "", fmt.Errorf("input line exceeds 64 KiB")
+			}
+			line = append(line, c)
 		}
-
-		if r.scanner.Err() != nil {
-			return "", r.scanner.Err()
-		}
-
-		return "", io.EOF
 	}
 
 	line := make([]byte, 0, 256)
-	buf := make([]byte, 1)
 
 	// Once the cap is hit the remainder of the line is consumed and
 	// discarded until the newline, so the error cannot truncate an
@@ -619,7 +565,7 @@ func (r *REPL) readLine() (string, error) {
 	const maxEintrRetries = 10
 
 	for {
-		n, err := os.Stdin.Read(buf)
+		c, err := r.readInputByte(nil)
 		if err != nil {
 			// EINTR means a signal interrupted the read (e.g.
 			// SIGTSTP). The job-control handler restores the
@@ -635,11 +581,6 @@ func (r *REPL) readLine() (string, error) {
 			return "", err
 		}
 		eintrRetries = 0 // reset on successful read
-		if n == 0 {
-			continue
-		}
-
-		c := buf[0]
 		switch {
 		case c == '\r' || c == '\n':
 			fmt.Fprint(r.Out, "\r\n")
@@ -675,18 +616,15 @@ func (r *REPL) readLine() (string, error) {
 			}
 
 		case c == '\x1b':
-			seq := make([]byte, 1)
-			if _, err := os.Stdin.Read(seq); err != nil {
+			seq, err := r.readInputByte(nil)
+			if err != nil || seq != '[' {
 				continue
 			}
-			if seq[0] != '[' {
+			cmd, err := r.readInputByte(nil)
+			if err != nil {
 				continue
 			}
-			cmd := make([]byte, 1)
-			if _, err := os.Stdin.Read(cmd); err != nil {
-				continue
-			}
-			switch cmd[0] {
+			switch cmd {
 			case 'A':
 				if entry, ok := r.history.Older(); ok {
 					for range line {
@@ -733,16 +671,17 @@ func (r *REPL) readLine() (string, error) {
 // echo is suppressed via term.ReadPassword, which briefly re-enables
 // canonical mode and restores the raw state on return. In piped mode
 // stdin is not a terminal — there is nothing to mask — so the line
-// comes from the scanner instead.
+// comes from the shared REPL input reader instead.
 func (r *REPL) readSecret(prompt string) (string, error) {
 	fmt.Fprint(r.Out, prompt)
 
 	if !r.inRaw {
-		if r.scanner == nil || !r.scanner.Scan() {
-			return "", fmt.Errorf("no input")
+		line, err := r.readLine()
+		if err != nil {
+			return "", fmt.Errorf("no input: %w", err)
 		}
 
-		return strings.TrimSpace(r.scanner.Text()), nil
+		return strings.TrimSpace(line), nil
 	}
 
 	keyBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
@@ -755,7 +694,9 @@ func (r *REPL) readSecret(prompt string) (string, error) {
 }
 
 // Handles slash commands. Returns (handled, shouldQuit, error).
-func (r *REPL) handleCommand(line string) (bool, bool, error) {
+func (r *REPL) handleCommand(
+	ctx context.Context, line string,
+) (bool, bool, error) {
 	if !strings.HasPrefix(line, "/") {
 
 		return false, false, nil
@@ -797,6 +738,28 @@ func (r *REPL) handleCommand(line string) (bool, bool, error) {
 			return true, false, nil
 		}
 		fmt.Fprintf(r.Out, "%s (%s)\n", r.Provider.Name(), r.Model)
+		if lister, ok := r.Provider.(llm.ModelLister); ok {
+			ctx, cancel := context.WithTimeout(
+				context.Background(), 5*time.Second,
+			)
+			defer cancel()
+			models, err := lister.ListModels(ctx, r.Model)
+			if err != nil {
+				slog.Debug("list models failed", "err", err)
+			}
+			// Cap the list: catalogs run to several hundred
+			// entries and every line is echoed to stdout.
+			shown := models
+			if len(shown) > maxListedModels {
+				shown = shown[:maxListedModels]
+			}
+			for _, m := range shown {
+				fmt.Fprintln(r.Out, "  "+m.FormatSummary())
+			}
+			if hidden := len(models) - len(shown); hidden > 0 {
+				fmt.Fprintf(r.Out, "  … and %d more\n", hidden)
+			}
+		}
 
 		return true, false, nil
 
@@ -897,6 +860,27 @@ func (r *REPL) handleCommand(line string) (bool, bool, error) {
 		for _, inst := range r.ScopeInfo.Instructions {
 			fmt.Fprintf(r.Out, "  instruction: %s\n", inst)
 		}
+
+		return true, false, nil
+
+	case "/cancel":
+		if len(parts) < 2 {
+			fmt.Fprint(r.Out, "usage: /cancel <execution-id>\n")
+
+			return true, false, nil
+		}
+		mgr := execution.ManagerFrom(ctx)
+		if mgr == nil {
+			fmt.Fprintln(r.Out, "execution tracking is disabled")
+
+			return true, false, nil
+		}
+		if err := mgr.Cancel(parts[1]); err != nil {
+			fmt.Fprintf(r.Out, "cancel: %v\n", err)
+
+			return true, false, nil
+		}
+		fmt.Fprintf(r.Out, "Cancelled execution %s.\n", parts[1])
 
 		return true, false, nil
 
@@ -1184,6 +1168,7 @@ AGENT MODES
 
 SLASH COMMANDS
   /help              Show this help
+  /cancel <id>       Cancel a running execution
   /set <param> <value>  Override a config parameter (runtime only)
   /quit              Exit shmorby
   /reset             Clear conversation history
@@ -1222,28 +1207,10 @@ SLASH COMMANDS
   ctrl+v             Paste from clipboard
   ctrl+l             Toggle log section
   ctrl+t             Toggle thinking block
-  ctrl+x             Leader key
   tab / shift+tab    Cycle agent modes (empty input)
   pgup / pgdn        Scroll output by page
   up / down          Scroll output / input history
   home / end         Top / bottom of output
-
-LEADER KEY (ctrl+x)
-  ctrl+x c           Compact session
-  ctrl+x n           New session
-  ctrl+x l           Session list
-  ctrl+x m           Model list / switch
-  ctrl+x t           Theme list / switch
-  ctrl+x a           Agent list / switch
-  ctrl+x u           Undo last message
-  ctrl+x r           Redo
-  ctrl+x e           Open external editor
-  ctrl+x x           Export session
-  ctrl+x q           Quit
-  ctrl+x s           Status view
-  ctrl+x h           Tips / help
-  ctrl+x b           Toggle sidebar
-  ctrl+x y           Copy selected text
 
 PERMISSIONS
   shell              ` + r.cfgPermLevel("shell") + `
@@ -1270,10 +1237,9 @@ func (r *REPL) cfgPermLevel(tool string) string {
 	return "ask"
 }
 
-// toolPermissionFunc implements the permission callback for the REPL,
-// prompting the user via a fresh scanner on In.
+// toolPermissionFunc persists a request before prompting in the REPL.
 func (r *REPL) toolPermissionFunc(
-	toolName, command, reason string,
+	request ToolPermissionRequest,
 ) ToolPermissionResponse {
 	// Suspend thinking spinner while prompting.
 	if r.thinkingDone != nil {
@@ -1288,72 +1254,164 @@ func (r *REPL) toolPermissionFunc(
 		<-r.toolSpinnerDone
 	}
 
-	fmt.Fprintf(r.Out, "\nPermission requested: %s\n", toolName)
-	fmt.Fprintf(r.Out, "  command: %s\n", command)
-	if reason != "" {
-		fmt.Fprintf(r.Out, "  reason:  %s\n", reason)
+	readCtx := request.Context
+	if readCtx == nil {
+		readCtx = context.Background()
+	}
+	readCtx, cancelRead := context.WithCancel(readCtx)
+	defer cancelRead()
+
+	service := r.Approvals
+	if service == nil {
+		service = approval.NewService(nil, 0)
+	}
+	result := service.Request(
+		request.Context,
+		session.ApprovalRecord{
+			SessionID:       request.SessionID,
+			ExecutionID:     request.ExecutionID,
+			Tool:            request.Tool,
+			CommandRedacted: request.CommandRedacted,
+			RulePattern:     request.RulePattern,
+			RuleAction:      request.RuleAction,
+			Reason:          request.Reason,
+		},
+		func(session.ApprovalRecord) approval.Prompt {
+			choices := make(chan approval.Decision, 1)
+			go func() {
+				choices <- r.readPermission(request, readCtx)
+			}()
+
+			return approval.Prompt{
+				Decisions: choices,
+				OnExpire:  cancelRead,
+				OnDecision: func(approval.Decision) {
+					cancelRead()
+				},
+			}
+		},
+	)
+	if request.Resolution != nil {
+		request.Resolution.ApprovalID = result.ApprovalID
+		request.Resolution.DecidedBy = result.DecidedBy
+		request.Resolution.DecisionSource = result.DecisionSource
+		request.Resolution.Scope = result.Scope
+	}
+	switch result.Decision {
+	case approval.DecisionOnce:
+		return PermAllow
+	case approval.DecisionAlways:
+		return PermAllowAll
+	default:
+		return PermDeny
+	}
+}
+
+// Reads one byte while returning any post-cancellation input to the REPL.
+func (r *REPL) readInputByte(ctx context.Context) (byte, error) {
+	r.inputMu.Lock()
+	defer r.inputMu.Unlock()
+
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+	}
+	if len(r.pendingInput) > 0 {
+		c := r.pendingInput[0]
+		r.pendingInput = r.pendingInput[1:]
+
+		return c, nil
+	}
+
+	source := r.In
+	if r.inRaw || source == nil {
+		source = os.Stdin
+	}
+	var buf [1]byte
+	for {
+		n, err := source.Read(buf[:])
+		if n > 0 {
+			if ctx != nil && ctx.Err() != nil {
+				r.pendingInput = append([]byte{buf[0]}, r.pendingInput...)
+
+				return 0, ctx.Err()
+			}
+
+			return buf[0], nil
+		}
+		if err != nil {
+			return 0, err
+		}
+	}
+}
+
+// Reads one y/n/a response without consuming input after cancellation.
+func (r *REPL) readPermission(
+	request ToolPermissionRequest,
+	ctx context.Context,
+) approval.Decision {
+	if ctx != nil && ctx.Err() != nil {
+		return approval.DecisionReject
+	}
+	fmt.Fprintf(r.Out, "\nPermission requested: %s\n", request.Tool)
+	fmt.Fprintf(r.Out, "  command: %s\n", request.Command)
+	if request.Reason != "" {
+		fmt.Fprintf(r.Out, "  reason:  %s\n", request.Reason)
 	}
 	fmt.Fprint(r.Out, "Allow? [y]es / [n]o / [a]llow all like this: ")
 
 	if r.inRaw {
-		buf := make([]byte, 1)
 		// Bound EINTR retries for the same reason as readLine:
 		// Ctrl+Z during a permission prompt must not silently
 		// return PermDeny.
 		eintrRetries := 0
 		const maxEintrRetries = 10
 		for {
-			n, err := os.Stdin.Read(buf)
+			c, err := r.readInputByte(ctx)
 			if err != nil {
 				if errors.Is(err, syscall.EINTR) && eintrRetries < maxEintrRetries {
 					eintrRetries++
 					continue
 				}
 
-				return PermDeny
+				return approval.DecisionReject
 			}
 			eintrRetries = 0
-			if n == 0 {
-				continue
-			}
-			switch buf[0] {
+			switch c {
 			case 'y', 'Y':
 				fmt.Fprintln(r.Out, "y")
 
-				return PermAllow
+				return approval.DecisionOnce
 			case 'n', 'N':
 				fmt.Fprintln(r.Out, "n")
 
-				return PermDeny
+				return approval.DecisionReject
 			case 'a', 'A':
 				fmt.Fprintln(r.Out, "a")
 
-				return PermAllowAll
+				return approval.DecisionAlways
 			}
 		}
 	}
 
-	// Use single-byte reads for non-raw mode to avoid bufio.Scanner
-	// over-reading past the permission response.
-	buf := make([]byte, 1)
 	var line []byte
 	for {
-		n, err := r.In.Read(buf)
-		if err != nil || n == 0 {
-			return PermDeny
+		c, err := r.readInputByte(ctx)
+		if err != nil {
+			return approval.DecisionReject
 		}
-		c := buf[0]
 		switch {
 		case c == '\n' || c == '\r':
 			s := strings.TrimSpace(string(line))
 			line = nil
 			switch strings.ToLower(s) {
 			case "y", "yes":
-				return PermAllow
+				return approval.DecisionOnce
 			case "n", "no":
-				return PermDeny
+				return approval.DecisionReject
 			case "a", "all":
-				return PermAllowAll
+				return approval.DecisionAlways
 			default:
 				fmt.Fprint(r.Out, "y/n/a: ")
 			}

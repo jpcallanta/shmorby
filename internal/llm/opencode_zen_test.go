@@ -146,7 +146,7 @@ func TestOpencodeZenChat_SystemPrompt(t *testing.T) {
 			var found bool
 			for _, m := range req.Messages {
 				if m.Role == "system" && m.Content != nil &&
-					*m.Content == "You are a helpful assistant." {
+					stringOf(m.Content) == "You are a helpful assistant." {
 					found = true
 					break
 				}
@@ -339,9 +339,9 @@ func TestOpencodeZenChat_RoundTripToolCalls(t *testing.T) {
 				}
 				if req.Messages[2].Content == nil {
 					t.Errorf("want non-nil content on tool message, got nil")
-				} else if *req.Messages[2].Content != "72F and sunny" {
+				} else if stringOf(req.Messages[2].Content) != "72F and sunny" {
 					t.Errorf("want content '72F and sunny', got %q",
-						*req.Messages[2].Content)
+						stringOf(req.Messages[2].Content))
 				}
 			}
 
@@ -847,6 +847,131 @@ func TestOpencodeZenFetchModelInfo_SessionHeader(t *testing.T) {
 	if gotSession != "sess-fetch-456" {
 		t.Errorf("want X-Opencode-Session sess-fetch-456, got %q", gotSession)
 	}
+}
+
+// Tests Zen vision capability resolution: the /v1/models API returns
+// no capability metadata, so the exact-ID map decides. mimo-v2.5-pro
+// must stay false while mimo-v2.5-family models are true.
+func TestOpencodeZenFetchModelInfo_VisionCapability(t *testing.T) {
+	cases := []struct {
+		name       string
+		model      string
+		wantVision bool
+	}{
+		{name: "bare mimo-v2.5", model: "mimo-v2.5", wantVision: true},
+		{
+			name:       "go-prefixed mimo-v2.5",
+			model:      "opencode-go/mimo-v2.5",
+			wantVision: true,
+		},
+		{name: "mimo-v2.5-free", model: "mimo-v2.5-free", wantVision: true},
+		{name: "mimo-v2.5-pro", model: "mimo-v2.5-pro", wantVision: false},
+		{
+			name:       "model absent from map",
+			model:      "north-mini-code-free",
+			wantVision: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotPath string
+			srv := visionModelsServer(t, &gotPath)
+			defer srv.Close()
+
+			p := newOpencodeZenProvider(
+				srv.URL, "zen-key", "mimo-v2.5", config.Config{},
+			)
+
+			info, err := p.fetchModelInfo(context.Background(), tc.model)
+			if err != nil {
+				t.Fatalf("fetchModelInfo: %v", err)
+			}
+			if info.SupportsVision != tc.wantVision {
+				t.Errorf("want SupportsVision %v, got %v",
+					tc.wantVision, info.SupportsVision)
+			}
+
+			// The opencode-go/ runtime ID must resolve through the Go
+			// endpoint before the map lookup.
+			if strings.HasPrefix(tc.model, goModelPrefix) {
+				if !strings.HasSuffix(gotPath, "/go/v1/models") {
+					t.Errorf("want /go/v1/models, got %s", gotPath)
+				}
+			}
+		})
+	}
+}
+
+// Tests that a Zen-reported vision capability flows through
+// FetchModelInfo without being clobbered by the heuristic.
+func TestFetchModelInfo_ZenVisionReportedFlows(t *testing.T) {
+	resetModelInfoCache()
+	defer resetModelInfoCache()
+
+	srv := visionModelsServer(t, nil)
+	defer srv.Close()
+
+	p := newOpencodeZenProvider(srv.URL, "zen-key", "mimo-v2.5", config.Config{})
+
+	info, err := FetchModelInfo(
+		context.Background(), p, "mimo-v2.5", config.Config{},
+	)
+	if err != nil {
+		t.Fatalf("FetchModelInfo: %v", err)
+	}
+	if !info.SupportsVision {
+		t.Error("want SupportsVision true from Zen map, got false")
+	}
+}
+
+// Tests that an explicit supports_vision: false override still wins
+// over a Zen-reported true for the full opencode-go/ runtime ID.
+func TestFetchModelInfo_ZenVisionOverrideBeatsMap(t *testing.T) {
+	resetModelInfoCache()
+	defer resetModelInfoCache()
+
+	srv := visionModelsServer(t, nil)
+	defer srv.Close()
+
+	cfg := config.Config{
+		Models: map[string]config.ModelOverride{
+			"opencode-go/mimo-v2.5": {SupportsVision: boolPtr(false)},
+		},
+	}
+	p := newOpencodeZenProvider(srv.URL, "zen-key", "mimo-v2.5", cfg)
+
+	info, err := FetchModelInfo(
+		context.Background(), p, "opencode-go/mimo-v2.5", cfg,
+	)
+	if err != nil {
+		t.Fatalf("FetchModelInfo: %v", err)
+	}
+	if info.SupportsVision {
+		t.Error("want override false to win over Zen map true, got true")
+	}
+}
+
+// visionModelsServer serves a /v1/models payload shaped like the real
+// Zen endpoints: IDs only, no capability metadata. The request path
+// is recorded when gotPath is non-nil.
+func visionModelsServer(t *testing.T, gotPath *string) *httptest.Server {
+	t.Helper()
+
+	return httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			if gotPath != nil {
+				*gotPath = r.URL.Path
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data": [
+				{"id": "mimo-v2.5", "context_length": 128000},
+				{"id": "mimo-v2.5-free", "context_length": 128000},
+				{"id": "mimo-v2.5-pro", "context_length": 1000000},
+				{"id": "north-mini-code-free", "context_length": 128000}
+			]}`))
+		},
+	))
 }
 
 // Checks OpenRouter does NOT send X-Opencode-Session header.

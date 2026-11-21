@@ -508,7 +508,7 @@ var changeableKeys = []string{
 	"permission.aws", "permission.find", "permission.file_read",
 	"permission.file_edit", "permission.file_write", "permission.grep",
 	"permission.interactive",
-	"tui.fullscreen", "tui.theme", "tui.glamour.enabled",
+	"tui.fullscreen", "tui.mouse", "tui.theme", "tui.glamour.enabled",
 	"tui.logging.default_level", "tui.logging.enabled",
 	"memory.auto_capture",
 	"context.mode", "context.enabled", "context.threshold",
@@ -670,6 +670,24 @@ func TestSet_TUIFullscreen(t *testing.T) {
 	}
 }
 
+// Verifies tui.mouse toggle.
+func TestSet_TUIMouse(t *testing.T) {
+	co := overriderForTest(t)
+
+	msg, err := co.Set("tui.mouse", "true")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !co.cfg.TUI.Mouse {
+		t.Error("expected TUI.Mouse = true")
+	}
+
+	if msg == "" {
+		t.Error("expected non-empty confirmation")
+	}
+}
+
 // TestSet_RequiresRestart_PrefixMatch verifies prefix-based rejections.
 func TestSet_RequiresRestart_PrefixMatch(t *testing.T) {
 	co := overriderForTest(t)
@@ -677,7 +695,7 @@ func TestSet_RequiresRestart_PrefixMatch(t *testing.T) {
 		"permission.presets",
 		"permission.rules",
 		"tui.nav.follow_mode",
-		"tui.nav.keybinds.leader",
+		"tui.nav.keybinds.session_new",
 	}
 	for _, param := range tests {
 		t.Run(param, func(t *testing.T) {

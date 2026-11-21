@@ -10,6 +10,7 @@ import (
 
 	"shmorby/internal/audit"
 	cmdexec "shmorby/internal/exec"
+	"shmorby/internal/execution"
 	"shmorby/internal/health"
 )
 
@@ -76,28 +77,44 @@ func logAuditEvent(
 	err error,
 	outBytes []byte,
 	capture *audit.OutputCapture,
-) {
+) error {
+	exitCode := extractExitCode(err)
+	execution.SetExitCode(ctx, exitCode)
+
 	if auditLogger == nil {
-		return
+		return nil
 	}
 
-	exitCode := extractExitCode(err)
 	errMsg := ""
 	if err != nil {
 		errMsg = err.Error()
 	}
 
-	auditLogger.LogToolRun(
+	return auditLogger.LogToolRun(
 		audit.AuditEntry{
-			SessionID:  SessionIDFrom(ctx),
-			Tool:       toolName,
-			Args:       string(RedactArgs(args)),
-			DurationMs: elapsed.Milliseconds(),
-			ExitCode:   &exitCode,
-			Error:      errMsg,
+			SessionID:   SessionIDFrom(ctx),
+			InputID:     InputIDFrom(ctx),
+			ExecutionID: executionIDFromContext(ctx),
+			MessageID:   execution.MessageIDFrom(ctx),
+			ToolCallID:  execution.ToolCallIDFrom(ctx),
+			Tool:        toolName,
+			Args:        string(RedactArgs(args)),
+			DurationMs:  elapsed.Milliseconds(),
+			ExitCode:    &exitCode,
+			Error:       errMsg,
 		},
 		capture,
 	)
+}
+
+// Returns the durable execution ID carried by ctx, or an empty
+// string.
+func executionIDFromContext(ctx context.Context) string {
+	if h := execution.HandleFrom(ctx); h != nil {
+		return h.ID()
+	}
+
+	return ""
 }
 
 // exitCodeResult appends "exit code: N" to result when err is a
@@ -122,6 +139,19 @@ func exitCodeResult(
 	return result, health.Wrap(
 		toolName, elapsed, fmt.Errorf("%s exec: %w", toolName, err),
 	)
+}
+
+// Joins a run error with a required-mode audit error so the original
+// classification survives while the operation still fails closed.
+func joinAuditErr(runErr, auditErr error) error {
+	if auditErr == nil {
+		return runErr
+	}
+	if runErr == nil {
+		return auditErr
+	}
+
+	return errors.Join(runErr, auditErr)
 }
 
 // resolvePath confines a file path to the project root, or falls back

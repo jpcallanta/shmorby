@@ -61,7 +61,6 @@ func TestREPLHelp_AllSections(t *testing.T) {
 		"AGENT MODES",
 		"SLASH COMMANDS",
 		"KEYBOARD SHORTCUTS",
-		"LEADER KEY",
 		"PERMISSIONS",
 	}
 	for _, s := range sections {
@@ -120,40 +119,11 @@ func TestREPLHelp_KeyboardShortcuts(t *testing.T) {
 	output := out.String()
 	shortcuts := []string{
 		"ctrl+h", "ctrl+p", "ctrl+r", "ctrl+c",
-		"ctrl+z", "ctrl+v", "ctrl+l", "ctrl+t", "ctrl+x",
+		"ctrl+z", "ctrl+v", "ctrl+l", "ctrl+t",
 	}
 	for _, sc := range shortcuts {
 		if !strings.Contains(output, sc) {
 			t.Errorf("REPL /help missing shortcut %q", sc)
-		}
-	}
-}
-
-// Tests that REPL /help includes leader key bindings.
-func TestREPLHelp_LeaderKeys(t *testing.T) {
-	var out bytes.Buffer
-	r := &REPL{
-		Provider: &fakeProvider{name: "test"},
-		Session:  session.New(),
-		Mode:     "operate",
-		Model:    "test-model",
-		In:       strings.NewReader("/help\n/quit\n"),
-		Out:      &out,
-	}
-
-	err := r.Run(t.Context())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-
-	output := out.String()
-	bindings := []string{
-		"ctrl+x c", "ctrl+x n", "ctrl+x l",
-		"ctrl+x q", "ctrl+x h",
-	}
-	for _, b := range bindings {
-		if !strings.Contains(output, b) {
-			t.Errorf("REPL /help missing leader binding %q", b)
 		}
 	}
 }
@@ -1378,5 +1348,61 @@ func TestREPL_SuspendedFlag_InitialState(t *testing.T) {
 	r := &REPL{}
 	if r.suspended.Load() {
 		t.Error("suspended should be false initially")
+	}
+}
+
+// listerProvider extends fakeProvider with a fixed model list so bare
+// /model can be tested without a live platform.
+type listerProvider struct {
+	fakeProvider
+	models []llm.ModelSummary
+}
+
+// Returns the canned model list.
+func (l *listerProvider) ListModels(
+	_ context.Context, _ string,
+) ([]llm.ModelSummary, error) {
+	return l.models, nil
+}
+
+// TestREPL_ModelListCap verifies a long catalog is capped and the
+// hidden remainder is reported on a trailing line.
+func TestREPL_ModelListCap(t *testing.T) {
+	var out bytes.Buffer
+
+	overflow := 10
+	models := make([]llm.ModelSummary, 0, maxListedModels+overflow)
+	for i := 0; i < maxListedModels+overflow; i++ {
+		models = append(models, llm.ModelSummary{
+			ID: fmt.Sprintf("model-%d", i),
+		})
+	}
+	r := &REPL{
+		Provider: &listerProvider{
+			fakeProvider: fakeProvider{name: "fake"},
+			models:       models,
+		},
+		Session: session.New(),
+		Mode:    "operate",
+		Model:   "test-model",
+		Out:     &out,
+	}
+
+	_, _, err := r.handleCommand(context.Background(), "/model")
+	if err != nil {
+		t.Fatalf("handleCommand: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimRight(out.String(), "\n"), "\n")
+
+	// Header line, the capped list, then the trailing count.
+	wantLines := maxListedModels + 2
+	if len(lines) != wantLines {
+		t.Errorf("want %d lines, got %d", wantLines, len(lines))
+	}
+	last := lines[len(lines)-1]
+	wantLine := fmt.Sprintf("  … and %d more", overflow)
+	if last != wantLine {
+		t.Errorf("want %q, got %q", wantLine, last)
 	}
 }

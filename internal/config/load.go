@@ -165,6 +165,12 @@ func validateConfigFile(b []byte, path string) error {
 			return fmt.Errorf("%s:%d: %w", path, line, err)
 		}
 	}
+	if fileCfg.Audit.Delivery != "" {
+		if err := ValidateAuditDelivery(fileCfg.Audit.Delivery); err != nil {
+			line := findNestedKeyLine(root, "audit", "delivery")
+			return fmt.Errorf("%s:%d: %w", path, line, err)
+		}
+	}
 
 	return nil
 }
@@ -267,6 +273,9 @@ func validateConfig(cfg Config) error {
 			"session.max_sessions: must be >= 0, got %d",
 			cfg.Session.MaxSessions,
 		)
+	}
+	if err := ValidateAuditDelivery(cfg.Audit.Delivery); err != nil {
+		return fmt.Errorf("audit.delivery: %w", err)
 	}
 
 	return validateProviderKey(cfg)

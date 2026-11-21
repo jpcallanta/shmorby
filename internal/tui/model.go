@@ -2,8 +2,14 @@
 package tui
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"image"
+	_ "image/jpeg"
+	_ "image/png"
 	"log/slog"
 	"strings"
 	"time"
@@ -13,8 +19,11 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"shmorby/internal/agent"
+	"shmorby/internal/approval"
+	"shmorby/internal/backend"
 	ctxcomp "shmorby/internal/context"
 	"shmorby/internal/exec"
+	"shmorby/internal/execution"
 	"shmorby/internal/llm"
 	"shmorby/internal/memory"
 	"shmorby/internal/session"
@@ -22,7 +31,6 @@ import (
 	tuicl "shmorby/internal/tui/clipboard"
 	tuicompl "shmorby/internal/tui/completion"
 	"shmorby/internal/tui/history"
-	"shmorby/internal/tui/keybinds"
 	"shmorby/internal/tui/navigation"
 	"shmorby/internal/tui/palette"
 	tuirender "shmorby/internal/tui/render"
@@ -30,6 +38,8 @@ import (
 	"shmorby/internal/tui/spinner"
 	"shmorby/internal/tui/styles"
 	tuivp "shmorby/internal/tui/viewport"
+	"shmorby/internal/util"
+	"shmorby/internal/xuuid"
 )
 
 // Messages sent through the Bubbletea update loop.
@@ -59,6 +69,12 @@ type permissionResultMsg struct {
 type permissionReqMsg struct {
 	prompt PermissionPrompt
 }
+type permissionExpiredMsg struct {
+	id string
+}
+type executionCancelMsg struct {
+	errs []error
+}
 
 // settleMsg signals that the stream settle timer has expired.
 type settleMsg struct{}
@@ -70,9 +86,6 @@ type spinnerStopMsg struct{}
 type agentModeChangedMsg struct {
 	mode string
 }
-
-// leaderTimeoutMsg signals that the leader key sequence timed out.
-type leaderTimeoutMsg struct{}
 
 // Logging messages.
 type logEntryMsg struct {
@@ -88,6 +101,9 @@ type setLogLevelMsg struct {
 type agentEventMsg struct {
 	event agent.AgentEvent
 }
+type backendEventMsg struct {
+	event backend.Event
+}
 
 // subagentEventMsg notifies the TUI about subagent lifecycle events.
 type subagentEventMsg struct {
@@ -96,9 +112,27 @@ type subagentEventMsg struct {
 
 // outputEntry is a single line in the scrollable output pane.
 type outputEntry struct {
-	kind string // "user", "agent", "tool", "error"
+	kind string // "user", "agent", "tool", "error", "image", "memory"
 	text string
 }
+
+// pendingImage is an image attached to the next user message.
+// Dimensions are captured at attach time for the chip display.
+type pendingImage struct {
+	data   llm.ImageData
+	width  int
+	height int
+}
+
+// maxImageBytes caps a single attached image at 20 MiB, matching
+// OpenAI's per-image upload limit.
+const maxImageBytes = 20 << 20
+
+// maxListedModels caps how many models bare /model appends to the
+// output: syncViewport re-wraps every entry on each render, so an
+// unbounded catalog would slow every keystroke. Longer lists end
+// with an explicit "… and N more" line.
+const maxListedModels = 50
 
 // Model is the top-level Bubbletea model.
 type Model struct {
@@ -124,22 +158,25 @@ type Model struct {
 	height     int
 
 	// Agent
-	provider  llm.Provider
-	session   *session.Session
-	mode      string
-	scope     string
-	model     string
-	override  string
-	registry  *tools.Registry
-	maxIter   int
-	shell     bool
-	scopeInfo ScopeInfo
+	backend       backend.Backend
+	backendEvents <-chan backend.Event
+	activeInputID string
+	provider      llm.Provider
+	session       *session.Session
+	mode          string
+	scope         string
+	model         string
+	override      string
+	scopeInfo     ScopeInfo
 
 	// Theme
 	theme styles.Theme
 
 	// Context cancel
 	cancel context.CancelFunc
+
+	// Durable execution manager (nil = persistence disabled).
+	executions *execution.Manager
 
 	// Slash-command completion
 	complEngine    *tuicompl.Engine
@@ -160,6 +197,9 @@ type Model struct {
 	selectionEnd   int
 	copyNotify     string
 	copyNotifyTime time.Time
+
+	// Pending image attachments (clipboard paste)
+	pendingImages []pendingImage
 
 	// Configuration
 	glamourEnabled bool
@@ -186,8 +226,6 @@ type Model struct {
 	referenceEngine   *navigation.ReferenceEngine
 	shellCmdHandler   *navigation.ShellCmdHandler
 	scrollAccel       *navigation.ScrollAcceleration
-	leaderKey         *keybinds.LeaderKey
-	whichKey          *keybinds.WhichKeyModel
 	commandPalette    *palette.CommandPalette
 	inputHistory      *history.History
 	reverseSearch     *history.ReverseISearch
@@ -207,9 +245,6 @@ type Model struct {
 	logCollapseThreshold int
 	logHandler           *TUILogHandler
 
-	// Agent event channel (tool status from agent loop).
-	agentEventChan chan agent.AgentEvent
-
 	// Subagent event channel (child session lifecycle from orchestrator).
 	subagentEventChan chan tools.SubagentEvent
 
@@ -217,8 +252,10 @@ type Model struct {
 	showHelp *HelpModel
 
 	// Interactive permission prompts
-	permissionReqChan chan PermissionPrompt
-	toolRules         map[string]*tools.RuleSet
+	permissionReqChan    chan PermissionPrompt
+	permissionExpireChan chan string
+	approvals            *approval.Service
+	toolRules            map[string]*tools.RuleSet
 
 	// Runtime config overrides.
 	configOverrider *agent.ConfigOverrider
@@ -262,15 +299,14 @@ type ScopeInfo struct {
 
 // Config holds dependencies for creating the TUI model.
 type Config struct {
+	Backend        backend.Backend
+	BackendEvents  <-chan backend.Event
 	Provider       llm.Provider
 	Session        *session.Session
 	Mode           string
 	Scope          string
 	Model          string
 	Override       string
-	Registry       *tools.Registry
-	MaxToolIter    int
-	ShellEnabled   bool
 	Fullscreen     bool
 	ThemeName      string
 	ScopeInfo      ScopeInfo
@@ -283,11 +319,9 @@ type Config struct {
 	ModelInfo      llm.ModelInfo
 
 	// Navigation config
-	Shell         string
-	PermLevel     string
-	LeaderKeyStr  string
-	LeaderTimeout int
-	HistorySize   int
+	Shell       string
+	PermLevel   string
+	HistorySize int
 
 	// ToolTimeout is the default timeout in seconds for tool calls.
 	ToolTimeout int
@@ -313,6 +347,12 @@ type Config struct {
 
 	// Subagent orchestrator for permission propagation.
 	Orchestrator *tools.TaskOrchestrator
+
+	// Durable execution manager (nil = no execution tracking).
+	Executions *execution.Manager
+
+	// Shared durable approval service.
+	Approvals *approval.Service
 
 	// Async status description generator (nil = random text).
 	StatusGen *agent.StatusGenerator
@@ -354,10 +394,6 @@ func NewModel(cfg Config) Model {
 	if histSize <= 0 {
 		histSize = 100
 	}
-	leaderTimeout := time.Duration(cfg.LeaderTimeout) * time.Millisecond
-	if leaderTimeout <= 0 {
-		leaderTimeout = 2 * time.Second
-	}
 
 	ms := navigation.NewModeSwitcher()
 	mode := cfg.Mode
@@ -367,25 +403,6 @@ func NewModel(cfg Config) Model {
 	}
 
 	ms.SetCurrent(mode)
-
-	lk := keybinds.NewLeaderKey(cfg.LeaderKeyStr, leaderTimeout)
-	lk.RegisterBinding("c", keybinds.ActionCompact)
-	lk.RegisterBinding("n", keybinds.ActionNew)
-	lk.RegisterBinding("l", keybinds.ActionList)
-	lk.RegisterBinding("m", keybinds.ActionModel)
-	lk.RegisterBinding("t", keybinds.ActionTheme)
-	lk.RegisterBinding("a", keybinds.ActionAgent)
-	lk.RegisterBinding("u", keybinds.ActionUndo)
-	lk.RegisterBinding("r", keybinds.ActionRedo)
-	lk.RegisterBinding("e", keybinds.ActionEditor)
-	lk.RegisterBinding("x", keybinds.ActionExport)
-	lk.RegisterBinding("q", keybinds.ActionQuit)
-	lk.RegisterBinding("s", keybinds.ActionStatus)
-	lk.RegisterBinding("b", keybinds.ActionSidebar)
-	lk.RegisterBinding("h", keybinds.ActionTips)
-	lk.RegisterBinding("y", keybinds.ActionCopy)
-	lk.RegisterBinding("j", keybinds.ActionSessionChild)
-	lk.RegisterBinding("k", keybinds.ActionSessionParent)
 
 	h := history.New(histSize)
 	cp := palette.New()
@@ -409,6 +426,14 @@ func NewModel(cfg Config) Model {
 	})
 	cp.AddItem(palette.CommandItem{
 		Name: "context", Slash: "/context", Description: "Context stats",
+	})
+	cp.AddItem(palette.CommandItem{
+		Name: "executions", Slash: "/executions",
+		Description: "List durable executions",
+	})
+	cp.AddItem(palette.CommandItem{
+		Name: "cancel", Slash: "/cancel",
+		Description: "Cancel an execution by id",
 	})
 	cp.AddItem(palette.CommandItem{
 		Name: "help", Slash: "/help", Description: "Show help",
@@ -447,6 +472,8 @@ func NewModel(cfg Config) Model {
 	}
 
 	return Model{
+		backend:         cfg.Backend,
+		backendEvents:   cfg.BackendEvents,
 		textarea:        ta,
 		viewport:        vp,
 		theme:           theme,
@@ -456,9 +483,6 @@ func NewModel(cfg Config) Model {
 		scope:           cfg.Scope,
 		model:           cfg.Model,
 		override:        cfg.Override,
-		registry:        cfg.Registry,
-		maxIter:         cfg.MaxToolIter,
-		shell:           cfg.ShellEnabled,
 		fullscreen:      cfg.Fullscreen,
 		scopeInfo:       cfg.ScopeInfo,
 		complEngine:     tuicompl.New(),
@@ -474,8 +498,6 @@ func NewModel(cfg Config) Model {
 			exec.OSExecutor{}, cfg.Shell, mode, cfg.PermLevel,
 		),
 		scrollAccel:          navigation.NewScrollAcceleration(),
-		leaderKey:            lk,
-		whichKey:             keybinds.NewWhichKey(cfg.LeaderKeyStr),
 		commandPalette:       cp,
 		inputHistory:         h,
 		reverseSearch:        history.NewReverseISearch(h),
@@ -488,10 +510,12 @@ func NewModel(cfg Config) Model {
 		logCollapse:          cfg.LogCollapse,
 		logCollapseThreshold: logThreshold,
 		logHandler:           cfg.LogHandler,
-		agentEventChan:       make(chan agent.AgentEvent, 20),
 		subagentEventChan:    cfg.SubagentEventChan,
 		orchestrator:         cfg.Orchestrator,
+		executions:           cfg.Executions,
 		permissionReqChan:    make(chan PermissionPrompt),
+		permissionExpireChan: make(chan string, 1),
+		approvals:            cfg.Approvals,
 		toolRules:            cfg.ToolRules,
 		showHelp:             NewHelpModel(),
 		configOverrider:      cfg.ConfigOverrider,
@@ -524,11 +548,14 @@ func (m Model) Init() tea.Cmd {
 	if m.logChan != nil {
 		cmds = append(cmds, m.listenLogChan())
 	}
-	cmds = append(cmds, m.listenAgentEvents())
+	if m.backendEvents != nil {
+		cmds = append(cmds, m.listenBackendEvents())
+	}
 	if m.subagentEventChan != nil {
 		cmds = append(cmds, m.listenSubagentEvents())
 	}
 	cmds = append(cmds, m.listenPermissionReqs())
+	cmds = append(cmds, m.listenPermissionExpirations())
 	return tea.Batch(cmds...)
 }
 
@@ -544,16 +571,24 @@ func (m Model) listenLogChan() tea.Cmd {
 	}
 }
 
-// Reads from the agent event channel and returns
-// events as bubbletea messages. Returns a follow-up command.
-func (m Model) listenAgentEvents() tea.Cmd {
+// Reads backend events and returns one as a bubbletea message.
+func (m Model) listenBackendEvents() tea.Cmd {
 	return func() tea.Msg {
-		ev, ok := <-m.agentEventChan
+		ev, ok := <-m.backendEvents
 		if !ok {
 			return nil
 		}
-		return agentEventMsg{event: ev}
+		return backendEventMsg{event: ev}
 	}
+}
+
+func updateModel(model Model, msg tea.Msg) (Model, tea.Cmd) {
+	updated, cmd := model.Update(msg)
+	if next, ok := updated.(Model); ok {
+		return next, cmd
+	}
+
+	return model, cmd
 }
 
 // Reads from the subagent event channel and
@@ -580,16 +615,33 @@ func (m Model) listenPermissionReqs() tea.Cmd {
 	}
 }
 
+// Reads a timeout event for the active approval prompt.
+func (m Model) listenPermissionExpirations() tea.Cmd {
+	return func() tea.Msg {
+		id, ok := <-m.permissionExpireChan
+		if !ok {
+			return nil
+		}
+		return permissionExpiredMsg{id: id}
+	}
+}
+
 // Handles incoming messages and key events.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		wasNew := m.viewport.NewContent()
 		m.width = msg.Width
 		m.height = msg.Height
 		m.viewport.SetWidth(msg.Width)
 		m.textarea.SetWidth(msg.Width)
 		m.textarea.SetHeight(m.inputLineHeight())
-		m.ensureLayout()
+		m.syncViewport()
+		if !wasNew {
+			m.viewport.SetNewContent(false)
+			m.ensureLayout()
+		}
+
 		return m, nil
 
 	case tea.KeyMsg:
@@ -675,22 +727,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		return m, nil
 
-	case leaderTimeoutMsg:
-		if m.leaderKey.Active() {
-			if time.Now().After(m.leaderKey.Deadline()) {
-				m.leaderKey.Deactivate()
-				m.whichKey.Dismiss()
-			} else {
-				return m, tea.Tick(
-					time.Until(m.leaderKey.Deadline()),
-					func(_ time.Time) tea.Msg {
-						return leaderTimeoutMsg{}
-					},
-				)
-			}
-		}
-		return m, nil
-
 	case logEntryMsg:
 		m.logEntries = append(m.logEntries, msg.entry)
 		if len(m.logEntries) > m.logMaxEntries {
@@ -728,6 +764,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.permission = &msg.prompt
 		return m, m.listenPermissionReqs()
 
+	case permissionExpiredMsg:
+		if m.permission != nil && m.permission.ApprovalID == msg.id {
+			m.permission = nil
+		}
+		return m, m.listenPermissionExpirations()
+
 	case subagentEventMsg:
 		ev := msg.event
 		switch ev.Status {
@@ -745,6 +787,89 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		return m, m.listenSubagentEvents()
+
+	case backendEventMsg:
+		event := msg.event
+		if event.InputID != "" && m.activeInputID != "" &&
+			event.InputID != m.activeInputID {
+			return m, m.listenBackendEvents()
+		}
+		var follow tea.Cmd
+		switch event.Type {
+		case backend.EventReasoningDelta:
+			var data backend.DeltaEventData
+			if err := json.Unmarshal(event.Data, &data); err == nil {
+				m.thinking.AddDelta(data.Delta)
+				m.syncViewport()
+			}
+		case backend.EventTextDelta:
+			var data backend.DeltaEventData
+			if err := json.Unmarshal(event.Data, &data); err == nil {
+				if m.thinking.Active() {
+					m.thinking.End()
+				}
+				m, follow = updateModel(m, streamDeltaMsg{delta: data.Delta})
+			}
+		case backend.EventMessageCreated:
+			var data backend.MessageEventData
+			if err := json.Unmarshal(event.Data, &data); err != nil {
+				m.activeInputID = ""
+				m, follow = updateModel(m, errorMsg{err: err})
+			} else {
+				m.activeInputID = ""
+				if m.streamBuf.Tokens() > 0 {
+					updated, cmd := m.finalizeStream()
+					if next, ok := updated.(Model); ok {
+						m = next
+					}
+					if data.MemoryEntries > 0 {
+						m.output = append(m.output, outputEntry{
+							kind: "memory",
+							text: fmt.Sprintf(
+								"[memory: %d entries]",
+								data.MemoryEntries,
+							),
+						})
+						m.syncViewport()
+					}
+					follow = cmd
+				} else {
+					if m.thinking.Active() {
+						m.thinking.End()
+					}
+					m, follow = updateModel(m, agentReplyMsg{
+						text:          data.Content,
+						memoryEntries: data.MemoryEntries,
+					})
+				}
+			}
+		case backend.EventInputCancelled:
+			var data struct {
+				Error string `json:"error"`
+			}
+			_ = json.Unmarshal(event.Data, &data)
+			m.activeInputID = ""
+			follow = func() tea.Msg {
+				return errorMsg{err: errors.New(data.Error)}
+			}
+		case backend.EventToolStarted, backend.EventToolProgress,
+			backend.EventToolEnded:
+			var data backend.ToolEventData
+			if err := json.Unmarshal(event.Data, &data); err == nil {
+				agentType := "tool-start"
+				if event.Type == backend.EventToolProgress {
+					agentType = "tool-status"
+				} else if event.Type == backend.EventToolEnded {
+					agentType = "tool-end"
+				}
+				m, _ = updateModel(m, agentEventMsg{event: agent.AgentEvent{
+					Type: agentType, Name: data.Tool,
+					Info: data.Command, Status: data.Status,
+					Output: data.Output,
+				}})
+			}
+		}
+		return m, tea.Batch(follow, m.listenBackendEvents())
 
 	case agentEventMsg:
 		switch msg.event.Type {
@@ -783,7 +908,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.currentToolStatus = ""
 			m.syncViewport()
 		}
-		return m, m.listenAgentEvents()
+		return m, nil
 
 	case outputMsg:
 		m.output = append(m.output, outputEntry{
@@ -860,6 +985,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case executionCancelMsg:
+		for _, err := range msg.errs {
+			m.output = append(m.output, outputEntry{
+				kind: "error",
+				text: "cancel: " + err.Error(),
+			})
+		}
+		if len(msg.errs) > 0 {
+			m.syncViewport()
+		}
+
+		return m, nil
+
 	case permissionResultMsg:
 		if m.permission != nil {
 			m.permission.Choice <- msg.choice
@@ -902,6 +1040,14 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				text: "All operations halted.",
 			})
 			m.syncViewport()
+			if m.executions != nil {
+				mgr := m.executions
+
+				return m, func() tea.Msg {
+					return executionCancelMsg{errs: mgr.CancelAll()}
+				}
+			}
+
 			return m, nil
 		case "n", "esc":
 			m.haltPrompt = false
@@ -1000,6 +1146,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "ctrl+v":
+		// Image paste first; falls back to text paste so one
+		// keybind serves both flows.
+		if data, ok := tuicl.PasteImage(); ok {
+			m.attachImage(data)
+			return m, nil
+		}
 		pasteText := tuicl.Paste()
 		if pasteText != "" {
 			val := m.textarea.Value()
@@ -1016,8 +1168,40 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Selection mode active: only esc to exit.
+	// Selection mode active: navigation and exit.
 	if m.selectionMode {
+		switch msg.String() {
+		case "g":
+			m.viewport.GotoTop()
+
+			return m, nil
+
+		case "G":
+			m.viewport.GotoBottom()
+
+			return m, nil
+
+		case "j", "down":
+			m.viewport.ScrollDown(1)
+
+			return m, nil
+
+		case "k", "up":
+			m.viewport.ScrollUp(1)
+
+			return m, nil
+
+		case "d", "ctrl+d":
+			m.viewport.ScrollHalfPageDown()
+
+			return m, nil
+
+		case "u", "ctrl+u":
+			m.viewport.ScrollHalfPageUp()
+
+			return m, nil
+		}
+
 		switch msg.Type {
 		case tea.KeyEsc, tea.KeyEnter:
 			m.selectionMode = false
@@ -1025,8 +1209,30 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.textarea.Focus()
 			m.selectionStart = 0
 			m.selectionEnd = 0
+
+			return m, nil
+
+		case tea.KeyHome:
+			m.viewport.GotoTop()
+
+			return m, nil
+
+		case tea.KeyEnd:
+			m.viewport.GotoBottom()
+
+			return m, nil
+
+		case tea.KeyPgUp:
+			m.viewport.ScrollHalfPageUp()
+
+			return m, nil
+
+		case tea.KeyPgDown:
+			m.viewport.ScrollHalfPageDown()
+
 			return m, nil
 		}
+
 		return m, nil
 	}
 
@@ -1041,6 +1247,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch msg.Type {
+	case tea.KeyCtrlZ:
+		return m, tea.Suspend
+
 	case tea.KeyCtrlC:
 		if m.cancel != nil {
 			m.cancel()
@@ -1194,11 +1403,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.complMatches = nil
 			return m, nil
 		}
-		if m.leaderKey.Active() {
-			m.leaderKey.Deactivate()
-			m.whichKey.Dismiss()
-			return m, nil
-		}
 		if m.commandPalette.Visible() {
 			m.commandPalette.Dismiss()
 			return m, nil
@@ -1206,6 +1410,12 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.reverseSearch.Visible() {
 			m.reverseSearch.Dismiss()
 			m.showReverseSearch = false
+			return m, nil
+		}
+		// Pending attachment clear: only when nothing else wants esc
+		// and the input is untouched.
+		if len(m.pendingImages) > 0 && m.textarea.Value() == "" {
+			m.pendingImages = nil
 			return m, nil
 		}
 		if m.running && !m.haltPrompt {
@@ -1275,15 +1485,6 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyRunes:
-		// Leader key active → dispatch second key.
-		if m.leaderKey.Active() {
-			action, consumed := m.leaderKey.HandleKey(s)
-			m.whichKey.Dismiss()
-			if !consumed {
-				return m, nil
-			}
-			return m.dispatchLeaderAction(action)
-		}
 		// @-reference trigger: detect @ at cursor position.
 		if len(msg.Runes) == 1 && msg.Runes[0] == '@' {
 			var cmd tea.Cmd
@@ -1297,73 +1498,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	default:
-		// Leader key detection.
-		if m.leaderKey.IsLeaderKey(s) {
-			m.leaderKey.Activate()
-			m.whichKey.Show(
-				m.leaderKey.BindingsList(),
-				m.width,
-				m.leaderKey.Timeout,
-			)
-			return m, func() tea.Msg {
-				return leaderTimeoutMsg{}
-			}
-		}
 		// Delegate to textarea, then check for completion trigger.
 		var cmd tea.Cmd
 		m.textarea, cmd = m.textarea.Update(msg)
 		m.updateCompletion()
 		return m, cmd
-	}
-}
-
-// Executes the action mapped by a leader-key binding.
-func (m Model) dispatchLeaderAction(
-	action keybinds.Action,
-) (tea.Model, tea.Cmd) {
-	switch action {
-	case keybinds.ActionCompact:
-		return m, func() tea.Msg {
-			return submitMsg{text: "/context compact"}
-		}
-	case keybinds.ActionNew:
-		return m, func() tea.Msg {
-			return submitMsg{text: "new session"}
-		}
-	case keybinds.ActionModel:
-		return m, func() tea.Msg {
-			return submitMsg{text: "/model"}
-		}
-	case keybinds.ActionAgent:
-		m.modeSwitcher.CycleForward()
-
-		m.setMode(m.modeSwitcher.Current())
-		m.output = append(m.output, outputEntry{
-			kind: "agent",
-			text: fmt.Sprintf(
-				"Switched to %s mode.", m.modeSwitcher.Current(),
-			),
-		})
-		m.syncViewport()
-
-		return m, nil
-	case keybinds.ActionQuit:
-		return m, tea.Quit
-	case keybinds.ActionStatus:
-		return m, func() tea.Msg {
-			return submitMsg{text: "/scope"}
-		}
-	case keybinds.ActionSessionChild:
-		m.nextChildTab()
-		return m, nil
-	case keybinds.ActionSessionParent:
-		m.parentTab()
-		return m, nil
-	case keybinds.ActionChild:
-		m.firstChildTab()
-		return m, nil
-	default:
-		return m, nil
 	}
 }
 
@@ -1402,9 +1541,9 @@ func (m *Model) updateCompletion() {
 	m.complMatches = nil
 }
 
-// Processes a user message by running the agent turn.
+// Processes a user message by running the agent turn. !-prefixed
+// shell commands run outside the agent loop.
 func (m Model) handleSubmit(text string) (tea.Model, tea.Cmd) {
-	// !-prefixed shell commands run outside the agent loop.
 	if handled, out, err := m.shellCmdHandler.Handle(text); handled {
 		m.output = append(m.output, outputEntry{
 			kind: "user",
@@ -1451,7 +1590,31 @@ func (m Model) handleSubmit(text string) (tea.Model, tea.Cmd) {
 	// starting a new one.
 	m.clearSubagentTabs()
 
-	// Prepend resolved reference content as context for the agent.
+	var images []llm.ImageData
+	if len(m.pendingImages) > 0 {
+		if !m.visionSupported() {
+			m.output = append(m.output, outputEntry{
+				kind: "error",
+				text: fmt.Sprintf(
+					"model %q does not support image input — "+
+						"switch with /model <name>",
+					m.model,
+				),
+			})
+			m.syncViewport()
+
+			return m, nil
+		}
+		images = m.pendingImageData()
+		chip := pendingChipText(m.pendingImages...)
+		m.pendingImages = nil
+		m.output = append(m.output, outputEntry{
+			kind: "image",
+			text: chip,
+		})
+		m.syncViewport()
+	}
+
 	if refContent != "" {
 		text = refContent + "\n\n" + text
 	}
@@ -1464,12 +1627,206 @@ func (m Model) handleSubmit(text string) (tea.Model, tea.Cmd) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
+	if id, err := xuuid.New(); err == nil {
+		ctx = agent.WithInputID(ctx, id)
+		m.activeInputID = id
+	} else {
+		slog.Warn("generate input id failed", "err", err)
+	}
+	if m.executions != nil {
+		ctx = execution.WithManager(ctx, m.executions)
+	}
 
 	return m, tea.Batch(
-		m.runAgentTurn(ctx, text),
+		m.runAgentTurn(ctx, text, images),
 		func() tea.Msg { return spinnerTickMsg{} },
 		tea.HideCursor,
 	)
+}
+
+// Validates and stages a clipboard image for the next message.
+// Oversized images are rejected with an inline error.
+func (m *Model) attachImage(data []byte) {
+	if len(data) > maxImageBytes {
+		m.output = append(m.output, outputEntry{
+			kind: "error",
+			text: fmt.Sprintf(
+				"image too large (%s > %s limit)",
+				humanBytes(len(data)), humanBytes(maxImageBytes),
+			),
+		})
+		m.syncViewport()
+
+		return
+	}
+	media, _ := util.SniffImageType(data)
+	w, h := imageDims(data)
+	m.pendingImages = append(m.pendingImages, pendingImage{
+		data:   llm.ImageData{MediaType: media, Data: data},
+		width:  w,
+		height: h,
+	})
+
+}
+
+// Reports whether the active model accepts image input. Model info
+// is re-resolved (cache-backed) so late config overrides and the
+// vision heuristic apply even when startup fetch fell back.
+func (m Model) visionSupported() bool {
+	if m.provider != nil && m.configOverrider != nil {
+		if fetcher, ok := m.provider.(llm.ModelInfoFetcher); ok {
+			info, _ := llm.FetchModelInfo(
+				context.Background(),
+				fetcher, m.model, m.configOverrider.Config(),
+			)
+
+			return info.SupportsVision
+		}
+	}
+
+	return m.modelInfo.SupportsVision
+}
+
+// Converts pending attachments to provider image data.
+func (m Model) pendingImageData() []llm.ImageData {
+	images := make([]llm.ImageData, 0, len(m.pendingImages))
+	for _, p := range m.pendingImages {
+		images = append(images, p.data)
+	}
+
+	return images
+}
+
+// Renders the attachment summary shown above the input while images
+// are staged.
+func pendingChipText(images ...pendingImage) string {
+	if len(images) == 1 {
+		p := images[0]
+		media := strings.TrimPrefix(p.data.MediaType, "image/")
+		return fmt.Sprintf(
+			"[📎 image %dx%d %s %s — ⚠ sent to provider (esc removes)]",
+			p.width, p.height, strings.ToUpper(media),
+			humanBytes(len(p.data.Data)),
+		)
+	}
+
+	return fmt.Sprintf(
+		"[📎 %d images — ⚠ sent to provider (esc removes)]",
+		len(images),
+	)
+}
+
+// Reads pixel dimensions from PNG/JPEG headers; 0s when the header
+// cannot be parsed.
+func imageDims(data []byte) (int, int) {
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return 0, 0
+	}
+
+	return cfg.Width, cfg.Height
+}
+
+// Formats a byte count for display, e.g. 421888 → "412.0 KiB".
+func humanBytes(n int) string {
+	switch {
+	case n >= 1<<20:
+		return fmt.Sprintf("%.1f MiB", float64(n)/(1<<20))
+	case n >= 1<<10:
+		return fmt.Sprintf("%.0f KiB", float64(n)/(1<<10))
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
+}
+
+// Renders the pending attachment chip line above the input.
+func (m Model) renderPendingChip() string {
+	width := m.width - 2
+	if width < 1 {
+		width = 1
+	}
+	line := pendingChipText(m.pendingImages...)
+	if lipgloss.Width(line) > width {
+		line = lipgloss.NewStyle().MaxWidth(width).Render(line)
+	}
+
+	return m.theme.StatusKey.Render(line)
+}
+
+// Prints executions from the session database. An optional status or
+// "all" argument filters the query.
+func (m *Model) handleExecutionsCommand(parts []string) {
+	if m.executions == nil {
+		m.output = append(m.output, outputEntry{
+			kind: "error",
+			text: "execution tracking is disabled",
+		})
+		m.syncViewport()
+
+		return
+	}
+
+	filter := execution.Filter{Limit: 20}
+	if m.session != nil {
+		filter.SessionID = m.session.ID()
+	}
+
+	for _, arg := range parts[1:] {
+		if arg == "all" {
+			filter.SessionID = ""
+
+			continue
+		}
+		status, ok := execution.ParseStatus(arg)
+		if !ok {
+			m.output = append(m.output, outputEntry{
+				kind: "error",
+				text: "usage: /executions [all|status]",
+			})
+			m.syncViewport()
+
+			return
+		}
+		filter.Statuses = []execution.Status{status}
+	}
+
+	rows, err := m.executions.List(context.Background(), filter)
+	if err != nil {
+		m.output = append(m.output, outputEntry{
+			kind: "error",
+			text: "executions: " + err.Error(),
+		})
+		m.syncViewport()
+
+		return
+	}
+
+	if len(rows) == 0 {
+		m.output = append(m.output, outputEntry{
+			kind: "agent",
+			text: "No executions found.",
+		})
+		m.syncViewport()
+
+		return
+	}
+
+	var b strings.Builder
+	b.WriteString("executions (sessions.db):\n")
+	for _, r := range rows {
+		age := time.Since(r.CreatedAt).Round(time.Second)
+		fmt.Fprintf(&b, "  %s  %-16s %-10s %-8s %s\n",
+			r.ID, r.Status, r.Tool, age, r.Command)
+		if r.Error != "" {
+			fmt.Fprintf(&b, "    %s\n", r.Error)
+		}
+	}
+
+	m.output = append(m.output, outputEntry{
+		kind: "agent",
+		text: b.String(),
+	})
+	m.syncViewport()
 }
 
 // Processes slash commands. Returns (handled, shouldQuit, error).
@@ -1541,6 +1898,35 @@ func (m *Model) handleCommand(line string) (bool, bool, error) {
 			kind: "agent",
 			text: fmt.Sprintf("%s (%s)", providerName, m.model),
 		})
+		if lister, ok := m.provider.(llm.ModelLister); ok {
+			ctx, cancel := context.WithTimeout(
+				context.Background(), 5*time.Second,
+			)
+			models, err := lister.ListModels(ctx, m.model)
+			cancel()
+			if err != nil {
+				slog.Debug("list models failed", "err", err)
+			}
+			// Cap the list: syncViewport re-wraps every output
+			// entry on each render, so growth must stay bounded.
+			shown := models
+			if len(shown) > maxListedModels {
+				shown = shown[:maxListedModels]
+			}
+			for _, mod := range shown {
+				m.output = append(m.output, outputEntry{
+					kind: "agent",
+					text: "  " + mod.FormatSummary(),
+				})
+			}
+			if hidden := len(models) - len(shown); hidden > 0 {
+				extra := fmt.Sprintf("  … and %d more", hidden)
+				m.output = append(m.output, outputEntry{
+					kind: "agent",
+					text: extra,
+				})
+			}
+		}
 		m.syncViewport()
 		return true, false, nil
 
@@ -1695,6 +2081,44 @@ func (m *Model) handleCommand(line string) (bool, bool, error) {
 		m.handleContextCommand(args)
 		return true, false, nil
 
+	case "/cancel":
+		if len(parts) < 2 {
+			m.output = append(m.output, outputEntry{
+				kind: "error",
+				text: "usage: /cancel <execution-id>",
+			})
+			m.syncViewport()
+
+			return true, false, nil
+		}
+		if m.executions == nil {
+			m.output = append(m.output, outputEntry{
+				kind: "error",
+				text: "execution tracking is disabled",
+			})
+			m.syncViewport()
+
+			return true, false, nil
+		}
+		if err := m.executions.Cancel(parts[1]); err != nil {
+			m.output = append(m.output, outputEntry{
+				kind: "error",
+				text: "cancel: " + err.Error(),
+			})
+		} else {
+			m.output = append(m.output, outputEntry{
+				kind: "agent",
+				text: "Cancelled execution " + parts[1] + ".",
+			})
+		}
+		m.syncViewport()
+
+		return true, false, nil
+
+	case "/executions":
+		m.handleExecutionsCommand(parts)
+		return true, false, nil
+
 	case "/help":
 		if m.showHelp != nil {
 			m.showHelp.Show()
@@ -1780,88 +2204,43 @@ func (m *Model) handleCommand(line string) (bool, bool, error) {
 	}
 }
 
-// Executes the agent in a goroutine and sends the reply.
-// Uses streaming when the provider supports it and no tools are needed.
+// Submits an input through the shared backend.
 func (m Model) runAgentTurn(
-	ctx context.Context, input string,
+	ctx context.Context, input string, images []llm.ImageData,
 ) tea.Cmd {
 	return func() tea.Msg {
-		// Track memory stats before the turn.
-		var prevHits int
-		if m.retriever != nil {
-			prevHits = m.retriever.Stats().Hits
+		if m.backend == nil || m.session == nil {
+			return errorMsg{err: errors.New("backend unavailable")}
 		}
-
-		if m.registry == nil {
-			events, err := m.provider.ChatStream(ctx, llm.ChatRequest{
-				Model:  m.model,
-				System: m.buildSystemPrompt(),
-				Messages: []llm.Message{
-					{Role: "user", Content: input},
-				},
-			})
-			if err == nil {
-				return m.consumeStream(events)
-			}
+		if m.orchestrator != nil && m.toolRules != nil {
+			m.orchestrator.PermFunc = m.toolPermissionFunc
 		}
-
-		var reply string
-		var err error
-		if m.registry != nil {
-			// Only wire permission func when interactive rules
-			// are configured (permission.interactive: true).
-			var permFunc agent.ToolPermissionFunc
-			if m.toolRules != nil {
-				permFunc = m.toolPermissionFunc
-			}
-			// Propagate permission callback to subagent orchestrator
-			// so subagents respect the same permission constraints.
-			if m.orchestrator != nil {
-				m.orchestrator.PermFunc = permFunc
-			}
-			reply, err = agent.RunTurnWithTools(
-				ctx, m.provider, m.session,
-				m.mode, m.scope, m.override, m.model, input,
-				m.registry, m.maxIter, m.shell,
-				m.memoryStore, m.retriever,
-				m.compressor, m.modelInfo,
-				func(ev agent.AgentEvent) {
-					select {
-					case m.agentEventChan <- ev:
-					default:
-					}
-				},
-				permFunc,
-				m.toolRules,
-				m.statusGen,
-				m.ledgerCtx,
-				m.projectRoot,
-			)
-		} else {
-			reply, err = agent.RunTurn(
-				ctx, m.provider, m.session,
-				m.mode, m.scope, m.override, m.model, input,
-				m.memoryStore, m.retriever,
-				m.compressor, m.modelInfo,
-				m.ledgerCtx,
-				m.projectRoot,
-			)
-		}
+		_, err := m.backend.SubmitInput(ctx, m.session.ID(), backend.Input{
+			ID:        backend.InputID(agent.InputIDFrom(ctx)),
+			Text:      input,
+			Images:    images,
+			ModelInfo: m.modelInfo,
+			// Keep the existing non-streaming TUI turn behavior.
+			Stream:            false,
+			Mode:              m.mode,
+			Model:             m.model,
+			Override:          m.override,
+			PermissionHandler: m.backendPermissionHandler(),
+		})
 		if err != nil {
 			return errorMsg{err: err}
 		}
 
-		// Calculate memory entries used in this turn.
-		var memoryEntries int
-		if m.retriever != nil {
-			currentHits := m.retriever.Stats().Hits
-			if currentHits > prevHits {
-				memoryEntries = m.retriever.Stats().LastCount
-			}
-		}
-
-		return agentReplyMsg{text: reply, memoryEntries: memoryEntries}
+		return nil
 	}
+}
+
+func (m Model) backendPermissionHandler() backend.PermissionHandler {
+	if m.toolRules == nil {
+		return nil
+	}
+
+	return agent.AdaptPermissionHandler(m.toolPermissionFunc)
 }
 
 // Reads SSE events and converts them to tea.Msg values.
@@ -1904,20 +2283,60 @@ func (m Model) consumeStream(
 }
 
 // Implements agent.ToolPermissionFunc for the TUI.
-// Sends a permission prompt to the TUI update loop and blocks until
-// the user responds.
 func (m *Model) toolPermissionFunc(
-	toolName, command, reason string,
+	request agent.ToolPermissionRequest,
 ) agent.ToolPermissionResponse {
-	prompt := NewPermissionPrompt(toolName, command, reason, "tool permission")
-	m.permissionReqChan <- prompt
+	service := m.approvals
+	if service == nil {
+		service = approval.NewService(nil, 0)
+	}
+	result := service.Request(
+		request.Context,
+		session.ApprovalRecord{
+			SessionID:       request.SessionID,
+			ExecutionID:     request.ExecutionID,
+			Tool:            request.Tool,
+			CommandRedacted: request.CommandRedacted,
+			RulePattern:     request.RulePattern,
+			RuleAction:      request.RuleAction,
+			Reason:          request.Reason,
+		},
+		func(record session.ApprovalRecord) approval.Prompt {
+			prompt := NewPermissionPrompt(
+				request.Tool, request.Command, request.Reason,
+				request.RulePattern,
+			)
+			prompt.ApprovalID = record.ID
+			m.permissionReqChan <- prompt
 
-	choice := <-prompt.Choice
+			return approval.Prompt{
+				Decisions: prompt.Choice,
+				OnExpire: func() {
+					select {
+					case m.permissionExpireChan <- record.ID:
+					default:
+					}
+				},
+				OnDecision: func(approval.Decision) {
+					select {
+					case m.permissionExpireChan <- record.ID:
+					default:
+					}
+				},
+			}
+		},
+	)
+	if request.Resolution != nil {
+		request.Resolution.ApprovalID = result.ApprovalID
+		request.Resolution.DecidedBy = result.DecidedBy
+		request.Resolution.DecisionSource = result.DecisionSource
+		request.Resolution.Scope = result.Scope
+	}
 
-	switch choice {
-	case PermissionAllowAll:
+	switch result.Decision {
+	case approval.DecisionAlways:
 		return agent.PermAllowAll
-	case PermissionAllow:
+	case approval.DecisionOnce:
 		return agent.PermAllow
 	default:
 		return agent.PermDeny
@@ -2002,6 +2421,8 @@ func (m *Model) syncViewport() {
 			rendered = m.theme.Error.Width(vpWidth).Render("✗ " + text)
 		case "memory":
 			rendered = m.theme.StatusKey.Width(vpWidth).Render("  " + text)
+		case "image":
+			rendered = m.theme.StatusKey.Width(vpWidth).Render("  " + text)
 		}
 		if selected {
 			rendered = m.theme.Selection.Render(rendered)
@@ -2028,26 +2449,86 @@ func (m *Model) syncViewport() {
 	m.viewport.NotifyContentAdded()
 }
 
+// Calculates the total height of non-viewport fixed chrome.
+func (m Model) fixedHeight() int {
+	inputHeight := m.inputLineHeight()
+	// upper separator + lower separator + status bar.
+	statusHeight := 3
+
+	// Pending image chip line above the input.
+	if len(m.pendingImages) > 0 {
+		statusHeight++
+	}
+
+	if m.tabBar.Visible() {
+		statusHeight++
+	}
+
+	// New content indicator pushes status bar down by 1.
+	if !m.viewport.FollowMode() && m.viewport.NewContent() {
+		statusHeight++
+	}
+
+	return inputHeight + statusHeight
+}
+
+// Calculates available item row count for an overlay given its chrome rows.
+func (m Model) itemBudget(headerRows, footerRows int) int {
+	budget := m.height - m.fixedHeight() - headerRows - footerRows - 1
+	if budget < 1 {
+		budget = 1
+	}
+
+	return budget
+}
+
 // Recalculates viewport height from cached dimensions.
 func (m *Model) ensureLayout() {
 	if m.height <= 0 {
 		return
 	}
-	inputHeight := m.inputLineHeight()
-	// upper separator + lower separator + status bar.
-	statusHeight := 3
-	if m.tabBar.Visible() {
-		statusHeight++
+
+	vpHeight := m.height - m.fixedHeight() - m.overlayHeight()
+	if vpHeight < 0 {
+		vpHeight = 0
 	}
-	// New content indicator pushes status bar down by 1.
-	if !m.viewport.FollowMode() && m.viewport.NewContent() {
-		statusHeight++
-	}
-	vpHeight := m.height - inputHeight - statusHeight
-	if vpHeight < 1 {
-		vpHeight = 1
-	}
+
 	m.viewport.SetHeight(vpHeight)
+}
+
+// Calculates total height of active overlay popups.
+func (m Model) overlayHeight() int {
+	h := 0
+
+	if m.commandPalette.Visible() {
+		pal := strings.TrimSuffix(m.renderPaletteWithFilter(), "\n")
+		h += strings.Count(pal, "\n") + 1
+	}
+
+	if m.showCompletion && len(m.complMatches) > 0 {
+		compl := strings.TrimSuffix(m.renderCompletionPopup(), "\n")
+		h += strings.Count(compl, "\n") + 1
+	}
+
+	if m.permission != nil {
+		perm := strings.TrimSuffix(
+			m.renderPermissionPrompt(m.width),
+			"\n",
+		)
+		h += strings.Count(perm, "\n") + 1
+	}
+
+	if m.haltPrompt {
+		halt := strings.TrimSuffix(m.renderHaltPrompt(m.width), "\n")
+		h += strings.Count(halt, "\n") + 1
+	}
+
+	if m.showReverseSearch {
+		rev := strings.TrimSuffix(m.renderReverseSearch(), "\n")
+		h += strings.Count(rev, "\n") + 1
+	}
+
+	return h
 }
 
 // Returns the number of visual lines the input prompt occupies.
@@ -2136,7 +2617,9 @@ func (m Model) View() string {
 	var sections []string
 
 	// Output pane (top, scrollable).
-	sections = append(sections, m.viewport.View())
+	if m.viewport.Height() > 0 {
+		sections = append(sections, m.viewport.View())
+	}
 
 	// New content indicator when follow mode paused.
 	if !m.viewport.FollowMode() && m.viewport.NewContent() {
@@ -2147,33 +2630,42 @@ func (m Model) View() string {
 
 	// Command palette overlay.
 	if m.commandPalette.Visible() {
-		sections = append(sections, m.renderPaletteWithFilter())
-	}
-
-	// Which-key popup overlay.
-	if m.whichKey.Visible() {
-		sections = append(sections, m.whichKey.View())
+		sections = append(
+			sections,
+			strings.TrimSuffix(m.renderPaletteWithFilter(), "\n"),
+		)
 	}
 
 	// Completion popup.
 	if m.showCompletion && len(m.complMatches) > 0 {
-		popup := m.renderCompletionPopup()
+		popup := strings.TrimSuffix(m.renderCompletionPopup(), "\n")
 		sections = append(sections, popup)
 	}
 
 	// Permission prompt.
 	if m.permission != nil {
-		perm := m.renderPermissionPrompt(m.width)
+		perm := strings.TrimSuffix(
+			m.renderPermissionPrompt(m.width),
+			"\n",
+		)
 		sections = append(sections, perm)
 	}
 
 	// Halt-all confirmation prompt.
 	if m.haltPrompt {
-		sections = append(sections, m.renderHaltPrompt(m.width))
+		sections = append(
+			sections,
+			strings.TrimSuffix(m.renderHaltPrompt(m.width), "\n"),
+		)
 	}
 
 	// Upper separator.
 	sections = append(sections, m.renderSeparator(""))
+
+	// Pending image chip above the input.
+	if len(m.pendingImages) > 0 {
+		sections = append(sections, m.renderPendingChip())
+	}
 
 	// Input line — plain text, no lipgloss styling on typed chars.
 	promptChar := m.theme.PromptNormal.Render("❯")
@@ -2223,11 +2715,17 @@ func (m Model) View() string {
 			promptSection.WriteString("\n")
 		}
 	}
-	sections = append(sections, promptSection.String())
+	sections = append(
+		sections,
+		strings.TrimRight(promptSection.String(), "\n"),
+	)
 
 	// Reverse-i-search overlay.
 	if m.showReverseSearch {
-		sections = append(sections, m.renderReverseSearch())
+		sections = append(
+			sections,
+			strings.TrimSuffix(m.renderReverseSearch(), "\n"),
+		)
 	}
 
 	// Lower separator.
@@ -2255,8 +2753,30 @@ func (m Model) View() string {
 
 // Renders the slash-command completion list.
 func (m Model) renderCompletionPopup() string {
+	maxItems := len(m.complMatches)
+	budget := m.itemBudget(0, 0)
+	if budget < maxItems {
+		maxItems = budget
+	}
+
+	start := 0
+	if len(m.complMatches) > maxItems {
+		start = m.complIdx - maxItems/2
+		if start+maxItems > len(m.complMatches) {
+			start = len(m.complMatches) - maxItems
+		}
+		if start < 0 {
+			start = 0
+		}
+	}
+	end := start + maxItems
+	if end > len(m.complMatches) {
+		end = len(m.complMatches)
+	}
+
 	var b strings.Builder
-	for i, cmd := range m.complMatches {
+	for i := start; i < end; i++ {
+		cmd := m.complMatches[i]
 		prefix := "  "
 		if i == m.complIdx {
 			prefix = "▸ "
@@ -2267,7 +2787,8 @@ func (m Model) renderCompletionPopup() string {
 			m.theme.StatusKey.Render(cmd.Description),
 		))
 	}
-	return b.String()
+
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
 // Returns a horizontal rule, optionally with a label.
@@ -2338,11 +2859,22 @@ func (m Model) renderReverseSearch() string {
 	matches := m.reverseSearch.Matches()
 	if len(matches) > 0 {
 		b.WriteString(strings.Repeat("─", 40) + "\n")
-		start := 0
-		if len(matches) > 5 {
-			start = m.reverseSearch.SelectedIndex()
+		maxMatches := 5
+		budget := m.itemBudget(3, 0)
+		if budget < maxMatches {
+			maxMatches = budget
 		}
-		end := start + 5
+		start := 0
+		if len(matches) > maxMatches {
+			start = m.reverseSearch.SelectedIndex() - maxMatches/2
+			if start+maxMatches > len(matches) {
+				start = len(matches) - maxMatches
+			}
+			if start < 0 {
+				start = 0
+			}
+		}
+		end := start + maxMatches
 		if end > len(matches) {
 			end = len(matches)
 		}
@@ -2353,11 +2885,12 @@ func (m Model) renderReverseSearch() string {
 			}
 			b.WriteString(fmt.Sprintf("%s%s\n", prefix, matches[i]))
 		}
-		if len(matches) > 5 {
+		if len(matches) > maxMatches {
 			b.WriteString(fmt.Sprintf("  (%d matches)\n", len(matches)))
 		}
 	}
-	return b.String()
+
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
 // Renders the session tab bar with horizontal scrolling.
@@ -2620,9 +3153,33 @@ func (m Model) renderPaletteWithFilter() string {
 		" filter: "+m.commandPalette.Filter()+"_",
 	) + "\n")
 	b.WriteString(strings.Repeat("─", 40) + "\n")
-	for i, item := range items {
+
+	maxItems := len(items)
+	budget := m.itemBudget(3, 0)
+	if budget < maxItems {
+		maxItems = budget
+	}
+
+	start := 0
+	sel := m.commandPalette.SelectedIndex()
+	if len(items) > maxItems {
+		start = sel - maxItems/2
+		if start+maxItems > len(items) {
+			start = len(items) - maxItems
+		}
+		if start < 0 {
+			start = 0
+		}
+	}
+	end := start + maxItems
+	if end > len(items) {
+		end = len(items)
+	}
+
+	for i := start; i < end; i++ {
+		item := items[i]
 		prefix := "  "
-		if i == m.commandPalette.SelectedIndex() {
+		if i == sel {
 			prefix = "▸ "
 		}
 		b.WriteString(fmt.Sprintf("%s%s  %s\n",
@@ -2634,7 +3191,8 @@ func (m Model) renderPaletteWithFilter() string {
 	if len(items) == 0 {
 		b.WriteString(m.theme.PopupDesc.Render("  (no matches)") + "\n")
 	}
-	return b.String()
+
+	return strings.TrimSuffix(b.String(), "\n")
 }
 
 // Routes key events when the command palette is visible.
@@ -2648,8 +3206,18 @@ func (m Model) handlePaletteKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.commandPalette.Dismiss()
 		return m, nil
 	case tea.KeyEnter:
-		m.commandPalette.Execute()
-		return m, nil
+		slash := m.commandPalette.Execute()
+		if slash == "" {
+			m.output = append(m.output, outputEntry{
+				kind: "error",
+				text: "No command selected.",
+			})
+			m.syncViewport()
+			return m, nil
+		}
+		// Dispatch through the shared submit path so the command
+		// behaves identically to typing it.
+		return m, func() tea.Msg { return submitMsg{text: slash} }
 	case tea.KeyUp:
 		m.commandPalette.MoveUp()
 		return m, nil

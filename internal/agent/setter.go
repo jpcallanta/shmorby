@@ -162,6 +162,8 @@ func (co *ConfigOverrider) Set(param, value string) (msg string, err error) {
 	// --- TUI ---
 	case "tui.fullscreen":
 		return co.setTUIFullscreen(value)
+	case "tui.mouse":
+		return co.setTUIMouse(value)
 	case "tui.theme":
 		return co.setTUITheme(value)
 	case "tui.glamour.enabled":
@@ -186,6 +188,7 @@ func (co *ConfigOverrider) Set(param, value string) (msg string, err error) {
 		"openrouter.api_key", "opencode_zen.api_key",
 		"opencode_zen.base_url",
 		"scope.workdir", "scope.instructions",
+		"tui.theme_files",
 		"memory.db_path", "memory.max_entries",
 		"memory.embedding.provider", "memory.embedding.model",
 		"memory.embedding.base_url", "memory.embedding.dimensions",
@@ -447,6 +450,20 @@ func (co *ConfigOverrider) setTUIFullscreen(value string) (string, error) {
 	}
 	co.cfg.TUI.Fullscreen = b
 	return fmt.Sprintf("tui.fullscreen set to %v (restart to apply)", b), nil
+}
+
+// Sets mouse tracking mode. Note: visual change
+// only takes effect on next program restart (Bubbletea's
+// mouse mode is set at program creation via tea.WithMouseCellMotion).
+func (co *ConfigOverrider) setTUIMouse(value string) (string, error) {
+	b, err := parseBool(value)
+	if err != nil {
+		return "", fmt.Errorf("tui.mouse: %w", err)
+	}
+
+	co.cfg.TUI.Mouse = b
+
+	return fmt.Sprintf("tui.mouse set to %v (restart to apply)", b), nil
 }
 
 // Sets the theme and triggers the theme applier callback.
@@ -775,6 +792,11 @@ func (co *ConfigOverrider) OverrideableParams() []ParamInfo {
 		{
 			Key:          "tui.fullscreen",
 			CurrentValue: boolVal(co.cfg.TUI.Fullscreen),
+			ValidOptions: "true|false", Type: "bool",
+		},
+		{
+			Key:          "tui.mouse",
+			CurrentValue: boolVal(co.cfg.TUI.Mouse),
 			ValidOptions: "true|false", Type: "bool",
 		},
 		{

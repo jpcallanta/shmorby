@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"shmorby/internal/execution"
 	"shmorby/internal/health"
 )
 
@@ -63,6 +64,7 @@ func (OSExecutor) Run(
 		return nil, health.Wrap("exec", time.Since(start),
 			fmt.Errorf("start: %w", err))
 	}
+	execution.SetPID(ctx, cmd.Process.Pid)
 
 	go func() {
 		<-ctx.Done()

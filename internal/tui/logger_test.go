@@ -544,9 +544,8 @@ func TestAgentEventMsg_ToolStartAndEnd(t *testing.T) {
 	if m.currentTool != "" {
 		t.Errorf("currentTool should be empty after tool-end")
 	}
-	// Should re-listen.
-	if cmd == nil {
-		t.Error("expected command to re-listen on channel")
+	if cmd != nil {
+		t.Error("expected no agent-event channel command")
 	}
 	// Tool output should be in output.
 	found := false
@@ -653,30 +652,6 @@ func TestLogCollapseThreshold_AutoCollapse(t *testing.T) {
 	m = updated.(Model)
 	if m.logExpanded {
 		t.Error("should auto-collapse when threshold exceeded")
-	}
-}
-
-// Tests that agent event channel re-listens after message.
-func TestAgentEventChan_ReListen(t *testing.T) {
-	m := NewModel(Config{})
-	ch := m.agentEventChan
-
-	// Send an event.
-	ch <- agent.AgentEvent{
-		Type: "tool-start",
-		Name: "shell",
-		Info: "test",
-	}
-
-	cmd := m.listenAgentEvents()
-	if cmd == nil {
-		t.Fatal("expected non-nil command")
-	}
-
-	// Process the message.
-	msg := cmd()
-	if _, ok := msg.(agentEventMsg); !ok {
-		t.Errorf("expected agentEventMsg, got %T", msg)
 	}
 }
 

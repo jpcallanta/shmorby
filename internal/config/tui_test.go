@@ -2,6 +2,8 @@ package config
 
 import (
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestDefaultConfig_TUINav(t *testing.T) {
@@ -12,26 +14,8 @@ func TestDefaultConfig_TUINav(t *testing.T) {
 	if cfg.TUI.Nav.ScrollLinesPerTick != 5 {
 		t.Errorf("want scroll_lines_per_tick 5, got %d", cfg.TUI.Nav.ScrollLinesPerTick)
 	}
-	if cfg.TUI.Nav.LeaderTimeout != 2000 {
-		t.Errorf("want leader_timeout 2000, got %d", cfg.TUI.Nav.LeaderTimeout)
-	}
 	if cfg.TUI.Nav.HistorySize != 100 {
 		t.Errorf("want history_size 100, got %d", cfg.TUI.Nav.HistorySize)
-	}
-	if cfg.TUI.Nav.Keybinds.Leader != "ctrl+x" {
-		t.Errorf("want leader ctrl+x, got %q", cfg.TUI.Nav.Keybinds.Leader)
-	}
-	if cfg.TUI.Nav.Keybinds.AgentCycle != "tab" {
-		t.Errorf("want agent_cycle tab, got %q", cfg.TUI.Nav.Keybinds.AgentCycle)
-	}
-	if cfg.TUI.Nav.Keybinds.AgentCycleReverse != "shift+tab" {
-		t.Errorf("want agent_cycle_reverse shift+tab, got %q", cfg.TUI.Nav.Keybinds.AgentCycleReverse)
-	}
-	if cfg.TUI.Nav.Keybinds.CommandList != "ctrl+p" {
-		t.Errorf("want command_list ctrl+p, got %q", cfg.TUI.Nav.Keybinds.CommandList)
-	}
-	if cfg.TUI.Nav.Keybinds.HistorySearch != "ctrl+r" {
-		t.Errorf("want history_search ctrl+r, got %q", cfg.TUI.Nav.Keybinds.HistorySearch)
 	}
 }
 
@@ -39,5 +23,45 @@ func TestDefaultConfig_TUINavScrolling(t *testing.T) {
 	cfg := defaultConfig()
 	if cfg.TUI.Nav.ScrollAcceleration.Enabled {
 		t.Error("scroll acceleration should be disabled by default")
+	}
+}
+
+// Tests that theme_files defaults to unset and parses from YAML.
+func TestConfigParse_ThemeFiles(t *testing.T) {
+	cfg := defaultConfig()
+	if len(cfg.TUI.ThemeFiles) != 0 {
+		t.Errorf("want no theme_files by default, got %v", cfg.TUI.ThemeFiles)
+	}
+
+	var parsed Config
+	in := []byte("tui:\n  theme: nord\n" +
+		"  theme_files:\n    - ~/.config/shmorby/themes.yaml\n")
+	if err := yaml.Unmarshal(in, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(parsed.TUI.ThemeFiles) != 1 ||
+		parsed.TUI.ThemeFiles[0] != "~/.config/shmorby/themes.yaml" {
+		t.Errorf("want one theme_files entry, got %v", parsed.TUI.ThemeFiles)
+	}
+}
+
+// Tests that mouse tracking defaults to false as an intent guard.
+func TestDefaultConfig_TUIMouse(t *testing.T) {
+	cfg := defaultConfig()
+
+	if cfg.TUI.Mouse {
+		t.Error("want mouse tracking false by default")
+	}
+}
+
+// Tests that mouse tracking parses from YAML.
+func TestConfigParse_TUIMouse(t *testing.T) {
+	var parsed Config
+	in := []byte("tui:\n  mouse: true\n")
+	if err := yaml.Unmarshal(in, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !parsed.TUI.Mouse {
+		t.Error("want mouse tracking true from YAML")
 	}
 }

@@ -125,8 +125,7 @@ func TestLogger_Concurrent(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-
-	time.Sleep(300 * time.Millisecond)
+	logger.Close()
 
 	entries, err := store.QueryEntries(QueryFilter{
 		SessionID: "conc-logger",
@@ -140,19 +139,77 @@ func TestLogger_Concurrent(t *testing.T) {
 	}
 }
 
-func TestLogger_PermissionFlush(t *testing.T) {
+func TestLogger_RequiredWritesSynchronously(t *testing.T) {
+	store := newTestStore(t)
+	logger := NewLoggerWithDelivery(
+		store, 1, time.Hour, 65536, "required",
+	)
+	defer logger.Close()
+
+	for i := 0; i < 10; i++ {
+		if err := logger.LogToolRun(AuditEntry{
+			SessionID: "required-test",
+			Tool:      "shell",
+			Args:      "{}",
+		}, nil); err != nil {
+			t.Fatalf("LogToolRun: %v", err)
+		}
+	}
+	entries, err := store.QueryEntries(QueryFilter{
+		SessionID: "required-test",
+	})
+	if err != nil {
+		t.Fatalf("QueryEntries: %v", err)
+	}
+	if len(entries) != 10 {
+		t.Errorf("entries = %d, want 10 persisted before return", len(entries))
+	}
+	if got := logger.Dropped(); got != 0 {
+		t.Errorf("Dropped = %d, want 0", got)
+	}
+}
+
+func TestLogger_RequiredWriteFailureReturnsError(t *testing.T) {
+	store := newTestStore(t)
+	logger := NewLoggerWithDelivery(
+		store, 1, time.Hour, 65536, "required",
+	)
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close store: %v", err)
+	}
+	if err := logger.LogLifecycleSync(LifecycleEvent{
+		Type: "execution_started", ExecutionID: "exec-1",
+	}); err == nil {
+		t.Fatal("LogLifecycleSync error = nil, want persistence error")
+	}
+	logger.Close()
+}
+
+func TestLogger_BufferFullCountsDrop(t *testing.T) {
+	logger := &Logger{flushCh: make(chan auditEvent, 1)}
+	logger.flushCh <- auditEvent{}
+
+	if err := logger.LogToolRun(AuditEntry{Tool: "shell"}, nil); err != nil {
+		t.Fatalf("LogToolRun: %v", err)
+	}
+	if got := logger.Dropped(); got != 1 {
+		t.Errorf("Dropped = %d, want 1", got)
+	}
+}
+
+func TestLogger_PermissionSync(t *testing.T) {
 	store := newTestStore(t)
 	logger := NewLogger(store, 100, 100*time.Millisecond, 65536)
 	defer logger.Close()
 
-	logger.LogPermission(PermissionAudit{
+	if err := logger.LogPermissionSync(PermissionAudit{
 		SessionID: "perm-test",
 		Tool:      "shell",
 		Command:   "ls",
 		Decision:  "allow",
-	})
-
-	time.Sleep(300 * time.Millisecond)
+	}); err != nil {
+		t.Fatalf("LogPermissionSync: %v", err)
+	}
 
 	perms, err := store.QueryPermissions(QueryFilter{SessionID: "perm-test"})
 	if err != nil {

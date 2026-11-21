@@ -1,21 +1,39 @@
 package session
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 
 	"shmorby/internal/llm"
+	"shmorby/internal/util"
+	"shmorby/internal/xdg"
 	"shmorby/internal/xuuid"
 )
+
+// ImageRef points at an image persisted next to the session store.
+// Only the path is stored in sessions.db; the bytes live as separate
+// files under the XDG data dir so multi-MiB base64 never bloats the
+// database and resume can re-read them.
+type ImageRef struct {
+	MediaType string `json:"media_type"`
+	Path      string `json:"path"` // data-dir relative
+}
 
 // Message represents a single message in the conversation.
 type Message struct {
 	Role       string         `json:"role"`
 	Content    string         `json:"content"`
+	InputID    string         `json:"input_id,omitempty"`
 	ToolName   string         `json:"tool_name,omitempty"`
 	ToolCallID string         `json:"tool_call_id,omitempty"`
 	ToolCalls  []llm.ToolCall `json:"tool_calls,omitempty"`
+	Images     []ImageRef     `json:"images,omitempty"`
 }
 
 // MaxSessionMessages bounds the in-memory history as a
@@ -243,6 +261,91 @@ func (s *Session) Append(role, content string) {
 	s.appendLocked(Message{Role: role, Content: content})
 }
 
+// Returns a user input by idempotency key, checking the live window
+// first and then the store so the lookup survives compression.
+func (s *Session) FindInput(inputID string) (Message, bool) {
+	if inputID == "" {
+		return Message{}, false
+	}
+
+	s.mu.Lock()
+	for _, m := range s.messages {
+		if m.InputID == inputID {
+			s.mu.Unlock()
+
+			return m, true
+		}
+	}
+	store := s.store
+	id := s.id
+	s.mu.Unlock()
+
+	if store == nil {
+		return Message{}, false
+	}
+
+	m, ok, err := store.FindInput(id, inputID)
+	if err != nil {
+		slog.Warn("session: find input failed",
+			"session", id, "input", inputID, "err", err)
+
+		return Message{}, false
+	}
+
+	return m, ok
+}
+
+// Returns the assistant reply after a user input, checking the live
+// window first and then the store. Tool-call scaffolding is skipped
+// so a retry cannot replay the user's own prompt.
+func (s *Session) FindInputReply(
+	inputID string,
+) (Message, bool) {
+	if inputID == "" {
+		return Message{}, false
+	}
+
+	s.mu.Lock()
+	idx := -1
+	for i, m := range s.messages {
+		if m.InputID == inputID {
+			idx = i
+
+			break
+		}
+	}
+	if idx >= 0 {
+		for _, m := range s.messages[idx+1:] {
+			if m.Role == "user" {
+				break
+			}
+			if m.Role == "assistant" && len(m.ToolCalls) == 0 &&
+				m.Content != "" {
+				s.mu.Unlock()
+
+				return m, true
+			}
+		}
+	}
+	store := s.store
+	id := s.id
+	s.mu.Unlock()
+
+	if store == nil {
+		return Message{}, false
+	}
+
+	m, ok, err := store.FindInputReply(id, inputID)
+	if err != nil {
+		slog.Warn("session: find input reply failed",
+			"session", id, "input", inputID, "err", err)
+
+		return Message{}, false
+	}
+
+	return m, ok
+}
+
 // Appends multiple messages in a single locked operation.
 func (s *Session) AppendMessages(msgs []Message) {
 	s.appendLocked(msgs...)
@@ -275,6 +378,11 @@ func (s *Session) appendLocked(msgs ...Message) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	msgs = s.dedupeInputsLocked(msgs)
+	if len(msgs) == 0 {
+		return
+	}
+
 	if s.store == nil {
 		s.messages = append(s.messages, msgs...)
 		s.trimLocked()
@@ -294,6 +402,37 @@ func (s *Session) appendLocked(msgs ...Message) {
 		(!s.rowSaved && before > 0)
 
 	s.persistLocked(msgs, fullMirror)
+}
+
+// Drops a duplicate input and everything after it from the batch so
+// a repeated submission cannot append a second assistant turn.
+// Callers hold s.mu.
+func (s *Session) dedupeInputsLocked(
+	msgs []Message,
+) []Message {
+	if len(msgs) == 0 {
+		return msgs
+	}
+
+	seen := make(map[string]bool, len(s.messages)+len(msgs))
+	for _, m := range s.messages {
+		if m.InputID != "" {
+			seen[m.InputID] = true
+		}
+	}
+
+	out := make([]Message, 0, len(msgs))
+	for _, m := range msgs {
+		if m.InputID != "" {
+			if seen[m.InputID] {
+				break
+			}
+			seen[m.InputID] = true
+		}
+		out = append(out, m)
+	}
+
+	return out
 }
 
 // Clears all messages from the session. With a bound store the
@@ -362,7 +501,147 @@ func (s *Session) Messages() []Message {
 			result[i].ToolCalls = make([]llm.ToolCall, len(m.ToolCalls))
 			copy(result[i].ToolCalls, m.ToolCalls)
 		}
+		if len(m.Images) > 0 {
+			result[i].Images = make([]ImageRef, len(m.Images))
+			copy(result[i].Images, m.Images)
+		}
 	}
 
 	return result
+}
+
+// Size caps for persisted images, as defense-in-depth for the
+// agent loop and any non-TUI path (the TUI enforces MaxImageBytes
+// itself at attach time). Oversized or over-budget images are
+// dropped with a warning rather than failing the turn.
+const (
+	MaxImageBytes      = 20 << 20
+	MaxImagesTotalSize = 40 << 20
+)
+
+// Saves image bytes as content-addressed files under the XDG data
+// dir (images/<sessionID>/<sha256><ext>) and returns one ImageRef
+// per image. Files are 0600 inside 0700 directories, matching the
+// sessions.db privacy stance. Unrecognizable, oversized, or
+// unwritable images are dropped with a warning rather than failing
+// the turn.
+func SaveImages(sessionID string, images []llm.ImageData) []ImageRef {
+	if len(images) == 0 {
+		return nil
+	}
+
+	refs := make([]ImageRef, 0, len(images))
+	total := 0
+
+	for _, img := range images {
+		if len(img.Data) > MaxImageBytes ||
+			total+len(img.Data) > MaxImagesTotalSize {
+			slog.Warn("session: dropping over-cap image",
+				"bytes", len(img.Data),
+				"persisted_total", total)
+
+			continue
+		}
+		media, ext := util.SniffImageType(img.Data)
+		if media == "" {
+			slog.Warn("session: dropping unrecognized image data")
+
+			continue
+		}
+
+		sum := sha256.Sum256(img.Data)
+		rel := filepath.Join(
+			"images", sessionID, hex.EncodeToString(sum[:])+ext,
+		)
+		abs, err := resolveImageRef(rel)
+		if err != nil {
+			slog.Warn("session: image path rejected", "err", err)
+
+			continue
+		}
+		if err := writeImageFile(abs, img.Data); err != nil {
+			slog.Warn("session: image write failed", "err", err)
+
+			continue
+		}
+		refs = append(refs, ImageRef{MediaType: media, Path: rel})
+		total += len(img.Data)
+	}
+
+	return refs
+}
+
+// Reads the bytes for a persisted image reference, resolving the
+// data-dir-relative path.
+func LoadImage(ref ImageRef) ([]byte, error) {
+	abs, err := resolveImageRef(ref.Path)
+	if err != nil {
+		return nil, err
+	}
+
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		return nil, fmt.Errorf("read image %s: %w", ref.Path, err)
+	}
+
+	return data, nil
+}
+
+// Loads the bytes for persisted image refs as llm image data. Refs
+// whose file is missing or unreadable are skipped with a warning so
+// content drift after a resume never hard-fails a request.
+func LoadImages(refs []ImageRef) []llm.ImageData {
+	if len(refs) == 0 {
+		return nil
+	}
+
+	images := make([]llm.ImageData, 0, len(refs))
+	for _, ref := range refs {
+		data, err := LoadImage(ref)
+		if err != nil {
+			slog.Warn("image load failed; skipping",
+				"path", ref.Path, "err", err)
+
+			continue
+		}
+		images = append(images, llm.ImageData{
+			MediaType: ref.MediaType,
+			Data:      data,
+		})
+	}
+
+	return images
+}
+
+// Resolves a data-dir-relative image path and rejects anything that
+// escapes the data dir (paths come from sessions.db, so a corrupted
+// row must not be able to read arbitrary files).
+func resolveImageRef(rel string) (string, error) {
+	if rel == "" {
+		return "", fmt.Errorf("empty image path")
+	}
+	abs := filepath.Join(xdg.UserDataDir(), rel)
+	clean := filepath.Clean(abs)
+	dataDir := filepath.Clean(xdg.UserDataDir())
+	if !strings.HasPrefix(
+		clean+string(filepath.Separator),
+		dataDir+string(filepath.Separator),
+	) {
+		return "", fmt.Errorf("image path %q escapes data dir", rel)
+	}
+
+	return clean, nil
+}
+
+// Writes image bytes at abs, creating 0700 parent dirs. Existing
+// files (content-addressed dedupe) are rewritten in place.
+func writeImageFile(abs string, data []byte) error {
+	if err := os.MkdirAll(filepath.Dir(abs), 0o700); err != nil {
+		return fmt.Errorf("create image dir: %w", err)
+	}
+	if err := os.WriteFile(abs, data, 0o600); err != nil {
+		return fmt.Errorf("write image: %w", err)
+	}
+
+	return nil
 }
